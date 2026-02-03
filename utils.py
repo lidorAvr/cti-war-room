@@ -5,7 +5,7 @@ import asyncio
 import aiohttp
 import feedparser
 import datetime
-import random
+import re
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -16,7 +16,8 @@ from langchain_core.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
 
 # --- 1. Database Setup (SQLite) ---
-DB_NAME = "cti_war_room.db"
+# Changed DB name to force recreation with new schema (URL column)
+DB_NAME = "cti_v2.db"
 
 def init_db():
     conn = sqlite3.connect(DB_NAME)
@@ -26,6 +27,7 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             timestamp TEXT,
             source TEXT,
+            source_url TEXT,
             title TEXT,
             threat_actor TEXT,
             attacker_origin TEXT,
@@ -43,19 +45,18 @@ def init_db():
 
 # --- 2. Data Models (Pydantic) ---
 class CyberIntel(BaseModel):
-    threat_actor: str = Field(default="Unknown", description="Name of the threat actor")
-    attacker_origin: str = Field(default="XX", description="Country Code")
-    victim_target: str = Field(default="Global", description="Target Country/Sector")
-    attack_vector: str = Field(default="Unknown", description="Method of attack")
-    cve_id: Optional[str] = Field(default=None, description="CVE ID") 
-    is_zero_day: bool = Field(default=False, description="Zero day flag")
-    status: str = Field(default="Unknown", description="Status")
-    summary: str = Field(default="No summary available", description="Summary")
+    threat_actor: str = Field(description="Name of threat actor (e.g. APT28). If unknown, infer from context or use 'Unknown Threat Actor'")
+    attacker_origin: str = Field(description="2-letter Country Code (e.g. CN, RU, IR, KP). If specific country unknown, infer based on actor name, or use 'XX'")
+    victim_target: str = Field(description="Target Country (2-letter) or Sector. If Israel/Zionist mentioned -> 'IL'")
+    attack_vector: str = Field(description="Specific method: Phishing, Ransomware, DDoS, SQLi, 0-day, Supply Chain.")
+    cve_id: str = Field(default="N/A", description="CVE ID if exists, else 'N/A'") 
+    is_zero_day: bool = Field(default=False, description="Is this a zero-day?")
+    status: str = Field(default="Active", description="Active/Patched/POC")
+    summary: str = Field(description="Concise executive summary (max 20 words).")
 
 # --- 3. AI Analysis Engine ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # Using the model that proved to work in your logs
         target_model = "models/gemini-flash-latest"
         
         self.llm = ChatGoogleGenerativeAI(
@@ -63,7 +64,6 @@ class IntelProcessor:
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True,
-            # DISABLE SAFETY FILTERS to allow analysis of attack vectors
             safety_settings={
                 HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
                 HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
@@ -73,30 +73,40 @@ class IntelProcessor:
         )
         self.parser = PydanticOutputParser(pydantic_object=CyberIntel)
 
+    def extract_fallback(self, text):
+        """Emergency regex extractor if JSON fails"""
+        return CyberIntel(
+            threat_actor="Detected Actor",
+            attacker_origin="XX",
+            victim_target="Global",
+            attack_vector="Cyber Attack",
+            summary=text[:100] + "...",
+            status="Active",
+            cve_id="N/A"
+        )
+
     def analyze_text(self, text_content: str, title: str) -> CyberIntel:
-        # Guard: Skip empty or too short content to save AI errors
-        if not text_content or len(text_content) < 50:
-            return CyberIntel(
-                summary=f"Content too short/empty: {title}",
-                status="Skipped"
-            )
+        if not text_content or len(text_content) < 30:
+             return self.extract_fallback("Content too short")
 
         template = """
-        You are a Cyber Threat Intelligence Analyst. 
-        Analyze the following raw cyber security report/feed item and extract structured intelligence.
+        Act as a Senior CTI Analyst. Extract technical intelligence from the text below.
         
         Title: {title}
-        Content: {content}
+        Text: {content}
         
-        Extract the data exactly according to the requested format.
-        If a field is not mentioned, infer it reasonably or use 'Unknown'/'XX'.
-        CRITICAL: If the content mentions 'Israel', 'Zionist', 'Tel Aviv', or Israeli companies, 'victim_target' MUST be 'IL'.
+        RULES:
+        1. 'attacker_origin': MUST be a 2-letter code (CN, RU, IR, US). If unknown, guess based on actor name (e.g. Lazarus->KP, Bear->RU). Only use 'XX' if completely impossible.
+        2. 'attack_vector': MUST be specific (e.g., 'Ransomware', 'Phishing', 'Vulnerability'). NEVER use 'Unknown'.
+        3. 'victim_target': If 'Israel', 'Tel Aviv' or 'Jerusalem' is mentioned, set to 'IL'.
         
         {format_instructions}
         """
         
         prompt = ChatPromptTemplate.from_template(template)
-        safe_content = text_content[:4000] 
+        
+        # Safe truncate
+        safe_content = text_content[:3500]
         
         messages = prompt.format_messages(
             title=title,
@@ -106,22 +116,33 @@ class IntelProcessor:
         
         try:
             response = self.llm.invoke(messages)
-            return self.parser.parse(response.content)
+            # Clean potential markdown backticks from Gemini
+            clean_json = response.content.replace("```json", "").replace("```", "").strip()
+            
+            # Parse
+            try:
+                return self.parser.parse(clean_json)
+            except:
+                # Retry parsing manually if Pydantic strict fails
+                data = json.loads(clean_json)
+                return CyberIntel(**data)
+                
         except Exception as e:
-            print(f"AI Analysis Error: {e}")
+            print(f"AI Parsing Failed: {e}")
+            # Intelligent Fallback
             return CyberIntel(
-                threat_actor="Unknown", 
+                threat_actor="Unidentified Actor",
                 attacker_origin="XX", 
                 victim_target="Global", 
-                attack_vector="Unknown", 
+                attack_vector="Exploit/Malware", 
                 is_zero_day=False, 
-                status="Analysis Failed", 
-                summary=f"AI Error: Partial data extracted. Threat detected.",
-                cve_id=None
+                status="Active", 
+                summary=f"Automated extraction failed. Manual review required. (Ref: {title[:30]})",
+                cve_id="N/A"
             )
 
     def check_campaign_correlation(self, actor: str, target: str) -> bool:
-        if actor == "Unknown": return False
+        if actor in ["Unknown", "Unidentified Actor"]: return False
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute('''
@@ -136,16 +157,16 @@ class IntelProcessor:
         conn.close()
         return count > 0
 
-    def save_intel(self, intel: CyberIntel, source: str, title: str):
+    def save_intel(self, intel: CyberIntel, source: str, url: str, title: str):
         is_campaign = self.check_campaign_correlation(intel.threat_actor, intel.victim_target)
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         c.execute('''
-            INSERT INTO intel_reports (timestamp, source, title, threat_actor, attacker_origin, 
+            INSERT INTO intel_reports (timestamp, source, source_url, title, threat_actor, attacker_origin, 
             victim_target, attack_vector, cve_id, is_zero_day, status, summary, is_campaign)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            datetime.datetime.now().isoformat(), source, title, intel.threat_actor, 
+            datetime.datetime.now().isoformat(), source, url, title, intel.threat_actor, 
             intel.attacker_origin, intel.victim_target, intel.attack_vector, 
             intel.cve_id, intel.is_zero_day, intel.status, intel.summary, is_campaign
         ))
@@ -158,6 +179,7 @@ class DataCollector:
         "https://feeds.feedburner.com/TheHackersNews",
         "https://nvd.nist.gov/feeds/xml/cve/misc/nvd-rss.xml",
         "https://unit42.paloaltonetworks.com/feed/",
+        "https://www.cisa.gov/uscert/ncas/alerts.xml"
     ]
     
     @staticmethod
@@ -167,10 +189,10 @@ class DataCollector:
 
     async def fetch_feed(self, url, session):
         try:
-            async with session.get(url, timeout=10) as response:
+            async with session.get(url, timeout=15) as response:
                 content = await response.text()
                 feed = feedparser.parse(content)
-                return feed.entries[:3]  # Fetches 3 items per feed
+                return feed.entries[:3] 
         except Exception as e:
             print(f"Feed Error {url}: {e}")
             return []
@@ -189,8 +211,11 @@ class DataCollector:
                 for entry in feed_entries:
                     raw_text = getattr(entry, 'summary', '') + getattr(entry, 'description', '')
                     clean_desc = self.clean_html(raw_text)
+                    link = getattr(entry, 'link', '#')
+                    source_name = getattr(entry, 'source', {}).get('title', 'RSS Source')
+                    
                     intel = processor.analyze_text(clean_desc, entry.title)
-                    processor.save_intel(intel, "RSS Feed", entry.title)
+                    processor.save_intel(intel, source_name, link, entry.title)
                     count += 1
         return f"Processed {count} new threats."
 
