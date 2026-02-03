@@ -53,16 +53,17 @@ class CyberIntel(BaseModel):
     status: str = Field(default="Unknown", description="Status")
     summary: str = Field(default="No summary available", description="Summary")
 
-# --- 3. AI Analysis Engine (Force Flash Model) ---
+# --- 3. AI Analysis Engine ---
 class IntelProcessor:
     def __init__(self, api_key):
         genai.configure(api_key=api_key)
         
-        # Priority list of FREE/FAST models only
+        # CHANGED PRIORITY: forcing 1.5-flash which has the stable free tier
         priority_models = [
-            "gemini-2.0-flash",
             "gemini-1.5-flash",
-            "gemini-flash-latest"
+            "gemini-1.5-flash-latest",
+            "gemini-1.5-flash-001",
+            "gemini-pro"
         ]
         
         selected_model = "gemini-1.5-flash" # Default fallback
@@ -70,16 +71,16 @@ class IntelProcessor:
         try:
             # List available models
             my_models = [m.name for m in genai.list_models()]
-            print(f"Available: {my_models}")
+            print(f"Available in Account: {my_models}")
             
-            # Pick the first matching Flash model
+            # Pick the first matching stable model
             for priority in priority_models:
                 found = next((m for m in my_models if priority in m), None)
                 if found:
                     selected_model = found
                     break
             
-            print(f"FORCE SELECTED FLASH MODEL: {selected_model}")
+            print(f"FINAL SELECTED MODEL: {selected_model}")
             
         except Exception as e:
             print(f"Model selection error: {e}")
