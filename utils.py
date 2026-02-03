@@ -14,7 +14,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
-import google.generativeai as genai
 
 # --- 1. Database Setup (SQLite) ---
 DB_NAME = "cti_war_room.db"
@@ -56,37 +55,14 @@ class CyberIntel(BaseModel):
 # --- 3. AI Analysis Engine ---
 class IntelProcessor:
     def __init__(self, api_key):
-        genai.configure(api_key=api_key)
+        # We are forcing 'gemini-flash-latest' which appeared in your available list
+        # and typically has free tier access.
+        target_model = "models/gemini-flash-latest"
         
-        # CHANGED PRIORITY: forcing 1.5-flash which has the stable free tier
-        priority_models = [
-            "gemini-1.5-flash",
-            "gemini-1.5-flash-latest",
-            "gemini-1.5-flash-001",
-            "gemini-pro"
-        ]
-        
-        selected_model = "gemini-1.5-flash" # Default fallback
-        
-        try:
-            # List available models
-            my_models = [m.name for m in genai.list_models()]
-            print(f"Available in Account: {my_models}")
-            
-            # Pick the first matching stable model
-            for priority in priority_models:
-                found = next((m for m in my_models if priority in m), None)
-                if found:
-                    selected_model = found
-                    break
-            
-            print(f"FINAL SELECTED MODEL: {selected_model}")
-            
-        except Exception as e:
-            print(f"Model selection error: {e}")
+        print(f"Attempting to use model: {target_model}")
 
         self.llm = ChatGoogleGenerativeAI(
-            model=selected_model, 
+            model=target_model, 
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True
