@@ -8,14 +8,14 @@ import datetime
 import random
 from typing import List, Optional
 from pydantic import BaseModel, Field
+
+# --- Updated Imports for LangChain v0.1+ ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
 
 # --- 1. Database Setup (SQLite) ---
-# Note: On Streamlit Cloud free tier, SQLite resets on reboot. 
-# For true persistence, use Supabase (Free Tier) later.
 DB_NAME = "cti_war_room.db"
 
 def init_db():
@@ -109,7 +109,11 @@ class IntelProcessor:
             SELECT count(*) FROM intel_reports 
             WHERE threat_actor = ? AND victim_target = ? AND timestamp > date('now', '-7 days')
         ''', (actor, target))
-        count = c.fetchone()[0]
+        try:
+            result = c.fetchone()
+            count = result[0] if result else 0
+        except:
+            count = 0
         conn.close()
         return count > 0
 
@@ -185,6 +189,9 @@ def get_coords(code):
 def get_all_intel():
     conn = sqlite3.connect(DB_NAME)
     import pandas as pd
-    df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY id DESC", conn)
+    try:
+        df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY id DESC", conn)
+    except:
+        df = pd.DataFrame()
     conn.close()
     return df
