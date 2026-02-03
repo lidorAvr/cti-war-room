@@ -55,9 +55,9 @@ class CyberIntel(BaseModel):
 # --- 3. AI Analysis Engine (Google Gemini) ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # Using Gemini 1.5 Flash for speed and free tier efficiency
+        # FIX: Changed model to 'gemini-pro' which is supported by older libs
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash", 
+            model="gemini-pro", 
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True
