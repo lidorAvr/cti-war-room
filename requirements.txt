@@ -1,0 +1,12 @@
+streamlit
+pandas
+plotly
+pydeck
+langchain
+langchain-google-genai
+pydantic
+feedparser
+beautifulsoup4
+aiohttp
+python-dotenv
+html5lib
