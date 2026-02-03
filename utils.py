@@ -14,7 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
-import google.generativeai as genai  # Direct access to check models
+import google.generativeai as genai
 
 # --- 1. Database Setup (SQLite) ---
 DB_NAME = "cti_war_room.db"
@@ -53,40 +53,37 @@ class CyberIntel(BaseModel):
     status: str = Field(default="Unknown", description="Status")
     summary: str = Field(default="No summary available", description="Summary")
 
-# --- 3. AI Analysis Engine (Auto-Detect Model) ---
+# --- 3. AI Analysis Engine (Force Flash Model) ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # 1. Configure the raw API to find available models
         genai.configure(api_key=api_key)
         
-        selected_model = "gemini-1.5-flash" # Fallback default
+        # Priority list of FREE/FAST models only
+        priority_models = [
+            "gemini-2.0-flash",
+            "gemini-1.5-flash",
+            "gemini-flash-latest"
+        ]
+        
+        selected_model = "gemini-1.5-flash" # Default fallback
         
         try:
-            # List all models available to this key
-            available_models = []
-            for m in genai.list_models():
-                if 'generateContent' in m.supported_generation_methods:
-                    available_models.append(m.name)
+            # List available models
+            my_models = [m.name for m in genai.list_models()]
+            print(f"Available: {my_models}")
             
-            # Logic to pick the best one
-            print(f"Available Models for Key: {available_models}")
+            # Pick the first matching Flash model
+            for priority in priority_models:
+                found = next((m for m in my_models if priority in m), None)
+                if found:
+                    selected_model = found
+                    break
             
-            if any("gemini-1.5-flash" in m for m in available_models):
-                # Prefer Flash (fastest)
-                selected_model = next(m for m in available_models if "gemini-1.5-flash" in m)
-            elif any("gemini-pro" in m for m in available_models):
-                # Fallback to Pro
-                selected_model = next(m for m in available_models if "gemini-pro" in m)
-            elif available_models:
-                # Take whatever is there
-                selected_model = available_models[0]
-                
-            print(f"Selected Model: {selected_model}")
+            print(f"FORCE SELECTED FLASH MODEL: {selected_model}")
             
         except Exception as e:
-            print(f"Model Discovery Failed: {e}, using default.")
+            print(f"Model selection error: {e}")
 
-        # 2. Initialize LangChain with the discovered model
         self.llm = ChatGoogleGenerativeAI(
             model=selected_model, 
             temperature=0,
