@@ -3,6 +3,7 @@ import pandas as pd
 import pydeck as pdk
 import plotly.express as px
 import asyncio
+import time
 from utils import init_db, DataCollector, get_all_intel, get_coords
 
 # --- Config & Styling ---
@@ -15,34 +16,55 @@ st.markdown("""
     h1, h2, h3 { color: #00ff41 !important; font-family: 'Courier New', monospace; }
     div[data-testid="stMetricValue"] { color: #ff4b4b; }
     .stExpander { border: 1px solid #30363d; border-radius: 5px; }
+    div[data-testid="stLinkButton"] > a {
+        background-color: #1f77b4; color: white; border: none; padding: 5px 10px; text-decoration: none; border-radius: 4px;
+    }
     </style>
     """, unsafe_allow_html=True)
 
-# --- Init ---
+# --- Init DB ---
 init_db()
+
+# --- Auto-Refresh Logic (15 Mins) ---
+if 'last_run' not in st.session_state:
+    st.session_state['last_run'] = time.time()
 
 # --- Sidebar ---
 with st.sidebar:
-    st.header("⚙️ SYSTEM CONTROLS")
+    st.header("⚙️ OPERATIONS")
     api_key = st.text_input("Google API Key", type="password")
     
-    if st.button("🔄 INITIATE SCAN"):
+    # Manual Trigger
+    if st.button("🔄 FORCE SCAN"):
         if api_key:
-            with st.spinner("Collecting Intel..."):
+            with st.spinner("Scanning Sources..."):
                 collector = DataCollector()
                 status = asyncio.run(collector.run_collection_cycle(api_key))
+                st.session_state['last_run'] = time.time()
             st.success(status)
             st.rerun()
         else:
-            st.error("API Key Required!")
+            st.error("Enter API Key")
 
-    st.divider()
+    st.markdown("---")
+    st.markdown("**Auto-Update:** System scans every 15 min.")
+    
     filter_mode = st.radio("Threat Filter", ["All Traffic", "Israel Watch 🇮🇱", "Critical/Zero-Day"])
 
-# --- Data Loading ---
+# --- Background Auto-Runner Hook ---
+# Checks if 15 mins (900 sec) passed since last run
+current_time = time.time()
+if (current_time - st.session_state['last_run'] > 900) and api_key:
+    collector = DataCollector()
+    asyncio.run(collector.run_collection_cycle(api_key))
+    st.session_state['last_run'] = current_time
+    st.toast("System Auto-Updated Sources", icon="🔄")
+    st.rerun()
+
+# --- Load Data ---
 df = get_all_intel()
 
-# --- Filter Logic ---
+# --- Filter ---
 if not df.empty:
     if filter_mode == "Israel Watch 🇮🇱":
         df = df[df['victim_target'] == 'IL']
@@ -51,44 +73,53 @@ if not df.empty:
 
 # --- Metrics ---
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Total Threats", len(df))
+c1.metric("Live Threats (24h)", len(df))
 c2.metric("Zero Days", len(df[df['is_zero_day'] == 1]) if not df.empty else 0)
-c3.metric("High Severity", len(df[df['attack_vector'].str.contains('Ransomware|Exploit', case=False, na=False)]) if not df.empty else 0)
+c3.metric("IL Targeted", len(df[df['victim_target'] == 'IL']) if not df.empty else 0)
 c4.metric("Defcon", "3" if len(df) < 10 else "1")
 
-# --- Map ---
+# --- Map (Fixed) ---
 st.subheader("🌍 LIVE ATTACK MAP")
 if not df.empty:
     map_data = []
     for _, row in df.iterrows():
-        src = get_coords(row['attacker_origin'])
-        dst = get_coords(row['victim_target'])
-        if src != [0,0] and dst != [0,0]:
-            map_data.append({"source": src, "target": dst, "actor": row['threat_actor']})
+        # Force default coordinates if missing so lines always draw
+        src_code = row['attacker_origin'] if row['attacker_origin'] else "XX"
+        dst_code = row['victim_target'] if row['victim_target'] else "Global"
+        
+        src = get_coords(src_code)
+        dst = get_coords(dst_code)
+        
+        map_data.append({
+            "source": src,
+            "target": dst,
+            "actor": row['threat_actor'],
+            "title": row['title']
+        })
 
     layer = pdk.Layer(
         "ArcLayer",
         data=map_data,
         get_source_position="source",
         get_target_position="target",
-        get_width=3,
+        get_width=2,
         get_tilt=15,
-        get_source_color=[255, 0, 0, 180],
-        get_target_color=[0, 255, 65, 180],
+        get_source_color=[255, 0, 0, 200],
+        get_target_color=[0, 255, 0, 200],
     )
-    view_state = pdk.ViewState(latitude=20, longitude=0, zoom=1.5, pitch=45)
-    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, map_style=None))
+    view_state = pdk.ViewState(latitude=30, longitude=10, zoom=1.2, pitch=40)
+    st.pydeck_chart(pdk.Deck(layers=[layer], initial_view_state=view_state, tooltip={"text": "{actor}\n{title}"}))
 else:
-    st.info("Awaiting Intelligence Data...")
+    st.info("System initializing... Waiting for data.")
 
-# --- Feed ---
+# --- Feed (Fixed Titles) ---
 col1, col2 = st.columns([1, 2])
 
 with col1:
-    st.subheader("📊 ATTACK VECTORS")
+    st.subheader("📊 VECTORS")
     if not df.empty:
-        fig = px.pie(df, names='attack_vector', hole=0.5, template="plotly_dark")
-        fig.update_traces(textposition='inside', textinfo='percent+label')
+        fig = px.pie(df, names='attack_vector', hole=0.6, template="plotly_dark")
+        fig.update_traces(textinfo='label+percent')
         st.plotly_chart(fig, use_container_width=True)
 
 with col2:
@@ -96,22 +127,22 @@ with col2:
     if not df.empty:
         for _, row in df.iterrows():
             color = "red" if row['victim_target'] == 'IL' else "green"
-            flag = "🇮🇱" if row['victim_target'] == 'IL' else ""
+            # TITLE IS NOW THE ARTICLE TITLE (Specific)
+            label = f"[{row['timestamp'][11:16]}] {row['title']}"
             
-            with st.expander(f"[{row['timestamp'][11:16]}] {row['threat_actor']} ➡️ {row['victim_target']} {flag}"):
+            with st.expander(label):
                 c_a, c_b = st.columns(2)
                 with c_a:
+                    st.markdown(f"**Actor:** {row['threat_actor']}")
                     st.markdown(f"**Origin:** {row['attacker_origin']}")
-                    st.markdown(f"**Vector:** {row['attack_vector']}")
                 with c_b:
-                    st.markdown(f"**Status:** {row['status']}")
-                    if row['cve_id'] != 'N/A':
-                        st.markdown(f"**CVE:** `{row['cve_id']}`")
+                    st.markdown(f"**Target:** {row['victim_target']}")
+                    st.markdown(f"**Vector:** {row['attack_vector']}")
                 
+                st.markdown("---")
                 st.markdown(f"**Summary:** :{color}[{row['summary']}]")
                 
-                # LINK BUTTON
                 if row['source_url'] and row['source_url'] != '#':
                     st.link_button("🔗 Read Full Report", row['source_url'])
     else:
-        st.write("System Offline.")
+        st.write("No active threats detected in the last 24h.")
