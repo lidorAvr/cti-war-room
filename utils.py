@@ -9,10 +9,10 @@ import random
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-# --- FIXED IMPORTS: Using standard paths compatible with LangChain 0.1.0 ---
+# --- MODERN IMPORTS (Works with langchain >= 0.2.0) ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain.prompts import ChatPromptTemplate
-from langchain.output_parsers import PydanticOutputParser
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
 
 # --- 1. Database Setup (SQLite) ---
@@ -52,12 +52,12 @@ class CyberIntel(BaseModel):
     status: str = Field(description="Current status: Active, Patched, POC, Rumor.")
     summary: str = Field(description="A short 1-sentence summary of the threat.")
 
-# --- 3. AI Analysis Engine (Google Gemini) ---
+# --- 3. AI Analysis Engine (Google Gemini 1.5 Flash) ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # FIX: Changed model to 'gemini-pro' which is supported by older libs
+        # Using the latest Flash model which is fast and free
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-pro", 
+            model="gemini-1.5-flash", 
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True
