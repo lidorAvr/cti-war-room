@@ -9,10 +9,10 @@ import random
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-# --- Updated Imports for LangChain v0.1+ ---
+# --- FIXED IMPORTS: Using standard paths compatible with LangChain 0.1.0 ---
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import PydanticOutputParser
+from langchain.prompts import ChatPromptTemplate
+from langchain.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
 
 # --- 1. Database Setup (SQLite) ---
@@ -151,7 +151,7 @@ class DataCollector:
             async with session.get(url, timeout=10) as response:
                 content = await response.text()
                 feed = feedparser.parse(content)
-                return feed.entries[:2] # Limit to 2 per feed for speed in this demo
+                return feed.entries[:2] 
         except Exception as e:
             print(f"Feed Error {url}: {e}")
             return []
@@ -174,13 +174,12 @@ class DataCollector:
                     count += 1
         return f"Processed {count} new threats."
 
-# --- 5. Geo Helper & Mock Data ---
-# Map coordinates for Country Codes
+# --- 5. Geo Helper ---
 COUNTRY_COORDS = {
     "US": [-95.7129, 37.0902], "CN": [104.1954, 35.8617], "RU": [105.3188, 61.5240],
     "IL": [34.8516, 31.0461], "IR": [53.6880, 32.4279], "KP": [127.5101, 40.3399],
     "UK": [-3.4360, 55.3781], "DE": [10.4515, 51.1657], "IN": [78.9629, 20.5937],
-    "XX": [0, 0] # Unknown
+    "XX": [0, 0]
 }
 
 def get_coords(code):
