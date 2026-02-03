@@ -47,7 +47,7 @@ class CyberIntel(BaseModel):
     attacker_origin: str = Field(default="XX", description="Country Code")
     victim_target: str = Field(default="Global", description="Target Country/Sector")
     attack_vector: str = Field(default="Unknown", description="Method of attack")
-    cve_id: Optional[str] = Field(default=None, description="CVE ID") # FIXED: Added default=None
+    cve_id: Optional[str] = Field(default=None, description="CVE ID") 
     is_zero_day: bool = Field(default=False, description="Zero day flag")
     status: str = Field(default="Unknown", description="Status")
     summary: str = Field(default="No summary available", description="Summary")
@@ -55,9 +55,9 @@ class CyberIntel(BaseModel):
 # --- 3. AI Analysis Engine ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # Rolling back to 'gemini-pro' for maximum stability
+        # FIXED: Using the latest Flash model supported by new libs
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-pro", 
+            model="gemini-1.5-flash", 
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True
@@ -95,7 +95,7 @@ class IntelProcessor:
             return self.parser.parse(response.content)
         except Exception as e:
             print(f"AI Analysis Error: {e}")
-            # FIXED: Fallback now includes ALL fields to prevent crash
+            # Fallback
             return CyberIntel(
                 threat_actor="Unknown", 
                 attacker_origin="XX", 
