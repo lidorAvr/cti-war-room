@@ -9,7 +9,7 @@ import random
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
-# --- MODERN IMPORTS (Works with langchain >= 0.2.0) ---
+# --- MODERN IMPORTS ---
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
@@ -43,21 +43,21 @@ def init_db():
 
 # --- 2. Data Models (Pydantic) ---
 class CyberIntel(BaseModel):
-    threat_actor: str = Field(description="Name of the threat actor (e.g., APT28, Lazarus, Unknown)")
-    attacker_origin: str = Field(description="Two-letter Country Code of attacker origin (e.g., RU, CN, IR). Use 'XX' if unknown.")
-    victim_target: str = Field(description="Target Country Code or Sector (e.g., IL, US, Finance).")
-    attack_vector: str = Field(description="Method of attack (e.g., Phishing, SQLi, Ransomware).")
-    cve_id: Optional[str] = Field(description="CVE ID if applicable (e.g., CVE-2024-1234).")
-    is_zero_day: bool = Field(description="True if this is a zero-day exploit.")
-    status: str = Field(description="Current status: Active, Patched, POC, Rumor.")
-    summary: str = Field(description="A short 1-sentence summary of the threat.")
+    threat_actor: str = Field(default="Unknown", description="Name of the threat actor")
+    attacker_origin: str = Field(default="XX", description="Country Code")
+    victim_target: str = Field(default="Global", description="Target Country/Sector")
+    attack_vector: str = Field(default="Unknown", description="Method of attack")
+    cve_id: Optional[str] = Field(default=None, description="CVE ID") # FIXED: Added default=None
+    is_zero_day: bool = Field(default=False, description="Zero day flag")
+    status: str = Field(default="Unknown", description="Status")
+    summary: str = Field(default="No summary available", description="Summary")
 
-# --- 3. AI Analysis Engine (Google Gemini 1.5 Flash) ---
+# --- 3. AI Analysis Engine ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # Using the latest Flash model which is fast and free
+        # Rolling back to 'gemini-pro' for maximum stability
         self.llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash", 
+            model="gemini-pro", 
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True
@@ -81,7 +81,7 @@ class IntelProcessor:
         
         prompt = ChatPromptTemplate.from_template(template)
         
-        # Truncate content to avoid token limits
+        # Truncate content 
         safe_content = text_content[:4000] 
         
         messages = prompt.format_messages(
@@ -95,10 +95,16 @@ class IntelProcessor:
             return self.parser.parse(response.content)
         except Exception as e:
             print(f"AI Analysis Error: {e}")
-            # Fallback for demo stability
+            # FIXED: Fallback now includes ALL fields to prevent crash
             return CyberIntel(
-                threat_actor="Unknown", attacker_origin="XX", victim_target="Global", 
-                attack_vector="Unknown", is_zero_day=False, status="Unknown", summary=f"Analysis Failed: {str(e)[:50]}"
+                threat_actor="Unknown", 
+                attacker_origin="XX", 
+                victim_target="Global", 
+                attack_vector="Unknown", 
+                is_zero_day=False, 
+                status="Analysis Failed", 
+                summary=f"AI Error: {str(e)[:50]}",
+                cve_id=None
             )
 
     def check_campaign_correlation(self, actor: str, target: str) -> bool:
