@@ -14,6 +14,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import PydanticOutputParser
 from bs4 import BeautifulSoup
+import google.generativeai as genai  # Direct access to check models
 
 # --- 1. Database Setup (SQLite) ---
 DB_NAME = "cti_war_room.db"
@@ -52,12 +53,42 @@ class CyberIntel(BaseModel):
     status: str = Field(default="Unknown", description="Status")
     summary: str = Field(default="No summary available", description="Summary")
 
-# --- 3. AI Analysis Engine ---
+# --- 3. AI Analysis Engine (Auto-Detect Model) ---
 class IntelProcessor:
     def __init__(self, api_key):
-        # FIX: Trying the explicit latest alias for better availability
+        # 1. Configure the raw API to find available models
+        genai.configure(api_key=api_key)
+        
+        selected_model = "gemini-1.5-flash" # Fallback default
+        
+        try:
+            # List all models available to this key
+            available_models = []
+            for m in genai.list_models():
+                if 'generateContent' in m.supported_generation_methods:
+                    available_models.append(m.name)
+            
+            # Logic to pick the best one
+            print(f"Available Models for Key: {available_models}")
+            
+            if any("gemini-1.5-flash" in m for m in available_models):
+                # Prefer Flash (fastest)
+                selected_model = next(m for m in available_models if "gemini-1.5-flash" in m)
+            elif any("gemini-pro" in m for m in available_models):
+                # Fallback to Pro
+                selected_model = next(m for m in available_models if "gemini-pro" in m)
+            elif available_models:
+                # Take whatever is there
+                selected_model = available_models[0]
+                
+            print(f"Selected Model: {selected_model}")
+            
+        except Exception as e:
+            print(f"Model Discovery Failed: {e}, using default.")
+
+        # 2. Initialize LangChain with the discovered model
         self.llm = ChatGoogleGenerativeAI(
-            model="models/gemini-1.5-flash-latest", 
+            model=selected_model, 
             temperature=0,
             google_api_key=api_key,
             convert_system_message_to_human=True
@@ -80,8 +111,6 @@ class IntelProcessor:
         """
         
         prompt = ChatPromptTemplate.from_template(template)
-        
-        # Truncate content 
         safe_content = text_content[:4000] 
         
         messages = prompt.format_messages(
@@ -95,7 +124,6 @@ class IntelProcessor:
             return self.parser.parse(response.content)
         except Exception as e:
             print(f"AI Analysis Error: {e}")
-            # Fallback
             return CyberIntel(
                 threat_actor="Unknown", 
                 attacker_origin="XX", 
