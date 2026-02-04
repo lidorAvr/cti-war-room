@@ -7,6 +7,7 @@ import re
 import json
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
+import google.generativeai as genai # Import explicitly for version check
 from utils import (init_db, CTICollector, AIBatchProcessor, save_reports, 
                    AbuseIPDBChecker, APTSheetCollector, MitreCollector, 
                    IOCExtractor, ThreatLookup, DB_NAME, get_ioc_type, ConnectionManager)
@@ -42,17 +43,24 @@ st.caption("Integrated Threat Intelligence, Investigation Tools & Global Monitor
 
 # --- SECRET LOADING HELPER ---
 def load_secret(key_name):
-    # מנסה לטעון מ-secrets.toml, אם לא קיים מחזיר מחרוזת ריקה
+    # Try loading from streamlit secrets
     try:
         return st.secrets.get(key_name, "")
     except FileNotFoundError:
         return ""
 
-# --- Sidebar Controls ---
+# --- Sidebar Controls & DEBUG ---
 with st.sidebar:
     st.header("⚙️ System Status")
     
-    # טעינת מפתחות אוטומטית
+    # --- SPY CODE: VERSION CHECK ---
+    try:
+        st.error(f"🔍 Lib Version: {genai.__version__}")
+    except Exception as e:
+        st.error(f"🔍 Lib Error: {str(e)}")
+    # -------------------------------
+    
+    # Load keys
     gemini_key = load_secret("gemini_key")
     abuse_key = load_secret("abuseipdb_key")
     abuse_ch_key = load_secret("abuse_ch_key")
@@ -60,7 +68,7 @@ with st.sidebar:
     urlscan_key = load_secret("urlscan_key")
     cyscan_key = load_secret("cyscan_key")
     
-    # --- בדיקת חיבורים (מבוצעת בלחיצה כדי לחסוך קריאות API) ---
+    # --- Connection Check ---
     if st.button("🔄 Test API Connections"):
         with st.spinner("Checking endpoints..."):
             st.markdown("---")
@@ -77,7 +85,7 @@ with st.sidebar:
             
             # Abuse.ch Check
             ok, msg = ConnectionManager.check_abusech(abuse_ch_key)
-            icon = "✅" if ok else "⚠️" # צהוב כי זה לא קריטי אם נכשל
+            icon = "✅" if ok else "⚠️"
             st.markdown(f"{icon} **Abuse.ch**: {msg}")
 
             # VirusTotal Check
@@ -103,9 +111,14 @@ with st.sidebar:
                 raw = await col.get_all_data()
                 analyzed = await proc.analyze_batch(raw)
                 return save_reports(raw, analyzed)
-            c = asyncio.run(scan())
-            st.success(f"Scan complete. {c} new reports.")
-            st.rerun()
+            
+            # Run async scan
+            try:
+                c = asyncio.run(scan())
+                st.success(f"Scan complete. {c} new reports.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Scan Failed: {str(e)}")
 
 # --- MAIN TABS ---
 tab_feed, tab_tools, tab_landscape, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape", "🗺️ Live Attack Map"])
@@ -156,7 +169,6 @@ with tab_tools:
         col1, col2 = st.columns([3, 1])
         ioc_input = col1.text_input("Enter Indicator", placeholder="e.g. 1.2.3.4, evil.com, or file hash")
         
-        # Session State for AI Report
         if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
         if 'ioc_target' not in st.session_state: st.session_state.ioc_target = None
 
@@ -168,7 +180,6 @@ with tab_tools:
                 ioc_type = get_ioc_type(ioc_input)
                 st.markdown(f"**Detected Type:** `{ioc_type.upper()}`")
                 
-                # Data Aggregation Object
                 intel_data = {"ioc": ioc_input, "type": ioc_type, "timestamp": str(pd.Timestamp.now())}
 
                 # 1. AbuseIPDB
@@ -183,7 +194,7 @@ with tab_tools:
                         st.write(f"ISP: {d['isp']} | {d['countryCode']}")
                     else: st.warning(f"AbuseIPDB: {res.get('error')}")
                 
-                # 2. ThreatFox & URLhaus & VirusTotal & urlscan
+                # 2. Universal Threat Lookup
                 tl = ThreatLookup(abuse_ch_key, vt_key, urlscan_key, cyscan_key)
                 
                 # ThreatFox
@@ -224,7 +235,7 @@ with tab_tools:
                          st.write(f"**Verdict:** {us.get('verdict', {}).get('overall', 'Unknown')}")
                          st.write(f"**Page:** {us.get('page', {}).get('url', 'N/A')}")
                 
-                # CyScan (Direct Link)
+                # CyScan
                 cs = tl.query_cyscan(ioc_input)
                 intel_data['cyscan'] = cs
                 st.markdown(f"#### 🔎 CyScan")
@@ -238,6 +249,7 @@ with tab_tools:
             if st.button("✨ Ask AI Analyst to Summarize"):
                 with st.spinner("AI Analyst is reviewing the evidence..."):
                     proc = AIBatchProcessor(gemini_key)
+                    # Using async run for the single IOC analysis
                     report = asyncio.run(proc.analyze_single_ioc(st.session_state.ioc_target, st.session_state.analysis_results))
                     st.markdown("### 🤖 AI Analyst Report")
                     st.markdown(report)
