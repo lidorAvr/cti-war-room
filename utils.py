@@ -96,7 +96,6 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
-        # We ask for English keys for code logic, but Hebrew Summary
         system_instruction = """
         You are an Israeli CTI Analyst. Analyze cyber news.
         1. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
@@ -132,13 +131,21 @@ class AIBatchProcessor:
         Target: {ioc} ({ioc_type}).
         Raw Data: {json.dumps(data)}
         
-        Output Structure (Response MUST be in Hebrew, but keep technical terms like 'Process Injection' in English):
-        1. **פסיקת מנהלים (Executive Verdict)**: Is it Malicious? Why?
-        2. **ניתוח טכני (Technical Analysis)**: Explain the findings deeply.
-        3. **העשרה (Enrichment)**: General knowledge about this threat type.
-        4. **צעדים להמשך (Next Steps)**: Detailed instructions (Block, Hunt, Log search).
-        
-        Tone: Professional, educational, authoritative. Language: Hebrew.
+        **CRITICAL LANGUAGE INSTRUCTIONS:**
+        1. Write primarily in **HEBREW**.
+        2. **STRICTLY AVOID** English transliteration for technical terms. Use proper Hebrew terms:
+           - Malicious -> **זדוני** (Not "מליציוס")
+           - Suspicious -> **חשוד**
+           - Clean/Harmless -> **נקי**
+           - Vulnerability -> **חולשה**
+           - Attack -> **תקיפה**
+        3. Keep specific tool names or error codes in English (e.g., "HTTP 404", "Cobalt Strike").
+
+        Output Structure (Markdown):
+        1. **פסיקת מנהלים (Verdict)**: Is it זדוני? Why? (Be decisive).
+        2. **ניתוח טכני (Analysis)**: Explain findings.
+        3. **העשרה (Enrichment)**: Context about this threat type.
+        4. **צעדים להמשך (Next Steps)**: Actionable items.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -147,11 +154,17 @@ class AIBatchProcessor:
         Generate Hunting Queries for Actor: {actor['name']}.
         Context: {actor.get('mitre', 'N/A')} | {actor.get('tools', 'N/A')}.
         
-        Provide the following formats (Wrap code in code blocks):
-        1. **Google Chronicle (YARA-L)**
-        2. **Cortex XDR (XQL)**
+        **INSTRUCTIONS:**
+        1. The Code Blocks must be valid syntax (English).
+        2. The **Explanations** describing the logic MUST be in **HEBREW**.
         
-        Explain the logic of each query in Hebrew.
+        Provide:
+        1. **Google Chronicle (YARA-L)**
+           - Code block
+           - Hebrew Explanation of what it hunts for.
+        2. **Cortex XDR (XQL)**
+           - Code block
+           - Hebrew Explanation.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
