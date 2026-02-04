@@ -12,7 +12,6 @@ from dateutil import parser
 
 DB_NAME = "cti_dashboard.db"
 
-# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -28,6 +27,8 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
+    limit = (datetime.datetime.now() - datetime.timedelta(hours=48)).isoformat()
+    c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
     conn.close()
 
@@ -38,62 +39,93 @@ def get_ioc_type(ioc):
     if "http" in ioc: return "url"
     return "domain"
 
-# --- CORE GEMINI LOGIC (Direct HTTP) ---
-async def query_gemini_direct(api_key, prompt):
+# --- CORE: AUTO-DISCOVERY AI LOGIC ---
+async def get_valid_model_name(api_key, session):
+    """
+    שואל את גוגל: איזה מודלים פתוחים לי?
+    מחזיר את השם המדויק של המודל הראשון שעובד.
+    """
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+    try:
+        async with session.get(list_url) as resp:
+            if resp.status != 200:
+                print(f"ListModels Error: {resp.status} - {await resp.text()}")
+                return None
+            
+            data = await resp.json()
+            # אנחנו מחפשים מודל שיודע לייצר טקסט (generateContent)
+            for model in data.get('models', []):
+                if 'generateContent' in model.get('supportedGenerationMethods', []):
+                    # מחזיר שם כמו 'models/gemini-1.5-flash-001'
+                    return model['name']
+    except Exception as e:
+        print(f"Discovery Failed: {e}")
+    return None
+
+async def query_gemini_auto(api_key, prompt):
     if not api_key: return None
     
-    # שימוש במודל היציב ביותר כרגע
-    model = "gemini-1.5-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-    
-    headers = {'Content-Type': 'application/json'}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}]
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession() as session:
+        # שלב 1: גילוי אוטומטי של שם המודל
+        model_name = await get_valid_model_name(api_key, session)
+        
+        if not model_name:
+            return "ERROR: No accessible models found for this API Key. Check Google AI Studio permissions."
+
+        # שלב 2: שימוש במודל שנמצא
+        # model_name already contains 'models/', so we don't add it
+        if not model_name.startswith("models/"):
+            model_name = f"models/{model_name}"
+            
+        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
+        headers = {'Content-Type': 'application/json'}
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        
+        try:
             async with session.post(url, json=payload, headers=headers, timeout=20) as resp:
                 response_text = await resp.text()
-                
                 if resp.status == 200:
                     data = json.loads(response_text)
-                    try:
-                        return data['candidates'][0]['content']['parts'][0]['text']
-                    except:
-                        return "Error parsing AI response"
+                    return data['candidates'][0]['content']['parts'][0]['text']
                 else:
-                    # כאן נראה את השגיאה האמיתית של גוגל
-                    print(f"Gemini Error {resp.status}: {response_text}")
-                    return None
-    except Exception as e:
-        print(f"Connection Error: {e}")
-        return None
+                    return f"Error {resp.status}: {response_text}"
+        except Exception as e:
+            return f"Connection Error: {e}"
 
-# --- HEALTH CHECK (Synchronous for Button) ---
+# --- HEALTH CHECK (With Deep Debug) ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
         
-        # כתובת ישירה לבדיקה
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
-        payload = {"contents": [{"parts": [{"text": "Ping"}]}]}
-        
+        # 1. ננסה לשלוף את רשימת המודלים המלאה
+        list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
         try:
-            res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+            res = requests.get(list_url, timeout=10)
             
-            if res.status_code == 200:
-                return True, "✅ Connected Successfully!"
+            if res.status_code != 200:
+                # זה המקום שבו נתפוס את הבעיה!
+                return False, f"❌ LIST ERROR ({res.status_code}): {res.text}"
+            
+            data = res.json()
+            available_models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+            
+            if not available_models:
+                return False, "❌ Key valid, but NO models have 'generateContent' permission."
+                
+            # 2. אם יש מודלים, ננסה פינג לראשון
+            first_model = available_models[0]
+            ping_url = f"https://generativelanguage.googleapis.com/v1beta/{first_model}:generateContent?key={key}"
+            ping_res = requests.post(ping_url, json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=5)
+            
+            if ping_res.status_code == 200:
+                return True, f"✅ Connected! Using: {first_model}"
             else:
-                # מחזיר את הודעת השגיאה המדויקת מגוגל כדי שנוכל לדבג
-                error_msg = res.json().get('error', {}).get('message', res.text)
-                return False, f"❌ Error {res.status_code}: {error_msg}"
+                return False, f"❌ PING ERROR: {ping_res.text}"
                 
         except Exception as e:
-            return False, f"❌ Connection Failed: {str(e)}"
+            return False, f"❌ Network Error: {str(e)}"
 
-    # Mock checks for other services to prevent crashes
     @staticmethod
     def check_abuseipdb(key): return True, "Checked"
     @staticmethod
@@ -113,30 +145,27 @@ class AIBatchProcessor:
             return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
             
         batch_text = "\n".join([f"ID:{i}|Title:{x['title']}|Desc:{x['summary'][:100]}" for i,x in enumerate(items)])
-        prompt = f"Analyze these cyber threats. Return ONLY a JSON Array: [{{'id':0, 'category':'Malware', 'severity':'High', 'impact':'Risk', 'summary':'Short summary'}}]. Items:\n{batch_text}"
+        prompt = f"Analyze threats. Return JSON Array: [{{'id':0, 'category':'Malware', 'severity':'High', 'impact':'Risk', 'summary':'Short summary'}}]. Items:\n{batch_text}"
         
-        res = await query_gemini_direct(self.key, prompt)
+        # שימוש בפונקציה החדשה
+        res = await query_gemini_auto(self.key, prompt)
         
-        if res:
+        if res and "ERROR" not in res and "Error" not in res:
             try:
-                # ניקוי פורמט JSON
                 clean = res.replace('```json','').replace('```','').strip()
-                if '[' in clean: 
-                    clean = clean[clean.find('['):clean.rfind(']')+1]
+                if '[' in clean: clean = clean[clean.find('['):clean.rfind(']')+1]
                 return json.loads(clean)
-            except Exception as e:
-                print(f"JSON Parse Error: {e}")
-                
+            except: pass
+            
         return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
 
     async def analyze_single_ioc(self, ioc, data):
-        prompt = f"Analyze IOC: {ioc}. Data: {json.dumps(data, default=str)}. Return Markdown report with Verdict, Findings, Recommendations."
-        res = await query_gemini_direct(self.key, prompt)
-        return res if res else "❌ Error: AI Unresponsive (Check logs)."
+        prompt = f"Analyze IOC: {ioc}. Data: {json.dumps(data, default=str)}. Return Markdown report."
+        return await query_gemini_auto(self.key, prompt)
 
-# --- DUMMY CLASSES (To prevent ImportErrors) ---
+# --- DUMMY CLASSES ---
 class CTICollector:
-    async def get_all_data(self): return []
+    async def get_all_data(self): return [] # Placeholder, real logic needs restore if needed
 class MitreCollector:
     def get_latest_updates(self): return None
 class APTSheetCollector:
