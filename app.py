@@ -12,14 +12,14 @@ from dateutil import parser as date_parser
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
 
-# --- HEBREW MAPPING ---
+# --- HEBREW MAPPING & EMOJIS ---
 CAT_MAP = {
-    "Phishing": "פישינג",
-    "Malware": "נוזקות (Malware)",
-    "Vulnerabilities": "חולשות (Vulnerabilities)",
-    "News": "חדשות סייבר",
-    "Research": "מחקר",
-    "Other": "אחר"
+    "Phishing": "🎣 פישינג",
+    "Malware": "🦠 נוזקות (Malware)",
+    "Vulnerabilities": "🔓 חולשות (Vulnerabilities)",
+    "News": "📰 חדשות סייבר",
+    "Research": "🔬 מחקר",
+    "Other": "📁 אחר"
 }
 
 SEV_MAP = {
@@ -29,84 +29,101 @@ SEV_MAP = {
     "Low": "נמוך"
 }
 
-# --- UI STYLING (FIXED FOR HEBREW UI) ---
+# --- UI STYLING ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;700;800&display=swap');
     
-    /* Global Font and Direction */
+    /* GLOBAL RESET */
     html, body, [class*="css"] {
         font-family: 'Assistant', sans-serif;
     }
     
-    /* Main App Container - Handle RTL for Text Only */
-    .stApp {
-        direction: rtl; /* Sets base direction to RTL */
-        text-align: right;
-    }
+    .stApp { direction: rtl; text-align: right; }
     
-    /* Fix Sidebar Layout issue */
-    section[data-testid="stSidebar"] {
-        direction: rtl;
-        text-align: right;
-    }
-    
-    /* Card Design */
+    /* --- CARD DESIGN --- */
     .report-card { 
         background-color: #ffffff; 
-        padding: 15px; 
-        border-radius: 10px; 
-        border-right: 5px solid #333; 
-        margin-bottom: 12px; 
-        color: #111 !important; 
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+        padding: 15px 20px; 
+        border-radius: 12px; 
+        border-right: 6px solid #444; 
+        margin-bottom: 15px; 
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        transition: transform 0.2s;
         text-align: right;
-    }
-    
-    /* Important for mixed English/Hebrew text */
-    .card-title, .card-summary {
-        unicode-bidi: embed; 
-        text-align: right;
-    }
-
-    .card-title { font-weight: 800; font-size: 1.15rem; color: #000 !important; margin: 5px 0; }
-    
-    /* Tags */
-    .tag { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: bold; margin-left: 8px; }
-    .tag-critical { background: #ffe6e6; color: #cc0000; border: 1px solid #ffcccc; }
-    .tag-incd { background: #000080; color: #ffffff; border: 1px solid #000080; }
-    .tag-israel { background: #e6f2ff; color: #004085; }
-    .tag-time { background: #f7f7f7; color: #666; border: 1px solid #ddd; }
-    
-    a { text-decoration: none; color: #0066cc !important; font-weight: bold; }
-    a:hover { text-decoration: underline; }
-    
-    /* Fix Input Fields (IOCs are English) */
-    .stTextInput input { 
-        direction: ltr !important; 
-        text-align: left !important; 
-    } 
-    
-    /* Fix Code Blocks (English) */
-    .stCodeBlock, code {
-        direction: ltr !important;
-        text-align: left !important;
-    }
-
-    /* Fix Radio Buttons (Filters) alignment */
-    div[role="radiogroup"] {
         direction: rtl;
-        text-align: right;
-        display: flex;
-        flex-direction: row-reverse; /* Ensure they flow correctly */
-        justify-content: flex-end;
-        gap: 15px;
+    }
+    .report-card:hover { transform: translateY(-2px); }
+    
+    .card-title { 
+        font-weight: 800; 
+        font-size: 1.25rem; 
+        color: #1a1a1a !important; 
+        margin-bottom: 8px; 
+        line-height: 1.3;
+    }
+    .card-summary {
+        font-size: 1rem;
+        color: #4a4a4a;
+        line-height: 1.6;
+        margin-bottom: 10px;
     }
     
-    /* Fix specific Streamlit elements that break in RTL */
-    div[data-testid="stMetricValue"] {
-        direction: ltr; /* Metrics often contain numbers */
+    /* --- TAGS --- */
+    .tag { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 0.85rem; font-weight: 700; margin-left: 8px; }
+    .tag-critical { background: #fee2e2; color: #991b1b; border: 1px solid #fecaca; }
+    .tag-incd { background: #1e3a8a; color: #ffffff; border: 1px solid #1e3a8a; box-shadow: 0 2px 5px rgba(30, 58, 138, 0.3); }
+    .tag-israel { background: #eff6ff; color: #1e40af; border: 1px solid #dbeafe; }
+    .tag-time { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
+    
+    a { text-decoration: none; color: #2563eb !important; font-weight: bold; }
+    
+    /* --- FILTER BUTTONS STYLING (The "Pills" Look) --- */
+    div[role="radiogroup"] {
+        display: flex;
+        flex-direction: row-reverse;
+        justify-content: flex-end;
+        gap: 10px;
+        flex-wrap: wrap;
     }
+    
+    div[role="radiogroup"] label {
+        background-color: #ffffff;
+        border: 1px solid #e5e7eb;
+        border-radius: 50px; /* Rounded Pill shape */
+        padding: 8px 20px;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        font-weight: 600;
+        text-align: center;
+        margin-right: 0 !important;
+    }
+    
+    /* Hide the default radio circle */
+    div[role="radiogroup"] label > div:first-child {
+        display: none; 
+    }
+    
+    /* Hover State */
+    div[role="radiogroup"] label:hover {
+        border-color: #2563eb;
+        background-color: #f8fafc;
+    }
+    
+    /* Selected State (Streamlit applies data-checked attribute) */
+    div[role="radiogroup"] label[data-checked="true"] {
+        background-color: #2563eb; /* Blue Background */
+        color: white;
+        border-color: #2563eb;
+        box-shadow: 0 4px 6px rgba(37, 99, 235, 0.3);
+    }
+    
+    /* Fix Sidebar */
+    section[data-testid="stSidebar"] { direction: rtl; text-align: right; }
+    
+    /* Inputs Fix */
+    .stTextInput input, .stCodeBlock, code { direction: ltr !important; text-align: left !important; }
     
 </style>
 """, unsafe_allow_html=True)
@@ -150,14 +167,13 @@ with st.sidebar:
     st.info("המערכת מתרעננת אוטומטית כל 15 דקות.")
 
 # --- MAIN TABS ---
-# Tabs names in Hebrew
 tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 עדכונים חיים", "🛠️ חקירות SOC", "🧠 מודיעין אסטרטגי", "🌍 מפת איומים"])
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     
-    # 1. Fetch Logic
+    # 1. Fetch Data
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
     conn.close()
@@ -176,11 +192,11 @@ with tab_feed:
     
     df_final = pd.concat([df_incd_filtered, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
-    # 2. FILTERING SYSTEM
+    # 2. BEAUTIFUL FILTER BUTTONS
     if df_final.empty:
         st.info("אין התראות פעילות ב-48 השעות האחרונות.")
     else:
-        # Hebrew mapping for filters
+        # Create categories count with Emojis
         df_final['display_cat'] = df_final['category'].map(CAT_MAP).fillna(df_final['category'])
         cat_counts = df_final['display_cat'].value_counts()
         
@@ -188,7 +204,7 @@ with tab_feed:
         mapping_back = {} 
         
         total_count = len(df_final)
-        label_all = f"כל הידיעות ({total_count})"
+        label_all = f"📁 כל הידיעות ({total_count})"
         radio_labels.append(label_all)
         mapping_back[label_all] = "ALL"
         
@@ -198,8 +214,8 @@ with tab_feed:
             radio_labels.append(label)
             mapping_back[label] = cat
             
-        st.write("📂 **סינון לפי נושא:**")
-        # Ensure horizontal layout
+        st.markdown("##### 📌 סינון לפי נושא")
+        # Radio button rendered horizontally, styled by CSS above to look like buttons
         selected_label = st.radio("Select Category", radio_labels, horizontal=True, label_visibility="collapsed")
         
         selected_cat_clean = mapping_back.get(selected_label, "ALL")
@@ -220,15 +236,18 @@ with tab_feed:
             source_tag = "tag-incd" if row['source'] == "INCD" else "tag-time"
             cat_display = row['display_cat']
             
+            # Note: Title and Summary now come from AI in Hebrew directly
             st.markdown(f"""
             <div class="report-card">
-                <span class="tag {source_tag}">{row['source']}</span>
-                <span class="tag tag-time">{pub_date.strftime('%d/%m %H:%M')}</span>
-                <span class="tag {sev_class}">{sev_heb}</span>
-                <span class="tag tag-israel">{cat_display}</span>
+                <div style="margin-bottom: 8px;">
+                    <span class="tag {source_tag}">{row['source']}</span>
+                    <span class="tag tag-time">{pub_date.strftime('%d/%m %H:%M')}</span>
+                    <span class="tag {sev_class}">{sev_heb}</span>
+                    <span class="tag tag-israel">{cat_display}</span>
+                </div>
                 <div class="card-title">{row['title']}</div>
                 <div class="card-summary">{row['summary']}</div>
-                <div style="font-size: 0.8rem; color: #666; margin-top:5px;">
+                <div style="font-size: 0.85rem; color: #666; margin-top:8px; border-top: 1px solid #eee; padding-top: 5px;">
                     <a href="{row['url']}" target="_blank">🔗 למעבר לדיווח המלא</a>
                 </div>
             </div>
@@ -271,14 +290,12 @@ with tab_tools:
                     ab = tl.query_abuseipdb(ioc_input)
                     results['abuseipdb'] = ab if ab else "No Data"
                     
-            # Raw Data Cards
             c1, c2, c3 = st.columns(3)
             with c1:
                 st.markdown("### 🦠 VirusTotal")
                 if isinstance(results.get('virustotal'), dict):
                     stats = results['virustotal'].get('last_analysis_stats', {})
                     malicious = stats.get('malicious', 0)
-                    # Translate stats key for display if needed or keep english for tech clarity
                     color = "red" if malicious > 0 else "green"
                     st.markdown(f":{color}[**זיהויים זדוניים: {malicious}**]")
                     st.json(stats)
@@ -288,7 +305,6 @@ with tab_tools:
                 st.markdown("### 🌐 URLScan")
                 if ioc_type == 'domain' and isinstance(results.get('urlscan'), dict):
                     verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
-                    # Simple translation map for UI
                     v_map = {"malicious": "זדוני", "clean": "נקי", "no_classification": "ללא סיווג"}
                     st.write(f"פסיקה: {v_map.get(verdict, verdict)}")
                     if results['urlscan'].get('screenshot'): st.image(results['urlscan']['screenshot'])
