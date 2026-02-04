@@ -7,6 +7,7 @@ import json
 import re
 import datetime
 import pytz
+import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 from utils import *
 from dateutil import parser
@@ -19,6 +20,7 @@ st.markdown("""
 <style>
     html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
     
+    /* CARDS: White Background, Dark Text */
     .report-card {
         background-color: #ffffff;
         padding: 20px;
@@ -26,9 +28,14 @@ st.markdown("""
         border-left: 6px solid #444;
         margin-bottom: 15px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        color: #1a1a1a;
+        color: #1a1a1a !important; /* Force Dark Text */
     }
     
+    .card-title { font-size: 1.25rem; font-weight: 700; margin: 8px 0; color: #000000 !important; }
+    .card-summary { font-size: 1rem; color: #333333 !important; line-height: 1.5; margin-bottom: 12px; }
+    .card-meta { font-size: 0.85rem; color: #555555 !important; display: flex; justify-content: space-between; }
+    
+    /* Tags */
     .tag { display: inline-block; padding: 4px 10px; border-radius: 4px; font-weight: 700; font-size: 0.8rem !important; margin-right: 8px; text-transform: uppercase; }
     .tag-time { background-color: #f0f0f0; color: #333; border: 1px solid #ddd; }
     .tag-critical { background-color: #ffcccc; color: #990000; border: 1px solid #cc0000; }
@@ -36,9 +43,6 @@ st.markdown("""
     .tag-israel { background-color: #d6eaff; color: #004085; border: 1px solid #b8daff; }
     .tag-medium { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
     
-    .card-title { font-size: 1.25rem; font-weight: 700; margin: 8px 0; color: #000; }
-    .card-summary { font-size: 1rem; color: #333; line-height: 1.5; margin-bottom: 12px; }
-    .card-meta { font-size: 0.85rem; color: #555; display: flex; justify-content: space-between; }
     a { text-decoration: none; color: #0066cc; font-weight: bold; }
     
     .status-header {
@@ -62,7 +66,7 @@ init_db()
 
 # --- INIT STATE ---
 if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
-if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {} 
+if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {}
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
 
 # --- LOAD SECRETS ---
@@ -85,14 +89,13 @@ st.title("🛡️ SOC War Room")
 st.markdown(f"""
 <div class="status-header">
     <span>📡 <b>System:</b> Online | <b>Refresh:</b> Every {REFRESH_MINUTES}m</span>
-    <span>🕒 <b>Last:</b> {get_time_str()} | <b>Next:</b> {get_next_update_str()}</span>
+    <span>🕒 <b>Last:</b> {get_time_str()} | <b>Next:</b> {get_next_update_str()} (IL Time)</span>
 </div>
 """, unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Controls")
-    
     with st.expander("API Status", expanded=True):
         ok, msg = ConnectionManager.check_gemini(GEMINI_KEY)
         st.write(f"{'✅' if ok else '❌'} **AI Brain:** {msg}")
@@ -100,7 +103,6 @@ with st.sidebar:
         st.write(f"{'✅' if URLSCAN_KEY else '⚠️'} **URLScan**")
     
     st.divider()
-    
     if st.button("🚀 Force Global Update", type="primary"):
         with st.spinner("Fetching Intelligence..."):
             async def scan():
@@ -109,13 +111,12 @@ with st.sidebar:
                 raw = await col.get_all_data()
                 analyzed = await proc.analyze_batch(raw)
                 return save_reports(raw, analyzed)
-            
             c = asyncio.run(scan())
             st.success(f"Updated! {c} new items.")
             st.rerun()
 
 # --- TABS ---
-tab_feed, tab_tools, tab_strat = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🧠 Strategic Intel"])
+tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🧠 Strategic Intel", "🌍 Global Map"])
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
@@ -123,7 +124,6 @@ with tab_feed:
     conn.close()
 
     c1, c2, c3, c4 = st.columns(4)
-    
     count_crit = len(df[df['severity'].str.contains('Critical', case=False)])
     count_il = len(df[df['category'].str.contains('Israel', case=False)])
     count_mal = len(df[df['category'].str.contains('Malware', case=False)])
@@ -178,7 +178,6 @@ with tab_tools:
         if ioc_input:
             st.session_state.current_ioc = ioc_input
             st.session_state.ioc_data = {}
-            
             with st.status("Scanning Engines...", expanded=True) as status:
                 tl = ThreatLookup(vt_key=VT_KEY, urlscan_key=URLSCAN_KEY, abuse_ch_key="")
                 
@@ -201,7 +200,6 @@ with tab_tools:
     if st.session_state.ioc_data:
         st.divider()
         st.subheader(f"📊 Results: {st.session_state.current_ioc}")
-        
         t1, t2, t3, t4, t5 = st.tabs(["VirusTotal", "URLScan", "AbuseIPDB", "ThreatFox", "URLhaus"])
         
         with t1:
@@ -216,14 +214,12 @@ with tab_tools:
         with t2:
             d = st.session_state.ioc_data.get('urlscan', {})
             if d.get('status') == 'found':
-                # FIXED: Safer access to nested keys to prevent AttributeError
+                # SAFER ACCESS
                 verdict = (d.get('verdict') or {}).get('overall', 'Unknown')
                 st.write(f"**Verdict:** {verdict}")
                 if d.get('screenshot'): st.image(d['screenshot'])
                 if d.get('page'): st.write(f"**Page:** {d['page'].get('url')}")
-            else: 
-                msg = d.get('msg', 'Not Found (No existing scan)')
-                st.info(f"URLScan: {msg}")
+            else: st.info(d.get('msg', 'Not Found'))
 
         with t3:
             d = st.session_state.ioc_data.get('abuseipdb', {})
@@ -243,36 +239,56 @@ with tab_tools:
                  st.markdown(rep)
 
 with tab_strat:
-    st.subheader("🧠 Strategic Intelligence: Active APT Groups")
-    st.caption("Monitoring key threat actors targeting Israel and the Middle East.")
+    st.subheader("🧠 Strategic Intelligence & Hunting")
+    st.caption("Active APT Groups targeting the region. 'Active' tag indicates recent news hits.")
     
     col = APTSheetCollector()
     threats = col.fetch_threats()
     
-    # Search Bar
-    search_term = st.text_input("Search Actor (e.g., Iran, Wipe)", "").lower()
+    # Check for Active Status against DB
+    conn = sqlite3.connect(DB_NAME)
+    all_text = pd.read_sql_query("SELECT title, summary FROM intel_reports", conn).to_string().lower()
+    conn.close()
+
+    # Cards
+    cols = st.columns(3)
+    for i, actor in enumerate(threats):
+        is_active = actor['name'].lower() in all_text
+        
+        with cols[i % 3]:
+            with st.container(border=True):
+                # Header
+                status = "🔴 ACTIVE IN NEWS" if is_active else "⚪ Monitoring"
+                st.markdown(f"**{actor['origin']} {actor['name']}**")
+                st.caption(status)
+                
+                # Details
+                st.markdown(f"**Target:** {actor['target']}")
+                st.markdown(f"**Tools:** `{actor['tools']}`")
+                st.markdown(f"_{actor['desc']}_")
+                
+                # Action
+                if st.button(f"🏹 Generate Hunting Queries", key=f"hunt_{i}"):
+                    with st.spinner(f"Generating YARA-L & XQL for {actor['name']}..."):
+                        proc = AIBatchProcessor(GEMINI_KEY)
+                        # Pass context if active
+                        context = "Recent news mentions found." if is_active else "Standard TTPs."
+                        rules = asyncio.run(proc.generate_hunting_queries(actor, context))
+                        st.info("Detection Logic Generated:")
+                        st.markdown(rules)
+
+with tab_map:
+    st.subheader("🌍 Live Threat Map")
+    st.caption("Real-time attack visualization (Check Point ThreatCloud)")
+    components.iframe("https://threatmap.checkpoint.com/", height=600, scrolling=False)
     
-    # Filter
-    filtered_threats = [t for t in threats if search_term in str(t).lower()]
-    
-    if not filtered_threats:
-        st.warning("No actors match your search.")
-    else:
-        # Display Cards
-        cols = st.columns(3)
-        for i, actor in enumerate(filtered_threats):
-            with cols[i % 3]:
-                with st.container(border=True):
-                    st.markdown(f"### {actor['origin']} {actor['name']}")
-                    st.markdown(f"**Type:** {actor['type']}")
-                    st.markdown(f"**Target:** {actor['target']}")
-                    st.markdown(f"_{actor['desc']}_")
-                    st.markdown(f"**Tools:** `{actor['tools']}`")
-                    st.markdown(f"**MITRE:** `{actor.get('mitre', 'N/A')}`")
-                    
-                    if st.button(f"🏹 Hunt {actor['name']}", key=f"btn_{i}"):
-                        with st.spinner("Generating detection rules..."):
-                            proc = AIBatchProcessor(GEMINI_KEY)
-                            rules = asyncio.run(proc.generate_hunting_queries(actor))
-                            st.info("Detection Logic Generated:")
-                            st.markdown(rules)
+    # AI Context for Map
+    if st.button("🤖 Generate Global Context"):
+        with st.spinner("Analyzing Global Feed..."):
+            conn = sqlite3.connect(DB_NAME)
+            df_map = pd.read_sql_query("SELECT title, source FROM intel_reports LIMIT 20", conn)
+            conn.close()
+            prompt = f"Based on these headers, what are the top 3 global threat trends right now? Data: {df_map.to_string()}"
+            proc = AIBatchProcessor(GEMINI_KEY)
+            res = asyncio.run(query_gemini_auto(GEMINI_KEY, prompt))
+            st.markdown(f"### 🌐 AI Global Situational Awareness\n{res}")
