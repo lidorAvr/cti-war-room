@@ -12,7 +12,7 @@ from dateutil import parser
 
 DB_NAME = "cti_dashboard.db"
 
-# --- DATABASE ---
+# --- DATABASE MANAGEMENT ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -28,7 +28,8 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    # מחיקת ידיעות ישנות מ-48 שעות
+    
+    # Auto-cleanup: Delete reports older than 48 hours
     limit = (datetime.datetime.now() - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
@@ -42,26 +43,31 @@ def get_ioc_type(ioc):
     if len(ioc) in [32, 40, 64]: return "hash"
     return "domain"
 
-# --- AI LOGIC (Direct HTTP) ---
+# --- AI LOGIC (Auto-Discovery Mode) ---
 async def get_valid_model_name(api_key, session):
+    """Asks Google which models are available for this specific API Key"""
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         async with session.get(list_url) as resp:
             if resp.status != 200: return None
             data = await resp.json()
+            # Find the first model that supports content generation
             for model in data.get('models', []):
                 if 'generateContent' in model.get('supportedGenerationMethods', []):
                     return model['name']
     except: return None
-    return "models/gemini-1.5-flash"
+    return "models/gemini-1.5-flash" # Fallback
 
 async def query_gemini_auto(api_key, prompt):
     if not api_key: return None
     async with aiohttp.ClientSession() as session:
+        # 1. Discover Model
         model_name = await get_valid_model_name(api_key, session)
-        if not model_name: return "Error: Check API Key scope."
+        if not model_name: return "Error: No valid models found for this API Key."
+        
         if not model_name.startswith("models/"): model_name = f"models/{model_name}"
             
+        # 2. Generate Content
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
         headers = {'Content-Type': 'application/json'}
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
@@ -76,12 +82,13 @@ async def query_gemini_auto(api_key, prompt):
         except Exception as e:
             return f"Connection Error: {e}"
 
-# --- HEALTH CHECK ---
+# --- HEALTH CHECKS ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
         try:
+            # Quick Ping
             res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}", 
                               json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=5)
             if res.status_code == 200: return True, "✅ Connected!"
@@ -98,7 +105,7 @@ class ConnectionManager:
         try: return (True, "Connected") if requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers={"x-apikey": key}, timeout=5).status_code == 200 else (False, "Error")
         except: return False, "Error"
 
-# --- COLLECTORS ---
+# --- COLLECTORS (Data Fetching) ---
 class CTICollector:
     SOURCES = [
         {"name": "CheckPoint", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
@@ -112,15 +119,15 @@ class CTICollector:
         try:
             async with session.get(source['url'], timeout=15) as resp:
                 if resp.status != 200: return []
+                
                 if source['type'] == 'rss':
                     text = await resp.text()
                     soup = BeautifulSoup(text, 'xml')
                     items = []
                     for i in soup.find_all('item')[:7]:
-                        # טיפול חכם בתאריכים
+                        # Date Parsing
                         pub_date = i.pubDate.text if i.pubDate else str(datetime.datetime.now())
                         try:
-                            # המרה לפורמט אחיד לשמירה במסד נתונים
                             dt_obj = parser.parse(pub_date)
                             dt_iso = dt_obj.isoformat()
                         except:
@@ -130,9 +137,9 @@ class CTICollector:
                         soup_desc = BeautifulSoup(desc, "html.parser")
                         items.append({"title": i.title.text, "url": i.link.text, "date": dt_iso, "source": source['name'], "summary": soup_desc.get_text()[:600]})
                     return items
+                    
                 elif source['type'] == 'json':
                     data = await resp.json()
-                    # ב-KEV התאריך הוא dateAdded
                     return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
                              "date": f"{v.get('dateAdded')}T00:00:00", "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
         except Exception as e: 
@@ -157,7 +164,6 @@ class AIBatchProcessor:
         batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}|Desc:{x['summary'][:150]}" for i,x in enumerate(items)])
         prompt = f"""
         Act as a Cyber Intelligence Analyst. Analyze these items.
-        Input Format: ID:0|Src:Source|Title:Title|Desc:Description
         
         Rules:
         1. 'Israel'/'Iran'/'Hamas' in text -> Category 'Israel Focus'.
@@ -282,6 +288,17 @@ class IOCExtractor:
         }
 
 class MitreCollector:
-    def get_latest_updates(self): return None
+    def get_latest_updates(self):
+        try:
+            res = requests.get("https://attack.mitre.org/resources/updates/", timeout=5)
+            soup = BeautifulSoup(res.text, 'html.parser')
+            h2 = soup.find('h2')
+            if h2: return {"title": h2.text.strip(), "url": "https://attack.mitre.org"}
+        except: return None
+
 class APTSheetCollector:
-    def fetch_threats(self, region): return pd.DataFrame()
+    def fetch_threats(self, region):
+        try:
+            url = "https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU/export?format=csv&gid=1864660085"
+            return pd.read_csv(url).head(30)
+        except: return pd.DataFrame()
