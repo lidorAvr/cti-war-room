@@ -1,10 +1,8 @@
 streamlit
 pandas
 requests
-python-dateutil
 beautifulsoup4
-lxml
+python-dateutil
+pytz
+google-generativeai
 streamlit-autorefresh
-plotly
-pydeck
-aiohttp
