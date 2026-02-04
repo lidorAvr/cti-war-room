@@ -54,7 +54,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Cleanup
+    # Cleanup: Keep INCD for 7 days, others 48h
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     limit_incd = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=7)).isoformat()
     
@@ -316,7 +316,3 @@ def save_reports(raw, analyzed):
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
                     (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
                 if c.rowcount > 0: cnt += 1
-            except: pass
-    conn.commit()
-    conn.close()
-    return cnt
