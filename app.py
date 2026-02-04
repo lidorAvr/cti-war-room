@@ -120,7 +120,7 @@ with tab_feed:
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
     conn.close()
     
-    # Merge
+    # Merge - ensuring INCD is prioritized if available
     df_final = pd.concat([df_incd.head(5), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
