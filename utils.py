@@ -8,7 +8,6 @@ import pandas as pd
 import re
 import base64
 import pytz
-import time
 import random
 from bs4 import BeautifulSoup
 from dateutil import parser
@@ -45,81 +44,94 @@ def get_ioc_type(ioc):
     if len(ioc) in [32, 40, 64]: return "hash"
     return "domain"
 
-# --- AI CORE (ROBUST RETRY LOGIC) ---
-async def get_valid_model_name(api_key, session):
-    # Prioiritize FLASH because it has higher rate limits (15 RPM vs 2 RPM for Pro)
-    return "models/gemini-1.5-flash"
-
-async def query_gemini_auto(api_key, prompt, retries=3):
+# --- AI CORE (BRUTE FORCE DISPATCHER) ---
+async def query_gemini_auto(api_key, prompt):
+    """
+    Tries multiple model versions until one works.
+    Handles 404 (Model Not Found) and 429 (Quota) automatically.
+    """
     if not api_key: return "Error: Missing API Key"
     
-    # Force Flash model for speed and quota
-    model_name = "models/gemini-1.5-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
+    # List of models to try in order of preference
+    # Google frequently changes these aliases, so we try them all.
+    candidates = [
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-latest",
+        "gemini-1.5-pro",
+        "gemini-1.0-pro",
+        "gemini-pro"
+    ]
+    
     headers = {'Content-Type': 'application/json'}
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     
     async with aiohttp.ClientSession() as session:
-        for attempt in range(retries):
-            try:
-                async with session.post(url, json=payload, headers=headers, timeout=40) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data['candidates'][0]['content']['parts'][0]['text']
-                    
-                    elif resp.status == 429:
-                        # Hit Rate Limit -> Wait and Retry (Exponential Backoff)
-                        wait_time = (2 ** attempt) + random.uniform(0, 1)
-                        print(f"⚠️ 429 Rate Limit. Waiting {wait_time:.2f}s...")
-                        await asyncio.sleep(wait_time)
-                        continue
+        for model in candidates:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+            
+            # Retry logic for 429 (Quota) specific to this model
+            for attempt in range(3):
+                try:
+                    async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                        if resp.status == 200:
+                            # Success!
+                            data = await resp.json()
+                            return data['candidates'][0]['content']['parts'][0]['text']
                         
-                    else:
-                        error_text = await resp.text()
-                        return f"AI Error {resp.status}: {error_text}"
-                        
-            except Exception as e:
-                return f"Connection Error: {str(e)}"
-    
-    return "❌ Error: Quota exceeded (429) after retries. Try again in a minute."
+                        elif resp.status == 404:
+                            # Model not found, break retry loop and try next model
+                            # print(f"DEBUG: {model} not found (404), trying next...")
+                            break 
+                            
+                        elif resp.status == 429:
+                            # Rate limit, wait and retry same model
+                            wait = (2 ** attempt) + random.uniform(0, 1)
+                            await asyncio.sleep(wait)
+                            continue
+                            
+                        else:
+                            # Other error (500 etc), try next model
+                            break
+                except:
+                    break # Network error, try next model
+
+    return "❌ Error: AI Unresponsive. All models failed or API Key is invalid."
 
 # --- CONNECTION MGR ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
-        try:
-            res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}", 
-                              json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=10)
-            if res.status_code == 200: return True, "Connected"
-            return False, f"Error {res.status_code}"
-        except: return False, "Connection Failed"
+        # Try a simple ping to find ANY working model
+        models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+        for m in models:
+            try:
+                res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}", 
+                                  json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=5)
+                if res.status_code == 200: return True, f"Connected ({m})"
+            except: pass
+        return False, "Connection Failed (Check Key/Quota)"
 
-# --- HYBRID COLLECTOR ---
+# --- COLLECTOR (HYBRID: RSS + SCRAPING) ---
 class CTICollector:
     SOURCES = [
-        # ISRAEL
+        # ISRAEL FOCUS
         {"name": "INCD Alerts", "url": "https://www.gov.il/he/departments/news/news-list", "type": "html_gov_il"}, 
         {"name": "Calcalist Cyber", "url": "https://www.calcalist.co.il/calcalistech/category/4799", "type": "html_calcalist"},
         {"name": "JPost Cyber", "url": "https://www.jpost.com/rss/rssfeedscontainer.aspx?type=115", "type": "rss"},
         
-        # GLOBAL
+        # GLOBAL & RESEARCH
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
-        {"name": "SecurityWeek", "url": "https://feeds.feedburner.com/SecurityWeek", "type": "rss"},
-        {"name": "The Record", "url": "https://therecord.media/feed", "type": "rss"},
-        
-        # RESEARCH
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CheckPoint Research", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
         {"name": "Google Threat Intel", "url": "https://feeds.feedburner.com/GoogleOnlineSecurityBlog", "type": "rss"},
-        {"name": "ESET WeLiveSecurity", "url": "https://www.welivesecurity.com/feed/", "type": "rss"},
-        {"name": "KrebsOnSecurity", "url": "https://krebsonsecurity.com/feed/", "type": "rss"}
+        {"name": "ESET WeLiveSecurity", "url": "https://www.welivesecurity.com/feed/", "type": "rss"}
     ]
     
     async def fetch_item(self, session, source):
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0'}
         try:
             async with session.get(source['url'], headers=headers, timeout=15) as resp:
                 if resp.status != 200: return []
@@ -129,9 +141,7 @@ class CTICollector:
 
                 if source['type'] == 'rss':
                     soup = BeautifulSoup(content, 'xml')
-                    entries = soup.find_all('entry') 
-                    if not entries: entries = soup.find_all('item')
-
+                    entries = soup.find_all('entry') or soup.find_all('item')
                     for i in entries[:5]:
                         date_tag = i.published if i.published else (i.pubDate if i.pubDate else None)
                         dt_iso = self.parse_date(date_tag.text if date_tag else None)
@@ -144,8 +154,7 @@ class CTICollector:
                 
                 elif source['type'] == 'json':
                     data = json.loads(content)
-                    return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", 
-                             "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
+                    return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
                              "date": now_iso, "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
 
                 elif source['type'] == 'html_gov_il':
@@ -192,16 +201,21 @@ class AIBatchProcessor:
         if not self.key: 
             return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
             
-        # Limit batch size to prevent token limits
-        items = items[:30] 
+        items = items[:20] # Limit to avoid timeouts
         batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}" for i,x in enumerate(items)])
         
         prompt = f"""
-        Analyze cyber news.
+        Act as a Cyber Intelligence Analyst.
         Rules:
         1. 'Israel'/'Iran'/'Hamas' -> Category 'Israel Focus'.
         2. 'CISA'/'CVE' -> Severity 'Critical'.
-        3. Output JSON: [{{ "id": 0, "category": "...", "severity": "...", "impact": "...", "summary": "..." }}]
+        3. Marketing/Sales -> Category 'General', Severity 'Low'.
+        
+        Output JSON Array ONLY:
+        [
+          {{"id": 0, "category": "Israel Focus/Malware/Phishing/Vulnerability/General", "severity": "Critical/High/Medium/Low", "impact": "Short impact desc", "summary": "One sentence summary."}}
+        ]
+        
         Items:
         {batch_text}
         """
@@ -215,7 +229,7 @@ class AIBatchProcessor:
         return [{"id": i, "category": "General", "severity": "Medium", "impact": "AI Error", "summary": x['summary'][:200]} for i,x in enumerate(items)]
 
     async def analyze_single_ioc(self, ioc, data):
-        prompt = f"Investigate IOC: {ioc}. Data: {json.dumps(data, default=str)}. Report: Verdict, Summary, Evidence, Action."
+        prompt = f"Investigate IOC: {ioc}. Data: {json.dumps(data, default=str)}. Return Markdown report: Verdict, Summary, Evidence, Action."
         return await query_gemini_auto(self.key, prompt)
 
     async def generate_hunting_queries(self, actor_profile, recent_news=""):
@@ -224,10 +238,11 @@ class AIBatchProcessor:
         Tools: {actor_profile['tools']}
         
         Output Markdown:
-        ### 🧠 Strategy
-        Short explanation for Tier 1 Analyst.
+        ### 🧠 Strategy (Simple English)
+        Briefly explain the hunting strategy.
 
-        ### 🛡️ Detection Rules
+        ### 🛡️ Detection Queries
+        
         **1. Google SecOps (YARA-L)**
         ```yaral
         rule {actor_profile['name'].replace(' ','_')}_Hunt {{
@@ -235,7 +250,7 @@ class AIBatchProcessor:
               author = "SOC War Room"
            events:
               $e.metadata.event_type = "PROCESS_LAUNCH"
-              // Add specific logic for {actor_profile['tools']}
+              // Add logic for {actor_profile['tools']}
            condition:
               $e
         }}
@@ -246,7 +261,7 @@ class AIBatchProcessor:
         dataset = xdr_data 
         | filter event_type = PROCESS 
         | filter action_process_image_name ~= "powershell.exe"
-        // Add specific logic
+        // Add logic
         ```
         """
         return await query_gemini_auto(self.key, prompt)
