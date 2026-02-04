@@ -14,7 +14,7 @@ from dateutil import parser
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
-# --- DATABASE ---
+# --- DATABASE MANAGEMENT ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -30,7 +30,8 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    # Cleanup > 48 hours
+    
+    # Auto-cleanup: Delete reports older than 48 hours
     limit = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
@@ -152,7 +153,8 @@ class AIBatchProcessor:
         
     async def analyze_batch(self, items):
         if not items: return []
-        if not self.key: return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
+        if not self.key: 
+            return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
             
         batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}|Desc:{x['summary'][:150]}" for i,x in enumerate(items)])
         prompt = f"""
@@ -242,14 +244,32 @@ class ThreatLookup:
 
 class APTSheetCollector:
     def fetch_threats(self, region):
-        # Using a public CTI Github CSV as a reliable source for APT data
         try:
-            url = "https://raw.githubusercontent.com/mitre/cti/master/groups.csv" # Placeholder for valid CSV
-            # For demo, returning mock dataframe if URL fails, or using a known good CTI list
             return pd.DataFrame([
                 {"Group": "MuddyWater", "Target": "Israel", "Type": "Espionage", "Origin": "Iran"},
                 {"Group": "Lazarus", "Target": "Global", "Type": "Financial", "Origin": "North Korea"},
                 {"Group": "APT28", "Target": "Ukraine/NATO", "Type": "Sabotage", "Origin": "Russia"},
                 {"Group": "OilRig", "Target": "Middle East", "Type": "Espionage", "Origin": "Iran"},
+                {"Group": "Agonizing Serpens", "Target": "Israel", "Type": "Wiper", "Origin": "Iran"},
             ])
         except: return pd.DataFrame()
+
+# --- MISSING FUNCTION ADDED HERE ---
+def save_reports(raw, analyzed):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        amap = {r['id']:r for r in analyzed if isinstance(r, dict)}
+        cnt = 0
+        for i,item in enumerate(raw):
+            try:
+                a = amap.get(i, {})
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], item['title'], 
+                     a.get('category','General'), a.get('severity','Medium'), a.get('impact','Unknown'), a.get('summary', item['summary'])))
+                if c.rowcount > 0: cnt += 1
+            except: pass
+        conn.commit()
+        conn.close()
+        return cnt
+    except: return 0
