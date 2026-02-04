@@ -75,20 +75,15 @@ class AIBatchProcessor:
     async def analyze_batch(self, items):
         if not items: return []
         
-        # דיבאג: בדיקת מודלים זמינים במקרה של כישלון
-        try:
-            available_models = [m.name for m in genai.list_models()]
-        except:
-            available_models = ["Cannot list models"]
-
+        # בניית הפרומפט
         batch_text = "\n".join([f"ID:{i} | Title:{item['title']}" for i, item in enumerate(items)])
         prompt = f"""
         Categorize these cyber threats for a SOC team.
         Categories: [Phishing, Vulnerability, Research, Israel Focus, Malware, DDoS, General].
         Rules:
-        1. JSON Array ONLY.
-        2. 'Israel Focus' if context is Israel/Hebrew.
-        3. 'IGNORE' if marketing.
+        1. JSON Array ONLY. No markdown.
+        2. 'Israel Focus' if context is Israel/Hebrew/Middle East.
+        3. 'IGNORE' if marketing/sales.
         
         Items:
         {batch_text}
@@ -96,21 +91,27 @@ class AIBatchProcessor:
         Output: [{{"id": 0, "category": "...", "country": "...", "summary": "..."}}]
         """
 
-        # רשימת מודלים מורחבת לגיבוי
-        models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro", "models/gemini-1.5-flash"]
+        # רשימת המודלים המעודכנת לפי מה שזמין לך (2.5 ו-2.0)
+        models_to_try = [
+            "gemini-2.5-flash",       # המהיר והחדש ביותר
+            "gemini-2.0-flash",       # יציב מאוד
+            "gemini-flash-latest",    # מצביע תמיד לגרסה האחרונה
+            "gemini-2.5-pro"          # חזק יותר (למקרה הצורך)
+        ]
 
         for model_name in models_to_try:
             try:
                 model = genai.GenerativeModel(model_name)
+                # שימוש ב-generate_content הרגיל (יותר יציב מ-async בגרסאות מסוימות)
                 response = await model.generate_content_async(prompt)
+                
                 clean_res = response.text.replace('```json', '').replace('```', '').strip()
                 return json.loads(clean_res)
             except Exception as e:
-                # מדלגים בשקט למודל הבא
+                # מדלגים בשקט למודל הבא ברשימה
                 continue
         
-        # אם הכל נכשל - מציגים שגיאה מפורטת עם רשימת המודלים הזמינים
-        st.error(f"❌ All models failed. Available models for your key: {available_models}")
+        st.error(f"❌ Failed to connect to Gemini 2.5/2.0 models.")
         return []
 
 def save_reports(raw_items, analysis_results):
@@ -118,14 +119,14 @@ def save_reports(raw_items, analysis_results):
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
         analysis_map = {res['id']: res for res in analysis_results if res.get('category') != 'IGNORE'}
-        c = 0
+        c_count = 0
         for i, item in enumerate(raw_items):
             if i in analysis_map:
                 ans = analysis_map[i]
-                conn.execute("INSERT OR IGNORE INTO intel_reports (timestamp, published_at, source, url, title, category, country, summary) VALUES (?,?,?,?,?,?,?,?)",
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp, published_at, source, url, title, category, country, summary) VALUES (?,?,?,?,?,?,?,?)",
                         (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], ans['category'], ans['country'], ans['summary']))
-                c += 1
+                if c.rowcount > 0: c_count += 1
         conn.commit()
         conn.close()
-        return c
+        return c_count
     except: return 0
