@@ -8,13 +8,15 @@ import pandas as pd
 import re
 import base64
 import pytz
+import time
+import random
 from bs4 import BeautifulSoup
 from dateutil import parser
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
-# --- DATABASE MANAGEMENT ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -30,8 +32,6 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    
-    # Auto-cleanup: Delete reports older than 48 hours
     limit = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
@@ -45,74 +45,75 @@ def get_ioc_type(ioc):
     if len(ioc) in [32, 40, 64]: return "hash"
     return "domain"
 
-# --- AI LOGIC ---
+# --- AI CORE (ROBUST RETRY LOGIC) ---
 async def get_valid_model_name(api_key, session):
-    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-    try:
-        async with session.get(list_url) as resp:
-            if resp.status != 200: return None
-            data = await resp.json()
-            for model in data.get('models', []):
-                if 'generateContent' in model.get('supportedGenerationMethods', []):
-                    return model['name']
-    except: return None
+    # Prioiritize FLASH because it has higher rate limits (15 RPM vs 2 RPM for Pro)
     return "models/gemini-1.5-flash"
 
-async def query_gemini_auto(api_key, prompt):
-    if not api_key: return None
+async def query_gemini_auto(api_key, prompt, retries=3):
+    if not api_key: return "Error: Missing API Key"
+    
+    # Force Flash model for speed and quota
+    model_name = "models/gemini-1.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    
     async with aiohttp.ClientSession() as session:
-        model_name = await get_valid_model_name(api_key, session)
-        if not model_name: return "Error: Check API Key."
-        if not model_name.startswith("models/"): model_name = f"models/{model_name}"
-            
-        url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
-        headers = {'Content-Type': 'application/json'}
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        
-        try:
-            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data['candidates'][0]['content']['parts'][0]['text']
-                else:
-                    return f"AI Error {resp.status}"
-        except Exception as e:
-            return f"Connection Error: {e}"
+        for attempt in range(retries):
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=40) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data['candidates'][0]['content']['parts'][0]['text']
+                    
+                    elif resp.status == 429:
+                        # Hit Rate Limit -> Wait and Retry (Exponential Backoff)
+                        wait_time = (2 ** attempt) + random.uniform(0, 1)
+                        print(f"⚠️ 429 Rate Limit. Waiting {wait_time:.2f}s...")
+                        await asyncio.sleep(wait_time)
+                        continue
+                        
+                    else:
+                        error_text = await resp.text()
+                        return f"AI Error {resp.status}: {error_text}"
+                        
+            except Exception as e:
+                return f"Connection Error: {str(e)}"
+    
+    return "❌ Error: Quota exceeded (429) after retries. Try again in a minute."
 
-# --- HEALTH CHECKS ---
+# --- CONNECTION MGR ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
         try:
             res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}", 
-                              json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=5)
+                              json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=10)
             if res.status_code == 200: return True, "Connected"
             return False, f"Error {res.status_code}"
         except: return False, "Connection Failed"
 
-# --- HYBRID COLLECTOR (RSS + HTML SCRAPING) ---
+# --- HYBRID COLLECTOR ---
 class CTICollector:
     SOURCES = [
-        # --- ISRAEL FOCUS ---
-        {"name": "INCD Alerts", "url": "https://www.gov.il/he/departments/news/news-list", "type": "html_gov_il"}, # Generic News list
-        {"name": "CERT-IL", "url": "https://www.gov.il/en/departments/news/news-list", "type": "html_gov_il"}, 
+        # ISRAEL
+        {"name": "INCD Alerts", "url": "https://www.gov.il/he/departments/news/news-list", "type": "html_gov_il"}, 
         {"name": "Calcalist Cyber", "url": "https://www.calcalist.co.il/calcalistech/category/4799", "type": "html_calcalist"},
         {"name": "JPost Cyber", "url": "https://www.jpost.com/rss/rssfeedscontainer.aspx?type=115", "type": "rss"},
         
-        # --- GLOBAL NEWS ---
+        # GLOBAL
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "SecurityWeek", "url": "https://feeds.feedburner.com/SecurityWeek", "type": "rss"},
-        {"name": "Dark Reading", "url": "https://www.darkreading.com/rss.xml", "type": "rss"},
         {"name": "The Record", "url": "https://therecord.media/feed", "type": "rss"},
         
-        # --- DEEP RESEARCH ---
+        # RESEARCH
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CheckPoint Research", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
         {"name": "Google Threat Intel", "url": "https://feeds.feedburner.com/GoogleOnlineSecurityBlog", "type": "rss"},
-        {"name": "Securelist (Kaspersky)", "url": "https://securelist.com/feed/", "type": "rss"},
         {"name": "ESET WeLiveSecurity", "url": "https://www.welivesecurity.com/feed/", "type": "rss"},
         {"name": "KrebsOnSecurity", "url": "https://krebsonsecurity.com/feed/", "type": "rss"}
     ]
@@ -122,12 +123,10 @@ class CTICollector:
         try:
             async with session.get(source['url'], headers=headers, timeout=15) as resp:
                 if resp.status != 200: return []
-                
                 content = await resp.text()
                 items = []
                 now_iso = datetime.datetime.now(IL_TZ).isoformat()
 
-                # --- HANDLER: RSS/XML ---
                 if source['type'] == 'rss':
                     soup = BeautifulSoup(content, 'xml')
                     entries = soup.find_all('entry') 
@@ -141,20 +140,16 @@ class CTICollector:
                         clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text()[:600]
                         link = i.link['href'] if i.link and i.link.has_attr('href') else (i.link.text if i.link else "#")
                         title = i.title.text if i.title else "No Title"
-
                         items.append({"title": title, "url": link, "date": dt_iso, "source": source['name'], "summary": clean_desc})
                 
-                # --- HANDLER: JSON (CISA) ---
                 elif source['type'] == 'json':
                     data = json.loads(content)
                     return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", 
                              "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
                              "date": now_iso, "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
 
-                # --- HANDLER: HTML GOV.IL (Scraping Attempt) ---
                 elif source['type'] == 'html_gov_il':
                     soup = BeautifulSoup(content, 'html.parser')
-                    # This is a generic approximation for gov.il structures
                     for article in soup.find_all('div', class_='row item')[:5]:
                         link_tag = article.find('a')
                         if link_tag:
@@ -162,7 +157,6 @@ class CTICollector:
                             url = "https://www.gov.il" + link_tag['href'] if link_tag['href'].startswith('/') else link_tag['href']
                             items.append({"title": title, "url": url, "date": now_iso, "source": source['name'], "summary": "Government Publication"})
 
-                # --- HANDLER: CALCALIST ---
                 elif source['type'] == 'html_calcalist':
                     soup = BeautifulSoup(content, 'html.parser')
                     for art in soup.find_all('div', class_='MainItem')[:5]:
@@ -171,21 +165,16 @@ class CTICollector:
                             link = h1.find('a')
                             if link:
                                 items.append({"title": link.get_text().strip(), "url": link['href'], "date": now_iso, "source": source['name'], "summary": "Calcalist Tech Report"})
-
                 return items
-        except Exception as e:
-            print(f"Error fetching {source['name']}: {e}")
-            return []
+        except: return []
 
     def parse_date(self, date_str):
         if not date_str: return datetime.datetime.now(IL_TZ).isoformat()
         try:
             dt_obj = parser.parse(date_str)
             if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj)
-            dt_il = dt_obj.astimezone(IL_TZ)
-            return dt_il.isoformat()
-        except:
-            return datetime.datetime.now(IL_TZ).isoformat()
+            return dt_obj.astimezone(IL_TZ).isoformat()
+        except: return datetime.datetime.now(IL_TZ).isoformat()
 
     async def get_all_data(self):
         async with aiohttp.ClientSession() as session:
@@ -193,7 +182,7 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- AI PROCESSORS ---
+# --- AI PROCESSOR ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
@@ -203,28 +192,21 @@ class AIBatchProcessor:
         if not self.key: 
             return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
             
-        batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}|Desc:{x['summary'][:150]}" for i,x in enumerate(items)])
+        # Limit batch size to prevent token limits
+        items = items[:30] 
+        batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}" for i,x in enumerate(items)])
+        
         prompt = f"""
-        Act as a Tier 3 SOC Analyst. Analyze these items.
-        
+        Analyze cyber news.
         Rules:
-        1. 'Israel'/'Iran'/'Hamas'/'Hezbollah' in text -> Category 'Israel Focus'.
-        2. 'CISA' or 'CVE' -> Severity 'Critical'.
-        3. 'MITRE' -> Category 'Research'.
-        4. Categories: [Israel Focus, Malware, Phishing, Vulnerability, Research, General].
-        5. Severity: [Critical, High, Medium, Low].
-        
-        Output JSON Array ONLY:
-        [
-          {{"id": 0, "category": "Category", "severity": "Severity", "impact": "Short impact desc", "summary": "One sentence summary."}}
-        ]
-        
+        1. 'Israel'/'Iran'/'Hamas' -> Category 'Israel Focus'.
+        2. 'CISA'/'CVE' -> Severity 'Critical'.
+        3. Output JSON: [{{ "id": 0, "category": "...", "severity": "...", "impact": "...", "summary": "..." }}]
         Items:
         {batch_text}
         """
-        
         res = await query_gemini_auto(self.key, prompt)
-        if res:
+        if res and "Error" not in res:
             try:
                 clean = res.replace('```json','').replace('```','').strip()
                 if '[' in clean: clean = clean[clean.find('['):clean.rfind(']')+1]
@@ -233,57 +215,38 @@ class AIBatchProcessor:
         return [{"id": i, "category": "General", "severity": "Medium", "impact": "AI Error", "summary": x['summary'][:200]} for i,x in enumerate(items)]
 
     async def analyze_single_ioc(self, ioc, data):
-        prompt = f"""
-        **SOC Analyst Request:** Investigate IOC: {ioc}
-        **Data:** {json.dumps(data, indent=2, default=str)}
-        **Task:** Markdown report. 1. Verdict (Malicious/Safe). 2. Summary. 3. Key Evidence. 4. Actions.
-        """
+        prompt = f"Investigate IOC: {ioc}. Data: {json.dumps(data, default=str)}. Report: Verdict, Summary, Evidence, Action."
         return await query_gemini_auto(self.key, prompt)
 
     async def generate_hunting_queries(self, actor_profile, recent_news=""):
         prompt = f"""
-        Act as a Detection Engineer. Create detection logic for Threat Actor: {actor_profile['name']}.
+        Act as Detection Engineer. Threat Actor: {actor_profile['name']}.
+        Tools: {actor_profile['tools']}
         
-        **Actor Profile:** {json.dumps(actor_profile)}
-        **Recent Context:** {recent_news}
-        
-        **Task:** Generate specific, copy-paste detection queries.
-        
-        **Output Format (Markdown):**
-        
-        ### 🧠 Analyst Explanation (Simple English)
-        *Briefly explain what we are looking for (e.g., "We are hunting for PowerShell scripts downloading files from suspicious domains related to OilRig").*
-        
-        ### 🛡️ Detection Queries
-        
-        **1. Google SecOps (Chronicle YARA-L)**
+        Output Markdown:
+        ### 🧠 Strategy
+        Short explanation for Tier 1 Analyst.
+
+        ### 🛡️ Detection Rules
+        **1. Google SecOps (YARA-L)**
         ```yaral
-        rule {actor_profile['name'].replace(' ','_')}_Detection {{
-          meta:
-            author = "SOC War Room"
-            description = "Detects TTPs for {actor_profile['name']}"
-          events:
-            // Insert logic here based on tools: {actor_profile['tools']}
-            $e.metadata.event_type = "PROCESS_LAUNCH"
-            // Add condition
-          condition:
-            $e
+        rule {actor_profile['name'].replace(' ','_')}_Hunt {{
+           meta:
+              author = "SOC War Room"
+           events:
+              $e.metadata.event_type = "PROCESS_LAUNCH"
+              // Add specific logic for {actor_profile['tools']}
+           condition:
+              $e
         }}
         ```
-        
+
         **2. Cortex XDR (XQL)**
         ```sql
         dataset = xdr_data 
         | filter event_type = PROCESS 
-        | filter action_process_image_name ~= "powershell.exe" 
-        // Add specific logic for {actor_profile['tools']}
-        ```
-        
-        **3. Splunk (SPL)**
-        ```splunk
-        index=main sourcetype="WinEventLog:Security" 
-        | search "powershell" 
-        // Add logic
+        | filter action_process_image_name ~= "powershell.exe"
+        // Add specific logic
         ```
         """
         return await query_gemini_auto(self.key, prompt)
@@ -336,8 +299,8 @@ class ThreatLookup:
                 if data.get("results"):
                     result = data["results"][0]
                     return {"status": "found", "screenshot": result.get("screenshot"), "verdict": result.get("verdict"), "page": result.get("page")}
-                return {"status": "not_found", "msg": "No scan found in DB"}
-            elif res.status_code == 401: return {"status": "error", "msg": "Invalid API Key"}
+                return {"status": "not_found", "msg": "No scan found"}
+            elif res.status_code == 401: return {"status": "error", "msg": "Invalid Key"}
             return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
