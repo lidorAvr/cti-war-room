@@ -14,28 +14,26 @@ from dateutil import parser
 # --- CONFIGURATION ---
 st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
 
-# --- CUSTOM CSS (HIGH CONTRAST LIGHT CARDS) ---
+# --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    /* Global Text */
+    /* Global Settings */
     html, body, [class*="css"] {
         font-family: 'Segoe UI', sans-serif;
     }
     
-    /* Report Cards - High Contrast (White BG, Black Text) */
+    /* Feed Cards - White BG, Dark Text */
     .report-card {
         background-color: #ffffff;
         padding: 20px;
         border-radius: 10px;
-        border-left: 6px solid #444; /* Default border */
+        border-left: 6px solid #444;
         margin-bottom: 15px;
-        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-        color: #2c3e50; /* Dark text */
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        color: #1a1a1a; /* Darker text */
     }
     
-    /* Border Colors based on severity (applied via inline style in python) */
-    
-    /* Tags Styling */
+    /* Tags */
     .tag {
         display: inline-block;
         padding: 4px 10px;
@@ -45,49 +43,26 @@ st.markdown("""
         margin-right: 8px;
         text-transform: uppercase;
     }
-    
-    .tag-time { background-color: #e0e0e0; color: #333; }
+    .tag-time { background-color: #f0f0f0; color: #333; border: 1px solid #ddd; }
     
     .tag-critical { background-color: #ffcccc; color: #990000; border: 1px solid #cc0000; }
     .tag-high { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
+    .tag-israel { background-color: #d6eaff; color: #004085; border: 1px solid #b8daff; }
     .tag-medium { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
-    .tag-low { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
     
-    .tag-israel { background-color: #cce5ff; color: #004085; border: 1px solid #b8daff; }
-    
-    /* Typography inside cards */
-    .card-title {
-        font-size: 1.3rem;
-        font-weight: 700;
-        margin: 10px 0;
-        color: #000;
-    }
-    .card-summary {
-        font-size: 1rem;
-        color: #444;
-        line-height: 1.5;
-        margin-bottom: 15px;
-    }
-    .card-meta {
-        font-size: 0.85rem;
-        color: #666;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-    }
-    .read-more {
-        color: #007bff;
-        font-weight: bold;
-        text-decoration: none;
-    }
-    .read-more:hover { text-decoration: underline; }
+    /* Card Typography */
+    .card-title { font-size: 1.25rem; font-weight: 700; margin: 8px 0; color: #000; }
+    .card-summary { font-size: 1rem; color: #333; line-height: 1.5; margin-bottom: 12px; }
+    .card-meta { font-size: 0.85rem; color: #555; display: flex; justify-content: space-between; }
+    a { text-decoration: none; color: #0066cc; font-weight: bold; }
     
     /* Status Header */
     .status-header {
-        background-color: #1e1e1e;
-        color: #fff;
-        padding: 10px 20px;
+        background-color: #f8f9fa;
+        color: #333;
+        padding: 10px 15px;
         border-radius: 8px;
+        border: 1px solid #ddd;
         margin-bottom: 20px;
         display: flex;
         justify-content: space-between;
@@ -96,13 +71,13 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- AUTO REFRESH (15 Minutes) ---
+# --- AUTO REFRESH ---
 REFRESH_MINUTES = 15
 st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="auto_refresh")
-
 init_db()
 
 # --- INIT STATE ---
+if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
 if 'ioc_data' not in st.session_state: st.session_state.ioc_data = None
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
 
@@ -111,25 +86,22 @@ try:
     GEMINI_KEY = st.secrets["gemini_key"]
     ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
     VT_KEY = st.secrets.get("vt_key", "")
-except FileNotFoundError:
-    st.error("❌ Critical: secrets.toml not found. Please verify Streamlit Cloud settings.")
-    st.stop()
-except KeyError:
-    st.error("❌ Critical: 'gemini_key' missing in secrets.")
+    URLSCAN_KEY = st.secrets.get("urlscan_key", "")
+except:
+    st.error("Secrets not loaded correctly.")
     st.stop()
 
-# --- TIME HELPERS ---
+# --- HELPERS ---
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 def get_time_str(): return datetime.datetime.now(IL_TZ).strftime("%H:%M")
 def get_next_update_str(): return (datetime.datetime.now(IL_TZ) + datetime.timedelta(minutes=REFRESH_MINUTES)).strftime("%H:%M")
 
 st.title("🛡️ SOC War Room")
 
-# --- AUTO-UPDATE HEADER ---
 st.markdown(f"""
 <div class="status-header">
-    <span>📡 <b>System Status:</b> Operational (Auto-Mode)</span>
-    <span>🕒 <b>Last Update:</b> {get_time_str()} | <b>Next Update:</b> {get_next_update_str()}</span>
+    <span>📡 <b>System:</b> Online | <b>Refresh:</b> Every {REFRESH_MINUTES}m</span>
+    <span>🕒 <b>Last:</b> {get_time_str()} | <b>Next:</b> {get_next_update_str()}</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -137,19 +109,16 @@ st.markdown(f"""
 with st.sidebar:
     st.header("⚙️ Controls")
     
-    # 1. API Status (Secret Check Only)
     with st.expander("API Status", expanded=True):
         ok, msg = ConnectionManager.check_gemini(GEMINI_KEY)
-        st.markdown(f"{'✅' if ok else '❌'} **AI Brain:** {msg}")
-        
-        if VT_KEY: st.markdown("✅ **VirusTotal:** Active")
-        else: st.markdown("⚠️ **VirusTotal:** Missing Key")
+        st.write(f"{'✅' if ok else '❌'} **AI Brain:** {msg}")
+        st.write(f"{'✅' if VT_KEY else '⚠️'} **VirusTotal**")
+        st.write(f"{'✅' if URLSCAN_KEY else '⚠️'} **URLScan**")
     
     st.divider()
     
-    # 2. Manual Scan Force
-    if st.button("🚀 Force Update Now", type="primary"):
-        with st.spinner("Fetching latest intelligence (Israel Time)..."):
+    if st.button("🚀 Force Global Update", type="primary"):
+        with st.spinner("Fetching Intelligence..."):
             async def scan():
                 col = CTICollector()
                 proc = AIBatchProcessor(GEMINI_KEY)
@@ -162,152 +131,150 @@ with st.sidebar:
             st.rerun()
 
 # --- TABS ---
-tab_feed, tab_tools = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox"])
+tab_feed, tab_tools, tab_strat = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🧠 Strategic Intel"])
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    # Get all Data sorted by DATE (Newest first)
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
     conn.close()
 
-    # --- FILTERS ---
-    col_f1, col_f2 = st.columns(2)
+    # --- BUTTON FILTERS (RESTORED) ---
+    c1, c2, c3, c4 = st.columns(4)
     
-    # Get unique values for filters
-    all_cats = df['category'].unique().tolist() if not df.empty else []
-    all_sevs = df['severity'].unique().tolist() if not df.empty else []
+    # Counts
+    count_crit = len(df[df['severity'].str.contains('Critical', case=False)])
+    count_il = len(df[df['category'].str.contains('Israel', case=False)])
+    count_mal = len(df[df['category'].str.contains('Malware', case=False)])
     
-    selected_cats = col_f1.multiselect("Filter by Category", options=all_cats, default=[])
-    selected_sevs = col_f2.multiselect("Filter by Severity", options=all_sevs, default=[])
+    if c1.button(f"🚨 Critical ({count_crit})", use_container_width=True): st.session_state.filter_type = 'Critical'
+    if c2.button(f"🇮🇱 Israel ({count_il})", use_container_width=True): st.session_state.filter_type = 'Israel'
+    if c3.button(f"🦠 Malware ({count_mal})", use_container_width=True): st.session_state.filter_type = 'Malware'
+    if c4.button("🌐 Show All", use_container_width=True): st.session_state.filter_type = 'All'
 
-    # Apply Filters
+    # Filter Logic
     view_df = df
-    if selected_cats:
-        view_df = view_df[view_df['category'].isin(selected_cats)]
-    if selected_sevs:
-        view_df = view_df[view_df['severity'].isin(selected_sevs)]
+    if st.session_state.filter_type == 'Critical': view_df = df[df['severity'].str.contains('Critical', case=False)]
+    elif st.session_state.filter_type == 'Israel': view_df = df[df['category'].str.contains('Israel', case=False)]
+    elif st.session_state.filter_type == 'Malware': view_df = df[df['category'].str.contains('Malware', case=False)]
 
-    # --- DISPLAY FEED ---
     if view_df.empty:
-        st.info("No reports match your filters. Try clearing them or running a scan.")
+        st.info(f"No reports found for filter: {st.session_state.filter_type}")
     else:
         for _, row in view_df.iterrows():
-            # Date Formatting (Israel Time)
+            # Date Formatting
             try:
                 dt_obj = parser.parse(row['published_at'])
-                # Convert to Israel time for display if it's UTC
                 if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj)
                 dt_il = dt_obj.astimezone(IL_TZ)
                 display_date = dt_il.strftime("%d/%m %H:%M")
-            except:
-                display_date = row['published_at'][:16]
+            except: display_date = row['published_at']
 
-            # Dynamic Classes
-            sev_low = row['severity'].lower()
-            if "critical" in sev_low: sev_class = "tag-critical"
-            elif "high" in sev_low: sev_class = "tag-high"
-            elif "medium" in sev_low: sev_class = "tag-medium"
-            else: sev_class = "tag-low"
+            # Styles
+            sev = row['severity']
+            bord = "#cc0000" if "Critical" in sev else ("#ff8800" if "High" in sev else "#444")
+            sev_cls = "tag-critical" if "Critical" in sev else ("tag-high" if "High" in sev else "tag-medium")
             
-            cat_class = "tag-israel" if "Israel" in row['category'] else "tag-medium"
-            border_color = "#cc0000" if "Critical" in row['severity'] else "#444"
-
             st.markdown(f"""
-            <div class="report-card" style="border-left: 6px solid {border_color};">
+            <div class="report-card" style="border-left: 6px solid {bord};">
                 <div style="margin-bottom:10px;">
-                    <span class="tag tag-time">📅 {display_date} (IL)</span>
-                    <span class="tag {sev_class}">{row['severity']}</span>
-                    <span class="tag {cat_class}">{row['category']}</span>
+                    <span class="tag tag-time">{display_date}</span>
+                    <span class="tag {sev_cls}">{sev}</span>
+                    <span class="tag tag-medium">{row['category']}</span>
                 </div>
                 <div class="card-title">{row['title']}</div>
                 <div class="card-summary">{row['summary']}</div>
                 <div class="card-meta">
-                    <span><b>Source:</b> {row['source']} | <b>Impact:</b> {row['impact']}</span>
-                    <a href="{row['url']}" target="_blank" class="read-more">Read Full Article ↗</a>
+                    <span><b>Src:</b> {row['source']}</span>
+                    <a href="{row['url']}" target="_blank">Read More ↗</a>
                 </div>
             </div>""", unsafe_allow_html=True)
 
 with tab_tools:
-    st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3><p>Enter an IOC to scan across all connected engines.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3></div>", unsafe_allow_html=True)
     
     ioc_col, btn_col = st.columns([4,1])
-    ioc_input = ioc_col.text_input("Enter Indicator (IP / Domain / Hash)", placeholder="e.g. 1.1.1.1")
+    ioc_input = ioc_col.text_input("Enter Indicator", placeholder="e.g. 1.1.1.1")
     
-    # 1. SCAN ACTION
     if btn_col.button("🔍 Scan IOC", use_container_width=True):
-        if not ioc_input:
-            st.warning("Please enter an indicator.")
-        else:
+        if ioc_input:
             st.session_state.current_ioc = ioc_input
-            st.session_state.ioc_data = {} 
+            st.session_state.ioc_data = {}
             
-            with st.status("Running Investigation Tools...", expanded=True) as status:
-                tl = ThreatLookup(vt_key=VT_KEY, abuse_ch_key="")
+            with st.status("Scanning Engines...", expanded=True) as status:
+                tl = ThreatLookup(vt_key=VT_KEY, urlscan_key=URLSCAN_KEY, abuse_ch_key="")
                 
-                st.write("Checking VirusTotal...")
                 vt_res = tl.query_virustotal(ioc_input)
+                st.write(f"VirusTotal: {vt_res.get('status')}")
                 
-                st.write("Checking AbuseIPDB...")
+                us_res = tl.query_urlscan(ioc_input)
+                st.write(f"URLScan: {us_res.get('status')}")
+
                 if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ioc_input):
                     ab_res = tl.query_abuseipdb(ioc_input, ABUSE_KEY)
-                else:
-                    ab_res = {"status": "skipped", "msg": "Not an IP"}
+                else: ab_res = {"status": "skipped"}
                 
-                st.write("Checking ThreatFox & URLhaus...")
                 tf_res = tl.query_threatfox(ioc_input)
                 uh_res = tl.query_urlhaus(ioc_input)
                 
-                st.session_state.ioc_data = {
-                    "virustotal": vt_res,
-                    "abuseipdb": ab_res,
-                    "threatfox": tf_res,
-                    "urlhaus": uh_res
-                }
-                status.update(label="Scan Complete!", state="complete", expanded=False)
+                st.session_state.ioc_data = {"virustotal": vt_res, "urlscan": us_res, "abuseipdb": ab_res, "threatfox": tf_res, "urlhaus": uh_res}
+                status.update(label="Done!", state="complete", expanded=False)
 
-    # 2. DISPLAY RAW RESULTS
     if st.session_state.ioc_data:
         st.divider()
-        st.subheader(f"📊 Results for: {st.session_state.current_ioc}")
+        st.subheader(f"📊 Results: {st.session_state.current_ioc}")
         
-        t1, t2, t3, t4 = st.tabs(["VirusTotal", "AbuseIPDB", "ThreatFox", "URLhaus"])
+        t1, t2, t3, t4, t5 = st.tabs(["VirusTotal", "URLScan", "AbuseIPDB", "ThreatFox", "URLhaus"])
         
         with t1:
-            vt = st.session_state.ioc_data.get('virustotal', {})
-            if vt.get('status') == 'found':
-                stats = vt.get('stats', {})
-                col1, col2 = st.columns(2)
-                col1.metric("Malicious", stats.get('malicious', 0), delta_color="inverse")
-                col1.metric("Suspicious", stats.get('suspicious', 0), delta_color="inverse")
-                col2.json(stats)
-            else:
-                st.info(f"VirusTotal Status: {vt.get('status', 'Unknown')}")
+            d = st.session_state.ioc_data.get('virustotal', {})
+            if d.get('status') == 'found':
+                c1, c2 = st.columns(2)
+                c1.metric("Malicious", d['stats']['malicious'])
+                c2.metric("Reputation", d.get('reputation'))
+                st.json(d['stats'])
+            else: st.info(d.get('msg', 'Not Found'))
 
         with t2:
-            ab = st.session_state.ioc_data.get('abuseipdb', {})
-            if ab.get('success'):
-                d = ab['data']
-                st.metric("Abuse Score", f"{d.get('abuseConfidenceScore')}%")
-                st.write(f"**ISP:** {d.get('isp')} ({d.get('countryCode')})")
-            else:
-                st.info(ab.get('error', 'Not Applicable'))
+            d = st.session_state.ioc_data.get('urlscan', {})
+            if d.get('status') == 'found':
+                st.write(f"**Verdict:** {d.get('verdict', {}).get('overall')}")
+                if d.get('screenshot'): st.image(d['screenshot'])
+            else: st.info("Not Found / No Key")
 
         with t3:
-            st.json(st.session_state.ioc_data.get('threatfox', {}))
-        with t4:
-            st.json(st.session_state.ioc_data.get('urlhaus', {}))
+            d = st.session_state.ioc_data.get('abuseipdb', {})
+            if d.get('success'):
+                st.metric("Abuse Score", d['data']['abuseConfidenceScore'])
+                st.write(f"ISP: {d['data']['isp']}")
+            else: st.info(d.get('error', 'N/A'))
+            
+        with t4: st.json(st.session_state.ioc_data.get('threatfox', {}))
+        with t5: st.json(st.session_state.ioc_data.get('urlhaus', {}))
 
-        # 3. AI SUMMARY ACTION
         st.divider()
-        if st.button("✨ Analyze Findings with AI Analyst", type="primary"):
-            with st.spinner("AI Analyst is reading the reports..."):
-                proc = AIBatchProcessor(GEMINI_KEY)
-                context = {
-                    "ioc": st.session_state.current_ioc,
-                    "raw_data": st.session_state.ioc_data
-                }
-                report = asyncio.run(proc.analyze_single_ioc(st.session_state.current_ioc, context))
-                
-                st.markdown("---")
-                st.markdown("### 🤖 Incident Report")
-                st.markdown(report)
+        if st.button("✨ Analyze with AI", type="primary"):
+             with st.spinner("AI Analyzing..."):
+                 proc = AIBatchProcessor(GEMINI_KEY)
+                 rep = asyncio.run(proc.analyze_single_ioc(st.session_state.current_ioc, st.session_state.ioc_data))
+                 st.markdown(rep)
+
+with tab_strat:
+    st.subheader("🧠 Strategic Intelligence: Active APT Groups")
+    st.caption("Monitoring key threat actors targeting Israel and the Middle East.")
+    
+    col = APTSheetCollector()
+    df_apt = col.fetch_threats("Israel")
+    
+    if not df_apt.empty:
+        st.dataframe(
+            df_apt,
+            column_config={
+                "Group": st.column_config.TextColumn("Threat Actor", help="Name of the APT Group"),
+                "Origin": st.column_config.TextColumn("Origin", help="Suspected attribution"),
+                "Type": st.column_config.TextColumn("Motivation", help="Espionage, Sabotage, etc."),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+    else:
+        st.info("Strategic database connection currently unavailable.")
