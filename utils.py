@@ -1,276 +1,322 @@
-import streamlit as st
-import asyncio
-import pandas as pd
 import sqlite3
+import asyncio
+import aiohttp
+import json
 import datetime
+import requests
+import pandas as pd
+import re
+import ipaddress
 import pytz
-import streamlit.components.v1 as components
-from utils import * from dateutil import parser as date_parser
+import feedparser
+from bs4 import BeautifulSoup
+from dateutil import parser as date_parser
 
-# --- CONFIGURATION ---
-st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
-
-# --- UI STYLING ---
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Roboto', sans-serif;
-    }
-    
-    .report-card { 
-        background-color: #ffffff; 
-        padding: 15px 20px; 
-        border-radius: 8px; 
-        border-left: 5px solid #333; 
-        margin-bottom: 15px; 
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-    }
-    
-    .card-title { font-weight: 700; font-size: 1.15rem; color: #111; margin-bottom: 8px; }
-    .card-summary { color: #444; font-size: 0.95rem; margin-bottom: 10px; line-height: 1.5; }
-    
-    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 6px; }
-    .tag-critical { background: #fee2e2; color: #991b1b; }
-    .tag-incd { background: #1e3a8a; color: #fff; }
-    .tag-time { background: #f3f4f6; color: #666; }
-    
-    a { text-decoration: none; color: #2563eb; font-weight: bold; }
-    
-    div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
-    div[role="radiogroup"] label {
-        background-color: #fff; border: 1px solid #ddd; border-radius: 20px; padding: 5px 15px; transition: all 0.2s;
-    }
-    div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #2563eb; color: white; border-color: #2563eb;
-    }
-    div[role="radiogroup"] label > div:first-child { display: none; }
-</style>
-""", unsafe_allow_html=True)
-
-# --- INITIALIZATION ---
-init_db() 
+DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
-REFRESH_MINUTES = 15
 
-GROQ_KEY = st.secrets.get("groq_key", "")
-VT_KEY = st.secrets.get("vt_key", "")
-URLSCAN_KEY = st.secrets.get("urlscan_key", "")
-ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
+# --- HTTP HEADERS (Anti-Bot Bypass) ---
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,he;q=0.8',
+    'Referer': 'https://www.google.com/'
+}
 
-# --- AUTO-LOAD & UPDATE LOGIC ---
-if "last_run" not in st.session_state:
-    st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-    # First time load
-    with st.spinner("🚀 Initializing CTI Feeds..."):
-        async def startup_update():
-            col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-            raw = await col.get_all_data()
-            if raw:
-                analyzed = await proc.analyze_batch(raw)
-                save_reports(raw, analyzed)
-        asyncio.run(startup_update())
+# --- IOC VALIDATION ---
+def identify_ioc_type(ioc):
+    ioc = ioc.strip()
+    try:
+        ipaddress.ip_address(ioc)
+        return "ip"
+    except ValueError:
+        pass
+    if re.match(r'^[a-fA-F0-9]{32}$', ioc) or re.match(r'^[a-fA-F0-9]{40}$', ioc) or re.match(r'^[a-fA-F0-9]{64}$', ioc):
+        return "hash"
+    if re.match(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', ioc):
+        return "domain"
+    return None
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.header("⚙️ System Status")
-    ok, msg = ConnectionManager.check_groq(GROQ_KEY)
-    st.write(f"Groq AI: {'✅' if ok else '❌'} ({msg})")
-    
-    st.divider()
-    
-    if st.button("🚀 Force Global Update", type="primary"):
-        with st.status("Fetching New Intelligence...", expanded=True):
-            async def run_update():
-                col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-                st.write("Connecting to Sources...")
-                raw = await col.get_all_data()
-                if not raw: 
-                    st.warning("No new data found.")
-                    return 0
-                st.write(f"Analyzing {len(raw)} items...")
-                analyzed = await proc.analyze_batch(raw)
-                cnt = save_reports(raw, analyzed)
-                return cnt
-            count = asyncio.run(run_update())
-            st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-            st.success(f"Discovered {count} new items.")
-            st.rerun()
-
-# --- MAIN TABS ---
-tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🧠 Strategic Intel", "🌍 Global Map"])
-
-# --- TAB 1: LIVE FEED ---
-with tab_feed:
-    # 1. Update Status with Calc
-    last_up = st.session_state["last_run"]
-    next_up = last_up + datetime.timedelta(minutes=REFRESH_MINUTES)
-    
-    c1, c2, c3 = st.columns([2, 2, 4])
-    with c1: st.info(f"Last Update: {last_up.strftime('%H:%M')} (IL)")
-    with c2: st.warning(f"Next Auto-Update: {next_up.strftime('%H:%M')} (IL)")
-    
-    st.divider()
-
+# --- DATABASE MANAGEMENT ---
+def init_db():
     conn = sqlite3.connect(DB_NAME)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS intel_reports (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT,
+        published_at TEXT,
+        source TEXT,
+        url TEXT UNIQUE,
+        title TEXT,
+        category TEXT,
+        severity TEXT,
+        summary TEXT
+    )''')
+    c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Priority Fetch: INCD top
-    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC", conn)
-    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
+    # Cleanup
+    limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
+    limit_incd = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=7)).isoformat()
+    
+    c.execute("DELETE FROM intel_reports WHERE source != 'INCD' AND published_at < ?", (limit_regular,))
+    c.execute("DELETE FROM intel_reports WHERE source = 'INCD' AND published_at < ?", (limit_incd,))
+    conn.commit()
     conn.close()
-    
-    # Merge - ensuring INCD is prioritized if available
-    df_final = pd.concat([df_incd.head(5), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
-    
-    if df_final.empty:
-        st.info("No active threats found. Try 'Force Global Update'.")
-    else:
-        # Filters
-        cat_counts = df_final['category'].value_counts()
-        radio_labels = [f"All ({len(df_final)})"] + [f"{cat} ({cnt})" for cat, cnt in cat_counts.items()]
-        
-        st.markdown("##### 📌 Filter by Category")
-        selected_label = st.radio("Filters", radio_labels, horizontal=True, label_visibility="collapsed")
-        
-        if "All" in selected_label:
-            df_display = df_final
-        else:
-            selected_cat = selected_label.split(" (")[0]
-            df_display = df_final[df_final['category'] == selected_cat]
 
-        st.write("") 
+def _is_url_processed(url):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT id FROM intel_reports WHERE url = ?", (url,))
+        result = c.fetchone()
+        conn.close()
+        return result is not None
+    except: return False
 
-        for _, row in df_display.iterrows():
-            # Parse Date
+# --- CONNECTION & AI ENGINES ---
+class ConnectionManager:
+    @staticmethod
+    def check_groq(key):
+        if not key: return False, "Missing Key"
+        if key.startswith("gsk_"): return True, "Connected"
+        return False, "Invalid Format"
+
+async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mode=True):
+    if not api_key: return "Error: Missing API Key"
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+    if json_mode: payload["response_format"] = {"type": "json_object"}
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                data = await resp.json()
+                if resp.status == 200: return data['choices'][0]['message']['content']
+                return f"Error {resp.status}: {data.get('error', {}).get('message', 'Unknown error')}"
+        except Exception as e: return f"Connection Error: {e}"
+
+class AIBatchProcessor:
+    def __init__(self, key):
+        self.key = key
+        
+    async def analyze_batch(self, items):
+        if not items: return []
+        chunk_size = 10
+        results = []
+        
+        system_instruction = """
+        You are an expert CTI Analyst.
+        Task: Analyze cyber news items.
+        
+        OUTPUT RULES:
+        1. LANGUAGE: English ONLY (Translate if input is Hebrew).
+        2. TITLE: Ultra-short, punchy (Max 7 words). NO clickbait.
+        3. SUMMARY: 3-4 professional sentences. Explain the 'What', 'Who', and 'Impact'. 
+           **CRITICAL**: The summary must NOT just repeat the title. It must add detail.
+        4. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
+        5. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        
+        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
+        """
+        
+        for i in range(0, len(items), chunk_size):
+            chunk = items[i:i+chunk_size]
+            batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:300]}" for idx, x in enumerate(chunk)])
+            prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
+            
+            res = await query_groq_api(self.key, prompt, json_mode=True)
+            chunk_map = {}
             try:
-                dt = date_parser.parse(row['published_at'])
-                if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
-                else: dt = dt.astimezone(IL_TZ)
-                date_str = dt.strftime('%d/%m %H:%M')
-            except: date_str = "Unknown"
-
-            sev_class = "tag-critical" if "Critical" in row['severity'] else ""
-            source_tag = "tag-incd" if row['source'] == "INCD" else "tag-time"
+                data = json.loads(res)
+                for item in data.get("items", []): chunk_map[item.get('id')] = item
+            except: pass
             
-            st.markdown(f"""
-            <div class="report-card">
-                <div style="margin-bottom: 8px;">
-                    <span class="tag {source_tag}">{row['source']}</span>
-                    <span class="tag tag-time">{date_str}</span>
-                    <span class="tag {sev_class}">{row['severity']}</span>
-                    <span class="tag tag-time">{row['category']}</span>
-                </div>
-                <div class="card-title">{row['title']}</div>
-                <div class="card-summary">{row['summary']}</div>
-                <div style="font-size: 0.85rem;">
-                    <a href="{row['url']}" target="_blank">🔗 Read Full Report</a>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            for j in range(len(chunk)):
+                ai = chunk_map.get(j, {})
+                results.append({
+                    "category": ai.get('category', 'News'), 
+                    "severity": ai.get('severity', 'Medium'), 
+                    "title": ai.get('title', chunk[j]['title']),
+                    "summary": ai.get('summary', chunk[j]['summary'][:200])
+                })
+        return results
 
-# --- TAB 2: SOC TOOLBOX ---
-with tab_tools:
-    st.subheader("🛠️ SOC Toolbox - IOC Investigation")
-    
-    c_input, c_btn = st.columns([4, 1])
-    with c_input:
-        ioc_input = st.text_input("Enter Indicator", placeholder="e.g., 1.2.3.4, evil.com").strip()
-    with c_btn:
-        st.write("") 
-        st.write("") 
-        btn_scan = st.button("Investigate 🕵️")
-
-    if btn_scan and ioc_input:
-        ioc_type = identify_ioc_type(ioc_input)
+    async def analyze_single_ioc(self, ioc, ioc_type, data):
+        prompt = f"""
+        Act as a Tier 3 CTI Analyst.
+        Target: {ioc} ({ioc_type}).
+        Raw Data: {json.dumps(data)}
         
-        if not ioc_type:
-            st.error("❌ Invalid Input! Please enter a valid IP, Domain, or Hash.")
-        else:
-            st.success(f"Identified Type: {ioc_type.upper()}")
-            tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
-            results = {}
-            
-            with st.status("Scanning External Sources...", expanded=True):
-                st.write("Querying VirusTotal...")
-                vt = tl.query_virustotal(ioc_input, ioc_type)
-                results['virustotal'] = vt if vt else "No Data"
-                
-                if ioc_type == "domain":
-                    st.write("Querying URLScan.io...")
-                    us = tl.query_urlscan(ioc_input)
-                    results['urlscan'] = us if us else "No Data"
-                
-                if ioc_type == "ip":
-                    st.write("Querying AbuseIPDB...")
-                    ab = tl.query_abuseipdb(ioc_input)
-                    results['abuseipdb'] = ab if ab else "No Data"
+        Output Structure (Markdown):
+        1. **Executive Verdict**: Malicious/Suspicious/Clean. Why?
+        2. **Technical Analysis**: Key findings from the data.
+        3. **Enrichment**: What usually does this (e.g., Cobalt Strike, specific APT)?
+        4. **Recommendations**: Block, Hunt, or Ignore.
+        """
+        return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+
+    async def generate_hunting_queries(self, actor):
+        prompt = f"""
+        Generate Hunting Queries for Actor: {actor['name']}.
+        Context: {actor.get('mitre', 'N/A')} | {actor.get('tools', 'N/A')}.
+        
+        Provide:
+        1. **Google Chronicle (YARA-L)**
+        2. **Cortex XDR (XQL)**
+        
+        Explain the logic briefly in English.
+        """
+        return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+
+class ThreatLookup:
+    def __init__(self, vt_key=None, urlscan_key=None, abuse_key=None):
+        self.vt_key, self.urlscan_key, self.abuse_key = vt_key, urlscan_key, abuse_key
+
+    def query_virustotal(self, ioc, ioc_type):
+        if not self.vt_key: return None
+        try:
+            endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
+            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}/{ioc}", headers={"x-apikey": self.vt_key}, timeout=10)
+            return res.json().get('data', {}).get('attributes', {}) if res.status_code == 200 else None
+        except: return None
+
+    def query_urlscan(self, ioc):
+        if not self.urlscan_key: return None
+        try:
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
+            return res.json().get('results', [{}])[0] if res.status_code == 200 else None
+        except: return None
+
+    def query_abuseipdb(self, ip):
+        if not self.abuse_key: return None
+        try:
+            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.abuse_key, 'Accept': 'application/json'}, params={'ipAddress': ip}, timeout=10)
+            return res.json().get('data', {})
+        except: return None
+
+# --- STRATEGIC INTEL ---
+class APTSheetCollector:
+    def fetch_threats(self): 
+        return [
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure.", "mitre": "T1059, T1105"},
+            {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel / Middle East", "type": "Espionage", "tools": "DNS Tunneling, SideTwist", "desc": "Sophisticated espionage targeting critical sectors.", "mitre": "T1071.004, T1048"},
+            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers (BiBiWiper)", "desc": "Destructive attacks masquerading as ransomware.", "mitre": "T1485, T1486"},
+            {"name": "Imperial Kitten", "origin": "Iran", "target": "Israel", "type": "Espionage/Cyber-Enabled Influence", "tools": "IMAPLoader, Standard Python Backdoors", "desc": "IRGC affiliated. Focus on transportation and logistics.", "mitre": "T1566, T1071"}
+        ]
+
+# --- DATA COLLECTION ---
+class CTICollector:
+    SOURCES = [
+        {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
+        {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
+        {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
+        {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        # INCD: Using Official RSS with headers and fallbacks
+        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
+        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
+    ]
+
+    async def fetch_item(self, session, source):
+        items = []
+        try:
+            # HEADERS are crucial for gov.il and BleepingComputer
+            async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
+                if resp.status != 200: return []
+                content = await resp.text()
+                now = datetime.datetime.now(IL_TZ)
+
+                if source['type'] == 'rss':
+                    feed = feedparser.parse(content)
                     
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("### 🦠 VirusTotal")
-                if isinstance(results.get('virustotal'), dict):
-                    stats = results['virustotal'].get('last_analysis_stats', {})
-                    malicious = stats.get('malicious', 0)
-                    color = "red" if malicious > 0 else "green"
-                    st.markdown(f":{color}[**Detections: {malicious}**]")
-                    st.json(stats)
-                else: st.write("N/A")
-                
-            with c2:
-                st.markdown("### 🌐 URLScan")
-                if ioc_type == 'domain' and isinstance(results.get('urlscan'), dict):
-                    verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
-                    st.write(f"Verdict: **{verdict}**")
-                    if results['urlscan'].get('screenshot'): st.image(results['urlscan']['screenshot'])
-                else: st.write("N/A")
-                
-            with c3:
-                st.markdown("### 🛑 AbuseIPDB")
-                if ioc_type == 'ip' and isinstance(results.get('abuseipdb'), dict):
-                    score = results['abuseipdb'].get('abuseConfidenceScore', 0)
-                    st.metric("Abuse Score", f"{score}%")
-                    st.write(f"ISP: {results['abuseipdb'].get('isp')}")
-                else: st.write("N/A")
+                    all_feed_items = []
+                    
+                    for entry in feed.entries[:10]:
+                        pub_date = now
+                        try:
+                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                                pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        except: pass
+                        
+                        all_feed_items.append((entry, pub_date))
 
-            st.divider()
-            st.subheader("🤖 AI Analyst Assessment (Tier 3)")
-            with st.spinner("Generating Report..."):
-                proc = AIBatchProcessor(GROQ_KEY)
-                report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results))
-                st.markdown(report)
+                    for entry, pub_date in all_feed_items:
+                        if _is_url_processed(entry.link): continue
+                        
+                        # Time limit: 7 days for INCD, 48h for others
+                        limit_hours = 168 if source['name'] == 'INCD' else 48
+                        if (now - pub_date).total_seconds() > (limit_hours * 3600):
+                            if source['name'] == 'INCD' and len(items) == 0 and len(all_feed_items) > 0:
+                                pass 
+                            else:
+                                continue
 
-# --- TAB 3: STRATEGIC INTEL ---
-with tab_strat:
-    st.subheader("🧠 Strategic Threat Intel - Active Campaigns")
-    st.markdown("Focus: **Iran & Middle East** | Targets: **Israel**")
-    
-    threats = APTSheetCollector().fetch_threats()
-    
-    for actor in threats:
-        with st.expander(f"👹 {actor['name']} ({actor['origin']}) - {actor['type']}"):
-            col_desc, col_acts = st.columns([2, 1])
-            with col_desc:
-                st.markdown(f"**Description:** {actor['desc']}")
-                st.markdown(f"**Tools:** `{actor['tools']}`")
-                st.markdown(f"**MITRE:** `{actor['mitre']}`")
-            with col_acts:
-                if st.button(f"🏹 Generate Hunting Queries ({actor['name']})"):
-                    proc = AIBatchProcessor(GROQ_KEY)
-                    with st.spinner("Generating XQL & YARA..."):
-                        res = asyncio.run(proc.generate_hunting_queries(actor))
-                        st.markdown(res)
-    
-    st.divider()
-    st.subheader("🔥 Trending IOCs")
-    st.markdown("""
-    | Indicator | Type | Actor | Confidence |
-    |-----------|------|-------|------------|
-    | `185.200.118.55` | IP | MuddyWater | High |
-    | `update-win-srv.com` | Domain | OilRig | Medium |
-    | `0a8b9c...2d1` | SHA256 | Agonizing Serpens | Critical |
-    """)
+                        sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
+                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
-# --- TAB 4: MAP ---
-with tab_map:
-    components.iframe("https://threatmap.checkpoint.com/", height=600)
+                elif source['type'] == 'json':
+                     data = json.loads(content)
+                     for v in data.get('vulnerabilities', [])[:10]:
+                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
+                         if _is_url_processed(url): continue
+                         try: pub_date = date_parser.parse(v['dateAdded']).replace(tzinfo=IL_TZ)
+                         except: pub_date = now
+                         if (now - pub_date).total_seconds() > 172800: continue
+                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
+
+                elif source['type'] == 'telegram':
+                    soup = BeautifulSoup(content, 'html.parser')
+                    msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
+                    for msg in msgs[-10:]:
+                        try:
+                            text_div = msg.find('div', class_='tgme_widget_message_text')
+                            if not text_div: continue
+                            text = text_div.get_text(separator=' ')
+                            
+                            pub_date = now
+                            time_span = msg.find('time', class_='time')
+                            if time_span and 'datetime' in time_span.attrs:
+                                try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
+                                except: pass
+                            
+                            if (now - pub_date).total_seconds() > 432000: continue
+                            
+                            date_link = msg.find('a', class_='tgme_widget_message_date')
+                            post_link = date_link['href'] if date_link else f"https://t.me/s/Israel_Cyber?t={int(now.timestamp())}"
+                            
+                            if _is_url_processed(post_link): continue
+                            
+                            items.append({
+                                "title": "INCD Alert (Telegram)", 
+                                "url": post_link, 
+                                "date": pub_date.isoformat(), 
+                                "source": "INCD", 
+                                "summary": text[:800]
+                            })
+                        except: pass
+
+        except Exception as e: pass
+        return items
+
+    async def get_all_data(self):
+        async with aiohttp.ClientSession() as session:
+            tasks = [self.fetch_item(session, s) for s in self.SOURCES]
+            results = await asyncio.gather(*tasks)
+            return [i for sub in results for i in sub]
+
+def save_reports(raw, analyzed):
+    conn = sqlite3.connect(DB_NAME)
+    c, cnt = conn.cursor(), 0
+    for i, item in enumerate(raw):
+        if i < len(analyzed):
+            a = analyzed[i]
+            try:
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
+                if c.rowcount > 0: cnt += 1
+            except: pass
+    conn.commit()
+    conn.close()
+    return cnt
