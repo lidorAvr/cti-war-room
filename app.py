@@ -4,8 +4,9 @@ import pandas as pd
 import sqlite3
 import base64
 import json
+import streamlit.components.v1 as components # הוספתי את הייבוא שהיה חסר!
 from streamlit_autorefresh import st_autorefresh
-from utils import * # --- CONFIGURATION ---
+from utils import * # --- CONFIGURATION (מופרד לשורה חדשה ותקינה) ---
 st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
 
 # --- STYLING ---
@@ -36,13 +37,13 @@ st.caption("Integrated Threat Intelligence, Investigation Tools & Global Monitor
 with st.sidebar:
     st.header("🔧 API Configuration")
     
-    # ניסיון לטעון מ-Secrets, ואם אין - מחרוזת ריקה
+    # ניסיון לטעון מ-Secrets
     try: 
         secret_key = st.secrets["gemini_key"]
     except: 
         secret_key = ""
     
-    # תיבת טקסט למפתח - מאפשרת דריסה ידנית או הזנה ראשונית
+    # תיבת טקסט למפתח
     user_key = st.text_input("Gemini API Key:", value=secret_key, type="password")
     
     # המפתח בפועל לשימוש
@@ -59,6 +60,8 @@ with st.sidebar:
         else:
             st.warning("Please enter a key first.")
             
+    st.divider()
+    
     # בדיקות נוספות
     with st.expander("System Checks"):
         try: secret_abuse = st.secrets["abuseipdb_key"]
@@ -67,7 +70,6 @@ with st.sidebar:
              ok, msg = ConnectionManager.check_abuseipdb(secret_abuse)
              st.write(f"AbuseIPDB: {msg}")
 
-    st.divider()
     
     if st.button("🚀 Run Global Intel Scan", disabled=not gemini_key):
         with st.spinner("Scanning RSS Feeds & CISA..."):
