@@ -4,8 +4,10 @@ import pandas as pd
 import sqlite3
 import base64
 import json
+import re
 from streamlit_autorefresh import st_autorefresh
-from utils import * from dateutil import parser
+from utils import *
+from dateutil import parser
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
@@ -13,13 +15,13 @@ st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️"
 # --- CUSTOM CSS (UI IMPROVEMENTS) ---
 st.markdown("""
 <style>
-    /* Global Font Size */
+    /* Global Font Size Increase */
     html, body, [class*="css"] {
         font-family: 'Segoe UI', sans-serif;
         font-size: 18px !important;
     }
     
-    /* Report Cards */
+    /* Report Cards Styling */
     .report-card {
         background-color: #262730;
         padding: 20px;
@@ -34,7 +36,7 @@ st.markdown("""
         border-color: #666;
     }
     
-    /* Tags */
+    /* Tags Styling */
     .tag {
         display: inline-block;
         padding: 4px 10px;
@@ -55,7 +57,7 @@ st.markdown("""
     p { color: #ddd; line-height: 1.6; }
     a { text-decoration: none; color: #4da6ff; font-weight: bold; }
     
-    /* Tool Box */
+    /* Tool Box Area */
     .tool-box {
         background-color: #1e1e1e;
         padding: 25px;
@@ -70,6 +72,7 @@ st.markdown("""
 st_autorefresh(interval=15 * 60 * 1000, key="auto_refresh")
 init_db()
 
+# --- SESSION STATE INIT ---
 if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
 if 'ioc_data' not in st.session_state: st.session_state.ioc_data = None
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
@@ -95,7 +98,7 @@ with st.sidebar:
     st.divider()
     
     if st.button("🚀 Run Global Scan Now"):
-        with st.spinner("Scanning Feeds & Deleting Old Items..."):
+        with st.spinner("Scanning Feeds & Cleaning Database..."):
             async def scan():
                 col = CTICollector()
                 proc = AIBatchProcessor(gemini_key)
@@ -108,15 +111,13 @@ with st.sidebar:
             st.rerun()
 
 # --- TABS ---
-tab_feed, tab_tools = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox"])
+tab_feed, tab_tools, tab_landscape, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape", "🗺️ Live Attack Map"])
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    # שליפת המידע ממוין לפי תאריך פרסום
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
     conn.close()
     
-    # פילטרים
     c1, c2, c3, c4 = st.columns(4)
     if c1.button(f"🚨 Critical ({len(df[df['severity']=='Critical'])})", use_container_width=True): st.session_state.filter_type = 'Critical'
     if c2.button(f"🇮🇱 Israel Focus ({len(df[df['category']=='Israel Focus'])})", use_container_width=True): st.session_state.filter_type = 'Israel'
@@ -130,14 +131,13 @@ with tab_feed:
         st.info("No reports available. Wait for auto-refresh or click 'Run Global Scan' in the sidebar.")
     else:
         for _, row in view_df.iterrows():
-            # עיצוב התאריך לתצוגה יפה (DD/MM HH:MM)
+            # Date Formatting
             try:
                 dt_obj = parser.parse(row['published_at'])
                 display_date = dt_obj.strftime("%d/%m %H:%M")
             except:
                 display_date = row['published_at'][:16]
 
-            # בחירת צבעים
             sev_class = "tag-critical" if row['severity']=='Critical' else ("tag-high" if row['severity']=='High' else "tag-medium")
             cat_class = "tag-israel" if row['category']=='Israel Focus' else "tag-medium"
             
@@ -171,7 +171,6 @@ with tab_tools:
             st.session_state.ioc_data = {} # Reset data
             
             with st.status("Running Investigation Tools...", expanded=True) as status:
-                # Load Secrets
                 try: vt_key = st.secrets["vt_key"]
                 except: vt_key = ""
                 try: abuse_key = st.secrets["abuseipdb_key"]
@@ -181,12 +180,10 @@ with tab_tools:
                 
                 tl = ThreatLookup(vt_key=vt_key, urlscan_key=urlscan_key, abuse_ch_key="")
                 
-                # Run Checks
                 st.write("Checking VirusTotal...")
                 vt_res = tl.query_virustotal(ioc_input)
                 
                 st.write("Checking AbuseIPDB...")
-                # Simple logic: check if it looks like an IP
                 if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ioc_input):
                     ab_res = tl.query_abuseipdb(ioc_input, abuse_key)
                 else:
@@ -196,7 +193,6 @@ with tab_tools:
                 tf_res = tl.query_threatfox(ioc_input)
                 uh_res = tl.query_urlhaus(ioc_input)
                 
-                # Save Data
                 st.session_state.ioc_data = {
                     "virustotal": vt_res,
                     "abuseipdb": ab_res,
@@ -210,7 +206,6 @@ with tab_tools:
         st.divider()
         st.subheader(f"📊 Results for: {st.session_state.current_ioc}")
         
-        # Display in Tabs
         t1, t2, t3, t4 = st.tabs(["VirusTotal", "AbuseIPDB", "ThreatFox", "URLhaus"])
         
         with t1:
@@ -246,7 +241,6 @@ with tab_tools:
             if st.button("✨ Analyze Findings with AI Analyst", type="primary"):
                 with st.spinner("AI Analyst is reading the reports..."):
                     proc = AIBatchProcessor(gemini_key)
-                    # Prepare context
                     context = {
                         "ioc": st.session_state.current_ioc,
                         "raw_data": st.session_state.ioc_data
@@ -258,3 +252,24 @@ with tab_tools:
                     st.markdown(report)
         else:
             st.warning("Please enter Gemini API Key in sidebar to enable AI analysis.")
+
+with tab_landscape:
+    mitre = MitreCollector().get_latest_updates()
+    if mitre:
+        st.info(f"📢 **MITRE ATT&CK Update:** [{mitre['title']}]({mitre['url']})")
+
+    st.subheader("Global APT Groups Operations")
+    col1, col2 = st.columns([1, 4])
+    region = col1.radio("Select Theater", ["Israel", "Russia", "China", "Iran"])
+    if col1.button("Load Intel"):
+        with st.spinner(f"Querying {region} Database..."):
+            df_apt = APTSheetCollector().fetch_threats(region)
+            if not df_apt.empty:
+                st.dataframe(df_apt, use_container_width=True)
+            else:
+                st.warning("No data found.")
+
+with tab_map:
+    st.subheader("🌐 Check Point ThreatCloud Map")
+    import streamlit.components.v1 as components
+    components.iframe("https://threatmap.checkpoint.com/", height=800, scrolling=False)
