@@ -43,7 +43,6 @@ class CTICollector:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         try:
-            print(f"Fetching {source['name']}...")
             async with session.get(source['url'], headers=headers, timeout=10) as resp:
                 if resp.status != 200:
                     return []
@@ -54,15 +53,10 @@ class CTICollector:
                     items = []
                     for i in soup.find_all('item')[:5]:
                         date_str = i.pubDate.text if i.pubDate else datetime.datetime.now().isoformat()
-                        try:
-                            dt = parser.parse(date_str).isoformat()
-                        except:
-                            dt = datetime.datetime.now().isoformat()
-                            
                         items.append({
                             "title": i.title.text,
                             "url": i.link.text,
-                            "date": dt,
+                            "date": date_str,
                             "source": source['name'],
                             "raw_content": i.description.text if i.description else i.title.text
                         })
@@ -70,12 +64,10 @@ class CTICollector:
                 elif source['type'] == 'json':
                     data = await resp.json()
                     return [{"title": v['cveID'], "url": "https://cisa.gov", "date": datetime.datetime.now().isoformat(), "source": source['name'], "raw_content": v['vulnerabilityName']} for v in data.get('vulnerabilities', [])[:5]]
-        except Exception as e:
-            print(f"Error fetching {source['name']}: {e}")
+        except:
             return []
 
     async def get_all_data(self):
-        # SSL Context to prevent certificate errors
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
@@ -89,8 +81,8 @@ class CTICollector:
 class AIBatchProcessor:
     def __init__(self, api_key):
         self.api_key = api_key
-        # רשימת מודלים לניסיון לפי סדר עדיפות (מהיר -> יציב)
-        self.models_to_try = ["gemini-1.5-flash-latest", "gemini-pro"]
+        # הוספתי עוד וריאציות של שמות מודלים למקרה שחלק חסומים
+        self.models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro", "gemini-1.0-pro"]
         self.categories = ["Phishing", "Vulnerability", "Research", "Israel Focus", "Malware", "DDoS", "General"]
 
     async def analyze_batch(self, items):
@@ -111,19 +103,23 @@ class AIBatchProcessor:
         Output: [{{"id": 0, "category": "...", "country": "...", "summary": "..."}}]
         """
 
-        # ניסיון חכם: מנסה את המודל המהיר, אם נכשל עובר למודל היציב
+        last_error = None
         for model_name in self.models_to_try:
             try:
-                print(f"Trying AI model: {model_name}...")
-                llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=self.api_key)
-                response = await llm.ainvoke(prompt)
-                clean_res = response.content.replace('```json', '').replace('```', '').strip()
-                return json.loads(clean_res)
+                # מנסה מודל ומדפיס הודעה קטנה כדי שתדע מה קורה
+                with st.spinner(f"Trying AI model: {model_name}..."):
+                    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=self.api_key)
+                    response = await llm.ainvoke(prompt)
+                    clean_res = response.content.replace('```json', '').replace('```', '').strip()
+                    return json.loads(clean_res)
             except Exception as e:
-                print(f"Model {model_name} failed: {e}")
-                continue # נסה את המודל הבא ברשימה
+                # כאן התיקון החשוב: מציג את השגיאה למסך!
+                st.warning(f"⚠️ Model {model_name} failed. Reason: {str(e)}")
+                last_error = e
+                continue 
         
-        st.error("All AI models failed. Check API Key permissions.")
+        # אם הכל נכשל, מציג שגיאה אדומה גדולה שנשארת
+        st.error(f"❌ Critical Failure: All AI models failed. Last error: {str(last_error)}")
         return []
 
 def save_reports(raw_items, analysis_results):
@@ -142,5 +138,5 @@ def save_reports(raw_items, analysis_results):
         conn.close()
         return count
     except Exception as e:
-        print(f"DB Error: {e}")
+        st.error(f"Database Error: {e}")
         return 0
