@@ -102,19 +102,22 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
+        # UPDATED PROMPT AND MODEL FOR BETTER HEBREW
         system_instruction = """
         You are an expert CTI Analyst.
         Task: Analyze cyber news items.
         
         OUTPUT RULES:
-        1. LANGUAGE CONDITION:
-           - IF the item source is 'INCD' (Israel National Cyber Directorate): Output MUST be in HEBREW.
-           - FOR ALL OTHER SOURCES: Output MUST be in ENGLISH.
+        1. IF Source is 'INCD' (Israel National Cyber Directorate):
+           - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
+           - CATEGORY & SEVERITY: Keep in **English** (for system compatibility).
+        2. IF Source is NOT 'INCD':
+           - All fields in **English**.
            
-        2. TITLE: Short, informative (Max 8 words).
-        3. SUMMARY: 3-4 professional sentences. Explain 'What', 'Who', and 'Impact'.
-        4. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
-        5. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        3. TITLE: Short, informative (Max 8 words).
+        4. SUMMARY: 3-4 professional sentences. Explain 'What', 'Who', and 'Impact'.
+        5. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
+        6. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
         Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
         """
@@ -124,7 +127,8 @@ class AIBatchProcessor:
             batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:300]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
-            res = await query_groq_api(self.key, prompt, json_mode=True)
+            # SWITCHED TO 70B MODEL for better Hebrew generation
+            res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             chunk_map = {}
             try:
                 data = json.loads(res)
