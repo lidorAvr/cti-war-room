@@ -40,7 +40,6 @@ def init_db():
 # --- SOC Tools: IOC Extractor ---
 class IOCExtractor:
     def extract(self, text):
-        # Regex patterns for common IOCs
         ipv4_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
         domain_pattern = r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b'
         md5_pattern = r'\b[a-fA-F0-9]{32}\b'
@@ -52,14 +51,32 @@ class IOCExtractor:
         
         return {"IPs": ips, "Domains": domains, "Hashes": hashes}
 
-# --- SOC Tools: Universal Lookup (ThreatFox + URLhaus) ---
+# --- SOC Tools: Universal Lookup (SMART VERSION) ---
 class ThreatLookup:
     def __init__(self):
         self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
+        # כתובות שונות לסוגים שונים ב-URLhaus
         self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
+        self.uh_host = "https://urlhaus-api.abuse.ch/v1/host/"
+        self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
+
+    def identify_type(self, ioc):
+        ioc = ioc.strip()
+        # זיהוי Hash (MD5/SHA256)
+        if re.match(r'^[a-fA-F0-9]{32}$', ioc) or re.match(r'^[a-fA-F0-9]{64}$', ioc):
+            return "hash"
+        # זיהוי IP
+        elif re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ioc):
+            return "ip"
+        # זיהוי URL
+        elif "http" in ioc or "/" in ioc:
+            return "url"
+        # כל השאר כנראה דומיין
+        else:
+            return "domain"
 
     def query_threatfox(self, ioc):
-        # ThreatFox Free API (Search by IOC)
+        ioc = ioc.strip()
         payload = {"query": "search_ioc", "search_term": ioc}
         try:
             res = requests.post(self.tf_url, json=payload, timeout=5)
@@ -69,18 +86,34 @@ class ThreatLookup:
             return []
         except: return []
 
-    def query_urlhaus(self, url):
-        # URLhaus Free API
-        payload = {"url": url}
+    def query_urlhaus(self, ioc):
+        ioc = ioc.strip()
+        ioc_type = self.identify_type(ioc)
+        
+        # בחירת האסטרטגיה הנכונה מול URLhaus
         try:
-            res = requests.post(self.uh_url, data=payload, timeout=5)
+            if ioc_type == "hash":
+                # חיפוש לפי קובץ זדוני (Hash)
+                res = requests.post(self.uh_payload, data={'md5_hash': ioc} if len(ioc)==32 else {'sha256_hash': ioc}, timeout=5)
+            elif ioc_type == "url":
+                # חיפוש לפי URL מלא
+                res = requests.post(self.uh_url, data={'url': ioc}, timeout=5)
+            else:
+                # חיפוש לפי דומיין או IP (Host)
+                res = requests.post(self.uh_host, data={'host': ioc}, timeout=5)
+
             if res.status_code == 200:
                 data = res.json()
-                return data if data.get("query_status") == "ok" else None
+                if data.get("query_status") == "ok":
+                    return data
+                # לפעמים התשובה חוזרת כרשימת urls תחת המארח
+                elif "urls" in data and len(data["urls"]) > 0:
+                    return {"query_status": "ok", "url_status": "active_host", "tags": ["hosting_malware"], "urls_count": len(data["urls"])}
             return None
-        except: return None
+        except Exception as e:
+            return None
 
-# --- Existing Collectors (Feed, MITRE, Sheets) ---
+# --- Existing Collectors ---
 class MitreCollector:
     def get_latest_updates(self):
         try:
