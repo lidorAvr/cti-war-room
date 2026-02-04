@@ -3,16 +3,16 @@ import asyncio
 import pandas as pd
 import sqlite3
 import base64
+import re
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 from utils import (init_db, CTICollector, AIBatchProcessor, save_reports, 
                    AbuseIPDBChecker, APTSheetCollector, MitreCollector, 
-                   IOCExtractor, ThreatLookup, DB_NAME)
+                   IOCExtractor, ThreatLookup, DB_NAME, get_ioc_type, ConnectionManager)
 from dateutil import parser
 
 st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
 
-# --- CSS Styling ---
 st.markdown("""
 <style>
     .report-card { background-color: #1E1E1E; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom: 10px; }
@@ -31,19 +31,36 @@ init_db()
 
 if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
 
-# --- Header ---
 st.title("🛡️ SOC War Room")
 st.caption("Integrated Threat Intelligence, Investigation Tools & Global Monitoring")
 
-# --- Sidebar Controls ---
 with st.sidebar:
     st.header("⚙️ Config")
     gemini_key = st.text_input("Gemini API Key", type="password").strip() or None
     abuse_key = st.text_input("AbuseIPDB Key", type="password").strip() or None
-    # שדה חדש למפתח Abuse.ch
-    abuse_ch_key = st.text_input("Abuse.ch API Key (ThreatFox/URLhaus)", type="password", help="Free key from abuse.ch user settings").strip() or None
+    abuse_ch_key = st.text_input("Abuse.ch API Key", type="password", help="For ThreatFox/URLhaus").strip() or None
     
     st.divider()
+    
+    # --- כפתור בדיקת חיבורים חדש ---
+    if st.button("✅ Check Connections"):
+        st.write("---")
+        # 1. Gemini
+        ok, msg = ConnectionManager.check_gemini(gemini_key)
+        if ok: st.success(f"Gemini: {msg}")
+        else: st.error(f"Gemini: {msg}")
+        
+        # 2. AbuseIPDB
+        ok, msg = ConnectionManager.check_abuseipdb(abuse_key)
+        if ok: st.success(f"AbuseIPDB: {msg}")
+        else: st.error(f"AbuseIPDB: {msg}")
+        
+        # 3. Abuse.ch
+        ok, msg = ConnectionManager.check_abusech(abuse_ch_key)
+        if ok: st.success(f"Abuse.ch: {msg}")
+        else: st.error(f"Abuse.ch: {msg}")
+        st.write("---")
+
     if st.button("🚀 Force Global Scan", disabled=not gemini_key):
         with st.spinner("Scanning Sources..."):
             async def scan():
@@ -55,10 +72,8 @@ with st.sidebar:
             st.success(f"Scan complete. {c} new reports.")
             st.rerun()
 
-# --- MAIN TABS ---
 tab_feed, tab_tools, tab_landscape, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape", "🗺️ Live Attack Map"])
 
-# --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
@@ -95,7 +110,6 @@ with tab_feed:
                 </div>
             </div>""", unsafe_allow_html=True)
 
-# --- TAB 2: SOC TOOLBOX ---
 with tab_tools:
     st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3><p>Active tools for IOC analysis and extraction.</p></div>", unsafe_allow_html=True)
     
@@ -103,7 +117,7 @@ with tab_tools:
     
     with t1:
         st.subheader("Check IP / Hash / URL")
-        st.caption("Supports AbuseIPDB, ThreatFox, and URLhaus. Please provide API Keys in sidebar for best results.")
+        st.caption("Supports AbuseIPDB, ThreatFox, and URLhaus. API Keys required.")
         col1, col2 = st.columns([3, 1])
         ioc_input = col1.text_input("Enter Indicator (IP, Domain, MD5, SHA256)")
         
@@ -111,31 +125,38 @@ with tab_tools:
             if not ioc_input: st.warning("Enter an IOC")
             else:
                 st.divider()
-                # 1. AbuseIPDB
-                if abuse_key:
-                    res = AbuseIPDBChecker(abuse_key).check_ip(ioc_input)
-                    if "success" in res:
-                        d = res['data']
-                        st.success(f"✅ AbuseIPDB: {d['abuseConfidenceScore']}% Malicious | ISP: {d['isp']} | {d['countryCode']}")
-                    else: st.warning(f"AbuseIPDB Error: {res.get('error')}")
-                else: st.info("AbuseIPDB: Key Missing")
+                ioc_type = get_ioc_type(ioc_input)
+
+                # 1. AbuseIPDB - בדיקה רק אם זה IP
+                if ioc_type == "ip":
+                    if abuse_key:
+                        res = AbuseIPDBChecker(abuse_key).check_ip(ioc_input)
+                        if "success" in res:
+                            d = res['data']
+                            st.success(f"✅ AbuseIPDB: {d['abuseConfidenceScore']}% Malicious | ISP: {d['isp']} | {d['countryCode']}")
+                        else: st.warning(f"AbuseIPDB Error: {res.get('error')}")
+                    else: st.info("AbuseIPDB: Key Missing")
+                else:
+                    # הודעה אפורה שקטה אם זה דומיין
+                    st.caption(f"ℹ️ AbuseIPDB skipped (Input is {ioc_type}, not IP)")
                 
                 # 2. ThreatFox & URLhaus
-                # העברת המפתח למחלקה
                 tl = ThreatLookup(abuse_ch_key)
                 
+                # ThreatFox Check
                 tf_res = tl.query_threatfox(ioc_input)
                 if tf_res['status'] == 'found':
                     st.error(f"🚨 ThreatFox Found: {len(tf_res['data'])} records!")
-                    st.json(tf_res['data'][0]) # מציג את הרשומה הראשונה והכי רלוונטית
+                    st.json(tf_res['data'][0])
                 elif tf_res['status'] == 'error':
                     st.warning(f"ThreatFox Error: {tf_res['msg']}")
                 else: st.info("ThreatFox: No Match")
                 
+                # URLhaus Check
                 uh_res = tl.query_urlhaus(ioc_input)
                 if uh_res['status'] == 'found':
                     data = uh_res['data']
-                    st.error(f"🚨 URLhaus Found: {data.get('url_status', 'Unknown')}")
+                    st.error(f"🚨 URLhaus Found: {data.get('url_status', 'Active')}")
                     st.write(f"Tags: {data.get('tags')}")
                 elif uh_res['status'] == 'error':
                     st.warning(f"URLhaus Error: {uh_res['msg']}")
@@ -158,17 +179,14 @@ with tab_tools:
             try: st.code(base64.b64decode(d_in).decode(), language="text", line_numbers=False)
             except: st.error("Invalid Base64")
 
-# --- TAB 3: THREAT LANDSCAPE ---
 with tab_landscape:
     mitre = MitreCollector().get_latest_updates()
     if mitre:
         st.info(f"📢 **MITRE ATT&CK Update:** [{mitre['title']}]({mitre['url']})")
 
     st.subheader("Global APT Groups Operations (Google Sheets)")
-    
     col1, col2 = st.columns([1, 4])
     region = col1.radio("Select Theater", ["Israel", "Russia", "China", "Iran"])
-    
     if col1.button("Load Intel"):
         with st.spinner(f"Querying {region} Database..."):
             df_apt = APTSheetCollector().fetch_threats(region)
@@ -177,7 +195,6 @@ with tab_landscape:
             else:
                 st.warning("No data found.")
 
-# --- TAB 4: LIVE MAP ---
 with tab_map:
     st.subheader("🌐 Check Point ThreatCloud Map")
     components.iframe("https://threatmap.checkpoint.com/", height=800, scrolling=False)
