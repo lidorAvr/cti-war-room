@@ -10,9 +10,6 @@ import re
 import base64
 from bs4 import BeautifulSoup
 from dateutil import parser
-# New Google Library
-from google import genai
-from google.genai import types
 
 DB_NAME = "cti_dashboard.db"
 
@@ -53,21 +50,51 @@ def get_ioc_type(ioc):
 def vt_url_id(url):
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
-# --- Health Check Manager (Updated for New SDK) ---
+# --- Google Gemini via Raw HTTP (No Libraries) ---
+async def query_gemini_api(api_key, prompt):
+    """
+    Sends a direct HTTP request to Google API, bypassing library version issues.
+    """
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    try:
+                        return data['candidates'][0]['content']['parts'][0]['text']
+                    except:
+                        return "Error parsing AI response"
+                else:
+                    error_text = await resp.text()
+                    print(f"Gemini API Error {resp.status}: {error_text}")
+                    return None
+    except Exception as e:
+        print(f"Gemini Connection Fail: {e}")
+        return None
+
+# --- Health Check Manager ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
+        # Direct HTTP Check
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
+        payload = {"contents": [{"parts": [{"text": "Ping"}]}]}
         try:
-            client = genai.Client(api_key=key)
-            # Simple ping to check auth
-            response = client.models.generate_content(
-                model='gemini-1.5-flash',
-                contents='Ping'
-            )
-            return True, "Connected (google-genai)"
-        except Exception as e:
-            return False, f"Error: {str(e)[:100]}"
+            res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
+            if res.status_code == 200: return True, "Connected (Direct API)"
+            if res.status_code == 404: return False, "404: Model not found (Check API Key Type)"
+            if res.status_code == 400: return False, "400: Bad Request"
+            return False, f"HTTP {res.status_code}"
+        except Exception as e: return False, str(e)
 
     @staticmethod
     def check_abuseipdb(key):
@@ -82,6 +109,7 @@ class ConnectionManager:
     def check_abusech(key):
         if not key: return False, "Missing Key"
         try:
+            # Public endpoint check to avoid key issues
             res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=10)
             if res.status_code == 200: return True, "Connected (Public)"
             return False, f"HTTP {res.status_code}"
@@ -120,9 +148,8 @@ class IOCExtractor:
             "Hashes": list(set(re.findall(md5_pattern, text) + re.findall(sha256_pattern, text)))
         }
 
-# --- Threat Lookup (Fixed Arguments) ---
+# --- Threat Lookup ---
 class ThreatLookup:
-    # FIX: Added cyscan_key to init to match app.py call
     def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None, cyscan_key=None):
         self.abuse_ch_key = abuse_ch_key.strip() if abuse_ch_key else None
         self.vt_key = vt_key.strip() if vt_key else None
@@ -287,17 +314,16 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- AI Processors (UPDATED TO NEW SDK) ---
+# --- AI Processors (RAW HTTP) ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
-        self.client = genai.Client(api_key=key) if key else None
         
     async def analyze_batch(self, items):
         if not items: return []
         fallback_data = [{"id": i, "category": "General", "severity": "Medium", "impact": "See details", "summary": item['summary'][:150]} for i, item in enumerate(items)]
         
-        if not self.client: return fallback_data
+        if not self.key: return fallback_data
 
         batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
         prompt = f"""
@@ -308,26 +334,25 @@ class AIBatchProcessor:
         {batch_text}
         """
         
-        try:
-            # Using new SDK syntax
-            response = await self.client.aio.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=prompt
-            )
-            
-            text = response.text.replace('```json','').replace('```','').strip()
-            if not text.startswith('['): 
-                start = text.find('[')
-                end = text.rfind(']') + 1
-                text = text[start:end]
-            return json.loads(text)
-            
-        except Exception as e:
-            print(f"AI Fail: {e}")
-            return fallback_data
+        response_text = await query_gemini_api(self.key, prompt)
+        
+        if response_text:
+            try:
+                # Cleanup JSON markdown if present
+                clean_text = response_text.replace('```json','').replace('```','').strip()
+                if not clean_text.startswith('['): 
+                    start = clean_text.find('[')
+                    end = clean_text.rfind(']') + 1
+                    clean_text = clean_text[start:end]
+                return json.loads(clean_text)
+            except Exception as e:
+                print(f"JSON Parse Error: {e}")
+                return fallback_data
+        
+        return fallback_data
 
     async def analyze_single_ioc(self, ioc, data):
-        if not self.client: return "⚠️ Error: No Gemini API Key."
+        if not self.key: return "⚠️ Error: No Gemini API Key."
         
         context_str = json.dumps(data, indent=2, default=str)
         prompt = f"""
@@ -336,14 +361,10 @@ class AIBatchProcessor:
         Provide Verdict, Findings, Recommendation.
         """
         
-        try:
-            response = await self.client.aio.models.generate_content(
-                model='gemini-1.5-flash',
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            return f"❌ AI Error: {str(e)}"
+        response_text = await query_gemini_api(self.key, prompt)
+        if response_text:
+            return response_text
+        return "❌ Error: AI Service Unavailable (HTTP Request Failed)."
 
 def save_reports(raw, analyzed):
     try:
