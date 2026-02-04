@@ -1,12 +1,12 @@
 streamlit
 pandas
-plotly
-pydeck
+requests
+python-dateutil
 beautifulsoup4
 lxml
-aiohttp
-python-dateutil
 streamlit-autorefresh
-# חובה גרסה חדשה כדי לזהות את מודל Flash
+plotly
+pydeck
+aiohttp
 google-generativeai>=0.7.0
-langchain-google-genai>=1.0.3
+langchain-google-genai
