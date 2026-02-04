@@ -91,50 +91,101 @@ class ConnectionManager:
             return False, f"Error {res.status_code}"
         except: return False, "Connection Failed"
 
-# --- COLLECTORS ---
+# --- HYBRID COLLECTOR (RSS + HTML SCRAPING) ---
 class CTICollector:
     SOURCES = [
-        {"name": "CheckPoint", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
-        {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
+        # --- ISRAEL FOCUS ---
+        {"name": "INCD Alerts", "url": "https://www.gov.il/he/departments/news/news-list", "type": "html_gov_il"}, # Generic News list
+        {"name": "CERT-IL", "url": "https://www.gov.il/en/departments/news/news-list", "type": "html_gov_il"}, 
+        {"name": "Calcalist Cyber", "url": "https://www.calcalist.co.il/calcalistech/category/4799", "type": "html_calcalist"},
+        {"name": "JPost Cyber", "url": "https://www.jpost.com/rss/rssfeedscontainer.aspx?type=115", "type": "rss"},
+        
+        # --- GLOBAL NEWS ---
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
+        {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
+        {"name": "SecurityWeek", "url": "https://feeds.feedburner.com/SecurityWeek", "type": "rss"},
+        {"name": "Dark Reading", "url": "https://www.darkreading.com/rss.xml", "type": "rss"},
+        {"name": "The Record", "url": "https://therecord.media/feed", "type": "rss"},
+        
+        # --- DEEP RESEARCH ---
+        {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
+        {"name": "CheckPoint Research", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
-        {"name": "MITRE ATT&CK", "url": "https://attack.mitre.org/atom.xml", "type": "rss"}
+        {"name": "Google Threat Intel", "url": "https://feeds.feedburner.com/GoogleOnlineSecurityBlog", "type": "rss"},
+        {"name": "Securelist (Kaspersky)", "url": "https://securelist.com/feed/", "type": "rss"},
+        {"name": "ESET WeLiveSecurity", "url": "https://www.welivesecurity.com/feed/", "type": "rss"},
+        {"name": "KrebsOnSecurity", "url": "https://krebsonsecurity.com/feed/", "type": "rss"}
     ]
     
     async def fetch_item(self, session, source):
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
         try:
-            async with session.get(source['url'], timeout=15) as resp:
+            async with session.get(source['url'], headers=headers, timeout=15) as resp:
                 if resp.status != 200: return []
                 
+                content = await resp.text()
+                items = []
+                now_iso = datetime.datetime.now(IL_TZ).isoformat()
+
+                # --- HANDLER: RSS/XML ---
                 if source['type'] == 'rss':
-                    text = await resp.text()
-                    soup = BeautifulSoup(text, 'xml')
-                    items = []
-                    entries = soup.find_all('entry')
+                    soup = BeautifulSoup(content, 'xml')
+                    entries = soup.find_all('entry') 
                     if not entries: entries = soup.find_all('item')
 
-                    for i in entries[:7]:
+                    for i in entries[:5]:
                         date_tag = i.published if i.published else (i.pubDate if i.pubDate else None)
-                        if date_tag:
-                            try:
-                                dt_obj = parser.parse(date_tag.text)
-                                if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj)
-                                dt_il = dt_obj.astimezone(IL_TZ)
-                                dt_iso = dt_il.isoformat()
-                            except: dt_iso = datetime.datetime.now(IL_TZ).isoformat()
-                        else: dt_iso = datetime.datetime.now(IL_TZ).isoformat()
+                        dt_iso = self.parse_date(date_tag.text if date_tag else None)
                         
                         raw_desc = (i.summary.text if i.summary else (i.description.text if i.description else ""))
                         clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text()[:600]
                         link = i.link['href'] if i.link and i.link.has_attr('href') else (i.link.text if i.link else "#")
-                        items.append({"title": i.title.text, "url": link, "date": dt_iso, "source": source['name'], "summary": clean_desc})
-                    return items
-                    
+                        title = i.title.text if i.title else "No Title"
+
+                        items.append({"title": title, "url": link, "date": dt_iso, "source": source['name'], "summary": clean_desc})
+                
+                # --- HANDLER: JSON (CISA) ---
                 elif source['type'] == 'json':
-                    data = await resp.json()
-                    return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
-                             "date": datetime.datetime.now(IL_TZ).isoformat(), "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
-        except: return []
+                    data = json.loads(content)
+                    return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", 
+                             "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
+                             "date": now_iso, "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
+
+                # --- HANDLER: HTML GOV.IL (Scraping Attempt) ---
+                elif source['type'] == 'html_gov_il':
+                    soup = BeautifulSoup(content, 'html.parser')
+                    # This is a generic approximation for gov.il structures
+                    for article in soup.find_all('div', class_='row item')[:5]:
+                        link_tag = article.find('a')
+                        if link_tag:
+                            title = link_tag.get_text().strip()
+                            url = "https://www.gov.il" + link_tag['href'] if link_tag['href'].startswith('/') else link_tag['href']
+                            items.append({"title": title, "url": url, "date": now_iso, "source": source['name'], "summary": "Government Publication"})
+
+                # --- HANDLER: CALCALIST ---
+                elif source['type'] == 'html_calcalist':
+                    soup = BeautifulSoup(content, 'html.parser')
+                    for art in soup.find_all('div', class_='MainItem')[:5]:
+                        h1 = art.find('h1')
+                        if h1:
+                            link = h1.find('a')
+                            if link:
+                                items.append({"title": link.get_text().strip(), "url": link['href'], "date": now_iso, "source": source['name'], "summary": "Calcalist Tech Report"})
+
+                return items
+        except Exception as e:
+            print(f"Error fetching {source['name']}: {e}")
+            return []
+
+    def parse_date(self, date_str):
+        if not date_str: return datetime.datetime.now(IL_TZ).isoformat()
+        try:
+            dt_obj = parser.parse(date_str)
+            if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj)
+            dt_il = dt_obj.astimezone(IL_TZ)
+            return dt_il.isoformat()
+        except:
+            return datetime.datetime.now(IL_TZ).isoformat()
 
     async def get_all_data(self):
         async with aiohttp.ClientSession() as session:
@@ -142,7 +193,7 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- AI PROCESSOR ---
+# --- AI PROCESSORS ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
@@ -154,10 +205,10 @@ class AIBatchProcessor:
             
         batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}|Desc:{x['summary'][:150]}" for i,x in enumerate(items)])
         prompt = f"""
-        Act as a Cyber Intelligence Analyst. Analyze these items.
+        Act as a Tier 3 SOC Analyst. Analyze these items.
         
         Rules:
-        1. 'Israel'/'Iran'/'Hamas' in text -> Category 'Israel Focus'.
+        1. 'Israel'/'Iran'/'Hamas'/'Hezbollah' in text -> Category 'Israel Focus'.
         2. 'CISA' or 'CVE' -> Severity 'Critical'.
         3. 'MITRE' -> Category 'Research'.
         4. Categories: [Israel Focus, Malware, Phishing, Vulnerability, Research, General].
@@ -171,6 +222,7 @@ class AIBatchProcessor:
         Items:
         {batch_text}
         """
+        
         res = await query_gemini_auto(self.key, prompt)
         if res:
             try:
@@ -184,24 +236,54 @@ class AIBatchProcessor:
         prompt = f"""
         **SOC Analyst Request:** Investigate IOC: {ioc}
         **Data:** {json.dumps(data, indent=2, default=str)}
-        **Task:** Markdown report. 1. Verdict. 2. Summary. 3. Evidence. 4. Actions.
+        **Task:** Markdown report. 1. Verdict (Malicious/Safe). 2. Summary. 3. Key Evidence. 4. Actions.
         """
         return await query_gemini_auto(self.key, prompt)
 
-    async def generate_hunting_queries(self, actor_profile):
+    async def generate_hunting_queries(self, actor_profile, recent_news=""):
         prompt = f"""
-        Act as a Threat Hunter. Create detection queries for: {actor_profile['name']}.
-        Profile: {json.dumps(actor_profile)}
+        Act as a Detection Engineer. Create detection logic for Threat Actor: {actor_profile['name']}.
         
-        Output Markdown:
-        ### 🛡️ Detection Logic
-        1. **Microsoft Sentinel (KQL):**
-        ```kql
-        // Query here
+        **Actor Profile:** {json.dumps(actor_profile)}
+        **Recent Context:** {recent_news}
+        
+        **Task:** Generate specific, copy-paste detection queries.
+        
+        **Output Format (Markdown):**
+        
+        ### 🧠 Analyst Explanation (Simple English)
+        *Briefly explain what we are looking for (e.g., "We are hunting for PowerShell scripts downloading files from suspicious domains related to OilRig").*
+        
+        ### 🛡️ Detection Queries
+        
+        **1. Google SecOps (Chronicle YARA-L)**
+        ```yaral
+        rule {actor_profile['name'].replace(' ','_')}_Detection {{
+          meta:
+            author = "SOC War Room"
+            description = "Detects TTPs for {actor_profile['name']}"
+          events:
+            // Insert logic here based on tools: {actor_profile['tools']}
+            $e.metadata.event_type = "PROCESS_LAUNCH"
+            // Add condition
+          condition:
+            $e
+        }}
         ```
-        2. **Splunk (SPL):**
+        
+        **2. Cortex XDR (XQL)**
+        ```sql
+        dataset = xdr_data 
+        | filter event_type = PROCESS 
+        | filter action_process_image_name ~= "powershell.exe" 
+        // Add specific logic for {actor_profile['tools']}
+        ```
+        
+        **3. Splunk (SPL)**
         ```splunk
-        // Query here
+        index=main sourcetype="WinEventLog:Security" 
+        | search "powershell" 
+        // Add logic
         ```
         """
         return await query_gemini_auto(self.key, prompt)
@@ -254,7 +336,7 @@ class ThreatLookup:
                 if data.get("results"):
                     result = data["results"][0]
                     return {"status": "found", "screenshot": result.get("screenshot"), "verdict": result.get("verdict"), "page": result.get("page")}
-                return {"status": "not_found", "msg": "No existing scan found"}
+                return {"status": "not_found", "msg": "No scan found in DB"}
             elif res.status_code == 401: return {"status": "error", "msg": "Invalid API Key"}
             return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
