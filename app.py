@@ -38,27 +38,36 @@ with st.sidebar:
     st.header("⚙️ Config")
     gemini_key = st.text_input("Gemini API Key", type="password").strip() or None
     abuse_key = st.text_input("AbuseIPDB Key", type="password").strip() or None
-    abuse_ch_key = st.text_input("Abuse.ch API Key", type="password", help="For ThreatFox/URLhaus").strip() or None
+    abuse_ch_key = st.text_input("Abuse.ch Key (ThreatFox/URLhaus)", type="password").strip() or None
+    
+    st.divider()
+    st.caption("New Integrations")
+    vt_key = st.text_input("VirusTotal API Key", type="password").strip() or None
+    urlscan_key = st.text_input("urlscan.io API Key", type="password").strip() or None
     
     st.divider()
     
-    # --- כפתור בדיקת חיבורים חדש ---
     if st.button("✅ Check Connections"):
         st.write("---")
         # 1. Gemini
         ok, msg = ConnectionManager.check_gemini(gemini_key)
-        if ok: st.success(f"Gemini: {msg}")
-        else: st.error(f"Gemini: {msg}")
+        st.caption(f"Gemini: {'✅' if ok else '❌'} {msg}")
         
         # 2. AbuseIPDB
         ok, msg = ConnectionManager.check_abuseipdb(abuse_key)
-        if ok: st.success(f"AbuseIPDB: {msg}")
-        else: st.error(f"AbuseIPDB: {msg}")
+        st.caption(f"AbuseIPDB: {'✅' if ok else '❌'} {msg}")
         
         # 3. Abuse.ch
         ok, msg = ConnectionManager.check_abusech(abuse_ch_key)
-        if ok: st.success(f"Abuse.ch: {msg}")
-        else: st.error(f"Abuse.ch: {msg}")
+        st.caption(f"Abuse.ch: {'✅' if ok else '❌'} {msg}")
+
+        # 4. VirusTotal
+        ok, msg = ConnectionManager.check_virustotal(vt_key)
+        st.caption(f"VirusTotal: {'✅' if ok else '❌'} {msg}")
+
+        # 5. urlscan.io
+        ok, msg = ConnectionManager.check_urlscan(urlscan_key)
+        st.caption(f"urlscan.io: {'✅' if ok else '❌'} {msg}")
         st.write("---")
 
     if st.button("🚀 Force Global Scan", disabled=not gemini_key):
@@ -111,72 +120,90 @@ with tab_feed:
             </div>""", unsafe_allow_html=True)
 
 with tab_tools:
-    st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3><p>Active tools for IOC analysis and extraction.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3><p>Active tools for IOC analysis.</p></div>", unsafe_allow_html=True)
     
     t1, t2, t3 = st.tabs(["🔍 Universal Lookup", "📝 IOC Extractor", "🔓 Decoders"])
     
     with t1:
-        st.subheader("Check IP / Hash / URL")
-        st.caption("Supports AbuseIPDB, ThreatFox, and URLhaus. API Keys required.")
+        st.subheader("Check IP / Hash / URL / Domain")
+        st.caption("Checks: AbuseIPDB, ThreatFox, URLhaus, VirusTotal, urlscan.io")
         col1, col2 = st.columns([3, 1])
-        ioc_input = col1.text_input("Enter Indicator (IP, Domain, MD5, SHA256)")
+        ioc_input = col1.text_input("Enter Indicator")
         
         if col2.button("Investigate"):
             if not ioc_input: st.warning("Enter an IOC")
             else:
                 st.divider()
                 ioc_type = get_ioc_type(ioc_input)
+                st.markdown(f"**Detected Type:** `{ioc_type.upper()}`")
 
-                # 1. AbuseIPDB - בדיקה רק אם זה IP
+                # 1. AbuseIPDB
                 if ioc_type == "ip":
                     if abuse_key:
                         res = AbuseIPDBChecker(abuse_key).check_ip(ioc_input)
                         if "success" in res:
                             d = res['data']
-                            st.success(f"✅ AbuseIPDB: {d['abuseConfidenceScore']}% Malicious | ISP: {d['isp']} | {d['countryCode']}")
-                        else: st.warning(f"AbuseIPDB Error: {res.get('error')}")
+                            score = d['abuseConfidenceScore']
+                            color = "red" if score > 50 else "green"
+                            st.markdown(f"#### 🌐 AbuseIPDB: :{color}[{score}% Malicious]")
+                            st.write(f"ISP: {d['isp']} | {d['countryCode']}")
+                        else: st.warning(f"AbuseIPDB: {res.get('error')}")
                     else: st.info("AbuseIPDB: Key Missing")
-                else:
-                    # הודעה אפורה שקטה אם זה דומיין
-                    st.caption(f"ℹ️ AbuseIPDB skipped (Input is {ioc_type}, not IP)")
                 
                 # 2. ThreatFox & URLhaus
-                tl = ThreatLookup(abuse_ch_key)
+                tl = ThreatLookup(abuse_ch_key, vt_key, urlscan_key)
                 
-                # ThreatFox Check
-                tf_res = tl.query_threatfox(ioc_input)
-                if tf_res['status'] == 'found':
-                    st.error(f"🚨 ThreatFox Found: {len(tf_res['data'])} records!")
-                    st.json(tf_res['data'][0])
-                elif tf_res['status'] == 'error':
-                    st.warning(f"ThreatFox Error: {tf_res['msg']}")
-                else: st.info("ThreatFox: No Match")
+                tf = tl.query_threatfox(ioc_input)
+                if tf['status'] == 'found':
+                    st.error(f"🚨 ThreatFox: Found {len(tf['data'])} records")
+                    st.json(tf['data'][0])
                 
-                # URLhaus Check
-                uh_res = tl.query_urlhaus(ioc_input)
-                if uh_res['status'] == 'found':
-                    data = uh_res['data']
-                    st.error(f"🚨 URLhaus Found: {data.get('url_status', 'Active')}")
-                    st.write(f"Tags: {data.get('tags')}")
-                elif uh_res['status'] == 'error':
-                    st.warning(f"URLhaus Error: {uh_res['msg']}")
-                else: st.info("URLhaus: No Match")
+                uh = tl.query_urlhaus(ioc_input)
+                if uh['status'] == 'found':
+                    st.error(f"🚨 URLhaus: Found")
+                    st.write(uh['data'])
+
+                # 3. VirusTotal (New!)
+                vt = tl.query_virustotal(ioc_input)
+                if vt['status'] == 'found':
+                    stats = vt['stats']
+                    malicious = stats.get('malicious', 0)
+                    total = sum(stats.values())
+                    color = "red" if malicious > 0 else "green"
+                    st.markdown(f"#### 🦠 VirusTotal: :{color}[{malicious}/{total} Malicious]")
+                    st.write(f"Reputation Score: {vt.get('reputation')}")
+                    # Display Stats Bar
+                    st.bar_chart(stats)
+                elif vt['status'] == 'not_found': st.success("VirusTotal: Clean / Not Found")
+                elif vt['status'] == 'skipped': st.info("VirusTotal: Key Missing")
+                else: st.warning(f"VirusTotal: {vt.get('msg')}")
+
+                # 4. urlscan.io (New!)
+                us = tl.query_urlscan(ioc_input)
+                if us['status'] == 'found':
+                    st.markdown("#### 📷 urlscan.io Result")
+                    c1, c2 = st.columns([1,2])
+                    with c1:
+                         if us.get('screenshot'): st.image(us['screenshot'], caption="Latest Scan")
+                    with c2:
+                         st.write(f"**Verdict:** {us.get('verdict', {}).get('overall', 'Unknown')}")
+                         st.write(f"**Page:** {us.get('page', {}).get('url', 'N/A')}")
+                         st.write(f"**Seen:** {us.get('task', {}).get('time', 'N/A')}")
+                elif us['status'] == 'skipped': st.info("urlscan.io: Key Missing")
+                elif us['status'] == 'not_found': st.info("urlscan.io: No history found")
 
     with t2:
         st.subheader("Extract IOCs from Text")
-        raw_text = st.text_area("Paste report text, email headers, or logs here:", height=150)
-        if st.button("Extract Artifacts"):
+        raw_text = st.text_area("Paste text here:", height=150)
+        if st.button("Extract"):
             extracted = IOCExtractor().extract(raw_text)
-            c1, c2, c3 = st.columns(3)
-            c1.write("### 🌐 IPs"); c1.write(extracted['IPs'])
-            c2.write("### 🔗 Domains"); c2.write(extracted['Domains'])
-            c3.write("### #️⃣ Hashes"); c3.write(extracted['Hashes'])
+            st.json(extracted)
 
     with t3:
         st.subheader("Quick Decoders")
         d_in = st.text_input("Encoded String")
         if d_in:
-            try: st.code(base64.b64decode(d_in).decode(), language="text", line_numbers=False)
+            try: st.code(base64.b64decode(d_in).decode(), language="text")
             except: st.error("Invalid Base64")
 
 with tab_landscape:
@@ -184,7 +211,7 @@ with tab_landscape:
     if mitre:
         st.info(f"📢 **MITRE ATT&CK Update:** [{mitre['title']}]({mitre['url']})")
 
-    st.subheader("Global APT Groups Operations (Google Sheets)")
+    st.subheader("Global APT Groups Operations")
     col1, col2 = st.columns([1, 4])
     region = col1.radio("Select Theater", ["Israel", "Russia", "China", "Iran"])
     if col1.button("Load Intel"):
