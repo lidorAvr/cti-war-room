@@ -17,12 +17,8 @@ st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️"
 # --- CUSTOM CSS ---
 st.markdown("""
 <style>
-    /* Global Settings */
-    html, body, [class*="css"] {
-        font-family: 'Segoe UI', sans-serif;
-    }
+    html, body, [class*="css"] { font-family: 'Segoe UI', sans-serif; }
     
-    /* Feed Cards - White BG, Dark Text */
     .report-card {
         background-color: #ffffff;
         padding: 20px;
@@ -33,30 +29,18 @@ st.markdown("""
         color: #1a1a1a;
     }
     
-    /* Tags */
-    .tag {
-        display: inline-block;
-        padding: 4px 10px;
-        border-radius: 4px;
-        font-weight: 700;
-        font-size: 0.8rem !important;
-        margin-right: 8px;
-        text-transform: uppercase;
-    }
+    .tag { display: inline-block; padding: 4px 10px; border-radius: 4px; font-weight: 700; font-size: 0.8rem !important; margin-right: 8px; text-transform: uppercase; }
     .tag-time { background-color: #f0f0f0; color: #333; border: 1px solid #ddd; }
-    
     .tag-critical { background-color: #ffcccc; color: #990000; border: 1px solid #cc0000; }
     .tag-high { background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba; }
     .tag-israel { background-color: #d6eaff; color: #004085; border: 1px solid #b8daff; }
     .tag-medium { background-color: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
     
-    /* Card Typography */
     .card-title { font-size: 1.25rem; font-weight: 700; margin: 8px 0; color: #000; }
     .card-summary { font-size: 1rem; color: #333; line-height: 1.5; margin-bottom: 12px; }
     .card-meta { font-size: 0.85rem; color: #555; display: flex; justify-content: space-between; }
     a { text-decoration: none; color: #0066cc; font-weight: bold; }
     
-    /* Status Header */
     .status-header {
         background-color: #f8f9fa;
         color: #333;
@@ -68,6 +52,10 @@ st.markdown("""
         justify-content: space-between;
         align-items: center;
     }
+    
+    /* Strategic Cards */
+    .strat-header { font-size: 1.2rem; font-weight: bold; color: #333; }
+    .strat-meta { font-size: 0.9rem; color: #666; margin-bottom: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -138,9 +126,7 @@ with tab_feed:
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
     conn.close()
 
-    # --- BUTTON FILTERS ---
     c1, c2, c3, c4 = st.columns(4)
-    
     count_crit = len(df[df['severity'].str.contains('Critical', case=False)])
     count_il = len(df[df['category'].str.contains('Israel', case=False)])
     count_mal = len(df[df['category'].str.contains('Malware', case=False)])
@@ -197,6 +183,7 @@ with tab_tools:
             st.session_state.ioc_data = {}
             
             with st.status("Scanning Engines...", expanded=True) as status:
+                # Passing URLSCAN_KEY explicitly to fix the issue
                 tl = ThreatLookup(vt_key=VT_KEY, urlscan_key=URLSCAN_KEY, abuse_ch_key="")
                 
                 vt_res = tl.query_virustotal(ioc_input)
@@ -236,7 +223,7 @@ with tab_tools:
                 st.write(f"**Verdict:** {d.get('verdict', {}).get('overall')}")
                 if d.get('screenshot'): st.image(d['screenshot'])
                 if d.get('page'): st.write(f"**Page:** {d['page'].get('url')}")
-            else: st.info("Not Found / No Key")
+            else: st.info(d.get('msg', 'Not Found / No Key'))
 
         with t3:
             d = st.session_state.ioc_data.get('abuseipdb', {})
@@ -256,22 +243,28 @@ with tab_tools:
                  st.markdown(rep)
 
 with tab_strat:
-    st.subheader("🧠 Strategic Intelligence: Active APT Groups")
-    st.caption("Monitoring key threat actors targeting Israel and the Middle East.")
+    st.subheader("🧠 Threat Actor Profiles & Hunting")
+    st.caption("Detailed profiles of key adversaries targeting the region. Generate hunting queries with AI.")
     
     col = APTSheetCollector()
-    df_apt = col.fetch_threats("Israel")
+    threats = col.fetch_threats()
     
-    if not df_apt.empty:
-        st.dataframe(
-            df_apt,
-            column_config={
-                "Group": st.column_config.TextColumn("Threat Actor", help="Name of the APT Group"),
-                "Origin": st.column_config.TextColumn("Origin", help="Suspected attribution"),
-                "Type": st.column_config.TextColumn("Motivation", help="Espionage, Sabotage, etc."),
-            },
-            use_container_width=True,
-            hide_index=True
-        )
-    else:
-        st.info("Strategic database connection currently unavailable.")
+    # Grid Layout for Threat Cards
+    cols = st.columns(3)
+    
+    for i, actor in enumerate(threats):
+        with cols[i % 3]:
+            with st.expander(f"{actor['origin']} {actor['name']}", expanded=True):
+                st.markdown(f"**Target:** {actor['target']}")
+                st.markdown(f"**Type:** {actor['type']}")
+                st.markdown(f"_{actor['desc']}_")
+                st.divider()
+                st.markdown(f"**Tools:** `{actor['tools']}`")
+                
+                # Hunting Action
+                if st.button(f"🤖 Hunt {actor['name']}", key=f"btn_{i}"):
+                    with st.spinner(f"Generating Hunting Queries for {actor['name']}..."):
+                        proc = AIBatchProcessor(GEMINI_KEY)
+                        queries = asyncio.run(proc.generate_hunting_queries(actor))
+                        st.markdown("### 🏹 Detection Rules")
+                        st.markdown(queries)
