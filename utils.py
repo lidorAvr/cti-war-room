@@ -32,7 +32,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # HARD CLEANUP: Remove records older than 48 hours
+    # HARD CLEANUP: Remove records older than 48 hours from DB
     limit = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
@@ -48,6 +48,7 @@ def _is_url_processed(url):
         return result is not None
     except: return False
 
+# --- CONNECTION & AI ENGINES ---
 class ConnectionManager:
     @staticmethod
     def check_groq(key):
@@ -127,6 +128,16 @@ class ThreatLookup:
             return res.json().get('data', {})
         except: return None
 
+# --- STRATEGIC INTEL ---
+class APTSheetCollector:
+    def fetch_threats(self): 
+        return [
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure.", "mitre": "T1059"},
+            {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel / Middle East", "type": "Espionage", "tools": "DNS Tunneling, SideTwist", "desc": "Sophisticated espionage targeting critical sectors.", "mitre": "T1071.004"},
+            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers", "desc": "Focuses on high-impact data destruction.", "mitre": "T1485"}
+        ]
+
+# --- DATA COLLECTION ---
 class CTICollector:
     SOURCES = [
         {"name": "INCD Alerts", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"},
@@ -148,7 +159,7 @@ class CTICollector:
                     for entry in feed.entries[:10]:
                         if _is_url_processed(entry.link): continue
                         
-                        # --- TIME LOGIC: Use Original Publication Date ---
+                        # --- TIME LOGIC: Get Original Publication Date ---
                         pub_date = now
                         if hasattr(entry, 'published_parsed') and entry.published_parsed:
                             pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
@@ -156,7 +167,7 @@ class CTICollector:
                             try: pub_date = date_parser.parse(entry.published).astimezone(IL_TZ)
                             except: pass
 
-                        # 48h Filter
+                        # Filter: Skip if older than 48 hours
                         if (now - pub_date).total_seconds() > 172800: continue
 
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
@@ -167,6 +178,12 @@ class CTICollector:
                             "source": source['name'], 
                             "summary": sum_text
                         })
+                elif source['type'] == 'json':
+                     data = json.loads(content)
+                     for v in data.get('vulnerabilities', [])[:10]:
+                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
+                         if _is_url_processed(url): continue
+                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": now.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
                 return items
         except: return []
 
@@ -182,9 +199,11 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
-                (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], item['title'], a['category'], a['severity'], a['summary']))
-            if c.rowcount > 0: cnt += 1
+            try:
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], item['title'], a['category'], a['severity'], a['summary']))
+                if c.rowcount > 0: cnt += 1
+            except: pass
     conn.commit()
     conn.close()
     return cnt
