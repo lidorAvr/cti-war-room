@@ -5,9 +5,10 @@ import sqlite3
 import base64
 import json
 from streamlit_autorefresh import st_autorefresh
-# התיקון: הפרדת השורות
-from utils import * st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
+from utils import * # --- CONFIGURATION ---
+st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
 
+# --- STYLING ---
 st.markdown("""
 <style>
     .report-card { background-color: #1E1E1E; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom: 10px; }
@@ -26,17 +27,17 @@ if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
 
 st.title("🛡️ SOC War Room")
 
-# --- SIDEBAR: KEY DEBUGGING ---
+# --- SIDEBAR: KEY CONFIGURATION ---
 with st.sidebar:
     st.header("🔧 API Configuration")
     
-    # טעינת מפתח: קודם מ-Secrets, אם אין - אז מהתיבה הידנית
+    # ניסיון לטעון מ-Secrets, ואם אין - מחרוזת ריקה
     try: 
         secret_key = st.secrets["gemini_key"]
     except: 
         secret_key = ""
     
-    # תיבת טקסט למפתח - זה הפתרון הכי בטוח כרגע
+    # תיבת טקסט למפתח - מאפשרת דריסה ידנית או הזנה ראשונית
     user_key = st.text_input("Gemini API Key:", value=secret_key, type="password")
     
     # המפתח בפועל לשימוש
@@ -58,9 +59,9 @@ with st.sidebar:
     if st.button("🚀 Run Scan"):
         with st.spinner("Analyzing..."):
             async def scan():
-                # אתחול האובייקטים עם המפתח שהוזן
+                # אתחול האובייקטים
                 col = CTICollector()
-                # חשוב: מעבירים את המפתח ל-Processor
+                # מעבירים את המפתח ל-Processor
                 proc = AIBatchProcessor(gemini_key)
                 
                 raw = await col.get_all_data()
@@ -79,16 +80,27 @@ with tab1:
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
     conn.close()
     
-    if df.empty:
+    cols = st.columns(4)
+    if cols[0].button("🚨 Critical"): st.session_state.filter_type = 'Critical'
+    if cols[1].button("🇮🇱 Israel"): st.session_state.filter_type = 'Israel'
+    if cols[3].button("All"): st.session_state.filter_type = 'All'
+
+    view_df = df
+    if st.session_state.filter_type == 'Critical': view_df = df[df['severity'] == 'Critical']
+    elif st.session_state.filter_type == 'Israel': view_df = df[df['category'] == 'Israel Focus']
+
+    if view_df.empty:
         st.info("No reports yet. Click 'Run Scan' in the sidebar.")
     else:
-        for _, row in df.iterrows():
+        for _, row in view_df.iterrows():
+            sev = "tag-critical" if row['severity']=='Critical' else "tag-medium"
             st.markdown(f"""
             <div class="report-card">
+                <span class="tag {sev}">{row['severity']}</span>
+                <span class="tag tag-medium">{row['category']}</span>
                 <h4>{row['title']}</h4>
                 <p>{row['summary']}</p>
-                <small>Source: {row['source']} | Severity: {row['severity']}</small>
-                <br><a href="{row['url']}" target="_blank">Read More</a>
+                <a href="{row['url']}" target="_blank">Read More</a>
             </div>""", unsafe_allow_html=True)
 
 with tab2:
