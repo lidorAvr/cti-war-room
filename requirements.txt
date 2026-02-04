@@ -4,5 +4,4 @@ requests
 beautifulsoup4
 python-dateutil
 pytz
-google-generativeai
 streamlit-autorefresh
