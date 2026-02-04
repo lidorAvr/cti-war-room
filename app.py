@@ -52,10 +52,6 @@ st.markdown("""
         justify-content: space-between;
         align-items: center;
     }
-    
-    /* Strategic Cards */
-    .strat-header { font-size: 1.2rem; font-weight: bold; color: #333; }
-    .strat-meta { font-size: 0.9rem; color: #666; margin-bottom: 5px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -66,7 +62,7 @@ init_db()
 
 # --- INIT STATE ---
 if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
-if 'ioc_data' not in st.session_state: st.session_state.ioc_data = None
+if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {} # Fixed init
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
 
 # --- LOAD SECRETS ---
@@ -127,6 +123,7 @@ with tab_feed:
     conn.close()
 
     c1, c2, c3, c4 = st.columns(4)
+    
     count_crit = len(df[df['severity'].str.contains('Critical', case=False)])
     count_il = len(df[df['category'].str.contains('Israel', case=False)])
     count_mal = len(df[df['category'].str.contains('Malware', case=False)])
@@ -183,12 +180,12 @@ with tab_tools:
             st.session_state.ioc_data = {}
             
             with st.status("Scanning Engines...", expanded=True) as status:
-                # Passing URLSCAN_KEY explicitly to fix the issue
                 tl = ThreatLookup(vt_key=VT_KEY, urlscan_key=URLSCAN_KEY, abuse_ch_key="")
                 
                 vt_res = tl.query_virustotal(ioc_input)
                 st.write(f"VirusTotal: {vt_res.get('status')}")
                 
+                # Pass URLSCAN_KEY explicitly
                 us_res = tl.query_urlscan(ioc_input)
                 st.write(f"URLScan: {us_res.get('status')}")
 
@@ -223,7 +220,9 @@ with tab_tools:
                 st.write(f"**Verdict:** {d.get('verdict', {}).get('overall')}")
                 if d.get('screenshot'): st.image(d['screenshot'])
                 if d.get('page'): st.write(f"**Page:** {d['page'].get('url')}")
-            else: st.info(d.get('msg', 'Not Found / No Key'))
+            else: 
+                msg = d.get('msg', 'Not Found (No existing scan)')
+                st.info(f"URLScan: {msg}")
 
         with t3:
             d = st.session_state.ioc_data.get('abuseipdb', {})
@@ -243,28 +242,36 @@ with tab_tools:
                  st.markdown(rep)
 
 with tab_strat:
-    st.subheader("🧠 Threat Actor Profiles & Hunting")
-    st.caption("Detailed profiles of key adversaries targeting the region. Generate hunting queries with AI.")
+    st.subheader("🧠 Strategic Intelligence: Active APT Groups")
+    st.caption("Monitoring key threat actors targeting Israel and the Middle East.")
     
     col = APTSheetCollector()
     threats = col.fetch_threats()
     
-    # Grid Layout for Threat Cards
-    cols = st.columns(3)
+    # Search Bar
+    search_term = st.text_input("Search Actor (e.g., Iran, Wipe)", "").lower()
     
-    for i, actor in enumerate(threats):
-        with cols[i % 3]:
-            with st.expander(f"{actor['origin']} {actor['name']}", expanded=True):
-                st.markdown(f"**Target:** {actor['target']}")
-                st.markdown(f"**Type:** {actor['type']}")
-                st.markdown(f"_{actor['desc']}_")
-                st.divider()
-                st.markdown(f"**Tools:** `{actor['tools']}`")
-                
-                # Hunting Action
-                if st.button(f"🤖 Hunt {actor['name']}", key=f"btn_{i}"):
-                    with st.spinner(f"Generating Hunting Queries for {actor['name']}..."):
-                        proc = AIBatchProcessor(GEMINI_KEY)
-                        queries = asyncio.run(proc.generate_hunting_queries(actor))
-                        st.markdown("### 🏹 Detection Rules")
-                        st.markdown(queries)
+    # Filter
+    filtered_threats = [t for t in threats if search_term in str(t).lower()]
+    
+    if not filtered_threats:
+        st.warning("No actors match your search.")
+    else:
+        # Display Cards
+        cols = st.columns(3)
+        for i, actor in enumerate(filtered_threats):
+            with cols[i % 3]:
+                with st.container(border=True):
+                    st.markdown(f"### {actor['origin']} {actor['name']}")
+                    st.markdown(f"**Type:** {actor['type']}")
+                    st.markdown(f"**Target:** {actor['target']}")
+                    st.markdown(f"_{actor['desc']}_")
+                    st.markdown(f"**Tools:** `{actor['tools']}`")
+                    st.markdown(f"**MITRE:** `{actor.get('mitre', 'N/A')}`")
+                    
+                    if st.button(f"🏹 Hunt {actor['name']}", key=f"btn_{i}"):
+                        with st.spinner("Generating detection rules..."):
+                            proc = AIBatchProcessor(GEMINI_KEY)
+                            rules = asyncio.run(proc.generate_hunting_queries(actor))
+                            st.info("Detection Logic Generated:")
+                            st.markdown(rules)
