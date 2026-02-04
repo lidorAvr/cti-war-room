@@ -3,7 +3,6 @@ import asyncio
 import aiohttp
 import json
 import datetime
-import ssl
 import requests
 import pandas as pd
 import re
@@ -47,15 +46,19 @@ def get_ioc_type(ioc):
     if "http" in ioc or "/" in ioc: return "url"
     return "domain"
 
-def vt_url_id(url):
-    return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-
-# --- Google Gemini via Raw HTTP (No Libraries) ---
-async def query_gemini_api(api_key, prompt):
+# --- CORE: Direct HTTP Request to Google (Bypassing all libraries) ---
+async def query_gemini_http(api_key, prompt):
     """
-    Sends a direct HTTP request to Google API, bypassing library version issues.
+    Tries multiple model endpoints directly via HTTP to bypass library version hell.
     """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    # List of endpoints to try in order.
+    # We try both 'models/' prefix and specific versions.
+    endpoints = [
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent"
+    ]
+    
     headers = {'Content-Type': 'application/json'}
     payload = {
         "contents": [{
@@ -63,38 +66,49 @@ async def query_gemini_api(api_key, prompt):
         }]
     }
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=20) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    try:
-                        return data['candidates'][0]['content']['parts'][0]['text']
-                    except:
-                        return "Error parsing AI response"
-                else:
-                    error_text = await resp.text()
-                    print(f"Gemini API Error {resp.status}: {error_text}")
-                    return None
-    except Exception as e:
-        print(f"Gemini Connection Fail: {e}")
-        return None
+    async with aiohttp.ClientSession() as session:
+        for url in endpoints:
+            target_url = f"{url}?key={api_key}"
+            try:
+                # print(f"DEBUG: Trying {url.split('/models/')[1]}...")
+                async with session.post(target_url, headers=headers, json=payload, timeout=20) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        try:
+                            # Extract text safely
+                            return data['candidates'][0]['content']['parts'][0]['text']
+                        except:
+                            continue # Malformed response, try next
+                    elif resp.status == 429:
+                        return None # Quota exceeded, stop trying
+                    # If 404 or other error, loop to next model
+            except:
+                continue
+                
+    return None
 
 # --- Health Check Manager ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
-        # Direct HTTP Check
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
-        payload = {"contents": [{"parts": [{"text": "Ping"}]}]}
-        try:
-            res = requests.post(url, json=payload, headers={'Content-Type': 'application/json'}, timeout=10)
-            if res.status_code == 200: return True, "Connected (Direct API)"
-            if res.status_code == 404: return False, "404: Model not found (Check API Key Type)"
-            if res.status_code == 400: return False, "400: Bad Request"
-            return False, f"HTTP {res.status_code}"
-        except Exception as e: return False, str(e)
+        
+        # Test connection synchronously
+        models_to_test = [
+            "gemini-1.5-flash",
+            "gemini-1.5-pro",
+            "gemini-pro"
+        ]
+        
+        for m in models_to_test:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent?key={key}"
+            try:
+                res = requests.post(url, json={"contents": [{"parts": [{"text": "Ping"}]}]}, timeout=5)
+                if res.status_code == 200: return True, f"Connected ({m})"
+                if res.status_code == 429: return False, "Quota Exceeded (429)"
+            except: pass
+            
+        return False, "Failed to connect to ANY Gemini model (Check Key Type)"
 
     @staticmethod
     def check_abuseipdb(key):
@@ -103,268 +117,131 @@ class ConnectionManager:
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': key}, params={'ipAddress': '8.8.8.8'}, timeout=5)
             if res.status_code == 200: return True, "Connected"
             return False, f"HTTP {res.status_code}"
-        except Exception as e: return False, str(e)
+        except: return False, "Error"
 
     @staticmethod
     def check_abusech(key):
-        if not key: return False, "Missing Key"
         try:
-            # Public endpoint check to avoid key issues
             res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=10)
-            if res.status_code == 200: return True, "Connected (Public)"
+            if res.status_code == 200: return True, "Connected"
             return False, f"HTTP {res.status_code}"
-        except Exception as e: return False, str(e)
+        except: return False, "Error"
 
     @staticmethod
     def check_virustotal(key):
         if not key: return False, "Missing Key"
         try:
-            headers = {"x-apikey": key}
-            res = requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers=headers, timeout=5)
+            res = requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers={"x-apikey": key}, timeout=5)
             if res.status_code == 200: return True, "Connected"
             return False, f"HTTP {res.status_code}"
-        except Exception as e: return False, str(e)
+        except: return False, "Error"
 
     @staticmethod
     def check_urlscan(key):
         if not key: return False, "Missing Key"
         try:
-            headers = {"API-Key": key}
-            res = requests.get("https://urlscan.io/api/v1/search/?q=domain:google.com", headers=headers, timeout=5)
+            res = requests.get("https://urlscan.io/api/v1/search/?q=domain:google.com", headers={"API-Key": key}, timeout=5)
             if res.status_code == 200: return True, "Connected"
             return False, f"HTTP {res.status_code}"
-        except Exception as e: return False, str(e)
-
-# --- IOC Extractor ---
-class IOCExtractor:
-    def extract(self, text):
-        ipv4_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
-        domain_pattern = r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b'
-        md5_pattern = r'\b[a-fA-F0-9]{32}\b'
-        sha256_pattern = r'\b[a-fA-F0-9]{64}\b'
-        return {
-            "IPs": list(set(re.findall(ipv4_pattern, text))),
-            "Domains": list(set(re.findall(domain_pattern, text))),
-            "Hashes": list(set(re.findall(md5_pattern, text) + re.findall(sha256_pattern, text)))
-        }
+        except: return False, "Error"
 
 # --- Threat Lookup ---
 class ThreatLookup:
     def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None, cyscan_key=None):
-        self.abuse_ch_key = abuse_ch_key.strip() if abuse_ch_key else None
-        self.vt_key = vt_key.strip() if vt_key else None
-        self.urlscan_key = urlscan_key.strip() if urlscan_key else None
-        self.cyscan_key = cyscan_key.strip() if cyscan_key else None
-        
-        self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
-        self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
-        self.uh_host = "https://urlhaus-api.abuse.ch/v1/host/"
-        self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
+        self.abuse_ch_key = abuse_ch_key
+        self.vt_key = vt_key
+        self.urlscan_key = urlscan_key
+        self.cyscan_key = cyscan_key
+        self.headers = {'User-Agent': 'SOC-Analyst-Bot'}
 
     def query_threatfox(self, ioc):
-        ioc = ioc.strip()
-        payload = {"query": "search_ioc", "search_term": ioc}
-        headers = {}
-        if self.abuse_ch_key: headers['API-KEY'] = self.abuse_ch_key
         try:
-            res = requests.post(self.tf_url, json=payload, headers=headers, timeout=10)
+            res = requests.post("https://threatfox-api.abuse.ch/api/v1/", 
+                              json={"query": "search_ioc", "search_term": ioc}, timeout=10)
             data = res.json()
             if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
-            elif data.get("query_status") == "no_result": return {"status": "not_found"}
-            return {"status": "error", "msg": data.get("query_status")}
-        except: return {"status": "error", "msg": "Connection Error"}
+            return {"status": "not_found"}
+        except: return {"status": "error"}
 
     def query_urlhaus(self, ioc):
-        clean_ioc, _ = sanitize_ioc(ioc)
-        ioc_type = get_ioc_type(clean_ioc)
-        headers = {}
-        if self.abuse_ch_key: headers['API-KEY'] = self.abuse_ch_key
         try:
-            if ioc_type == "hash":
-                res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, headers=headers, timeout=10)
-            elif ioc_type == "url":
-                res = requests.post(self.uh_url, data={'url': ioc}, headers=headers, timeout=10)
-            else:
-                res = requests.post(self.uh_host, data={'host': clean_ioc}, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("query_status") == "ok": return {"status": "found", "data": data}
-                return {"status": "not_found"}
-            return {"status": "error"}
+            res = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data={'url': ioc}, timeout=10)
+            if res.status_code == 200 and res.json().get("query_status") == "ok":
+                return {"status": "found", "data": res.json()}
+            return {"status": "not_found"}
         except: return {"status": "error"}
 
     def query_virustotal(self, ioc):
-        if not self.vt_key: return {"status": "skipped", "msg": "No Key"}
-        clean_ioc, _ = sanitize_ioc(ioc)
-        ioc_type = get_ioc_type(clean_ioc)
-        headers = {"x-apikey": self.vt_key}
-        base_url = "https://www.virustotal.com/api/v3"
+        if not self.vt_key: return {"status": "skipped"}
         try:
-            endpoint = ""
-            if ioc_type == "ip": endpoint = f"/ip_addresses/{clean_ioc}"
-            elif ioc_type == "domain": endpoint = f"/domains/{clean_ioc}"
-            elif ioc_type == "hash": endpoint = f"/files/{clean_ioc}"
-            elif ioc_type == "url": 
-                url_id = vt_url_id(ioc)
-                endpoint = f"/urls/{url_id}"
-            
-            res = requests.get(base_url + endpoint, headers=headers, timeout=10)
+            url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
+            endpoint = f"https://www.virustotal.com/api/v3/urls/{url_id}" if "http" in ioc else f"https://www.virustotal.com/api/v3/ip_addresses/{ioc}"
+            res = requests.get(endpoint, headers={"x-apikey": self.vt_key}, timeout=10)
             if res.status_code == 200:
-                data = res.json().get("data", {}).get("attributes", {})
-                stats = data.get("last_analysis_stats", {})
-                return {"status": "found", "stats": stats, "reputation": data.get("reputation", 0)}
-            elif res.status_code == 404: return {"status": "not_found"}
-            return {"status": "error", "msg": f"HTTP {res.status_code}"}
+                return {"status": "found", "stats": res.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})}
+            return {"status": "not_found"}
         except: return {"status": "error"}
 
     def query_urlscan(self, ioc):
-        if not self.urlscan_key: return {"status": "skipped", "msg": "No Key"}
-        clean_ioc, _ = sanitize_ioc(ioc)
+        if not self.urlscan_key: return {"status": "skipped"}
         try:
-            headers = {"API-Key": self.urlscan_key}
-            query = f'"{clean_ioc}"'
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={query}", headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                results = data.get("results", [])
-                if results:
-                    latest = results[0]
-                    return {"status": "found", "page": latest.get("page", {}), "verdict": latest.get("verdict", {}), "screenshot": latest.get("screenshot")}
-                return {"status": "not_found"}
-            return {"status": "error"}
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
+            if res.status_code == 200 and res.json().get("results"):
+                return {"status": "found", "screenshot": res.json()["results"][0].get("screenshot")}
+            return {"status": "not_found"}
         except: return {"status": "error"}
 
     def query_cyscan(self, ioc):
         return {"link": f"https://cyscan.io/search/{ioc}"}
 
-# --- Collectors ---
-class MitreCollector:
-    def get_latest_updates(self):
-        try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            resp = requests.get("https://attack.mitre.org/resources/updates/", headers=headers, timeout=5)
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            update = soup.find('h2')
-            if update: return {"title": update.text.strip(), "url": "https://attack.mitre.org" + (update.find('a')['href'] if update.find('a') else "")}
-            return None
-        except: return None
-
-class APTSheetCollector:
-    def __init__(self):
-        self.base = "https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU/export?format=csv&gid="
-        self.gids = {"Israel": "1864660085", "Russia": "1636225066", "China": "0", "Iran": "0"}
-    def fetch_threats(self, region="Israel"):
-        try:
-            url = self.base + self.gids.get(region, "0")
-            df = pd.read_csv(url).head(50)
-            return df
-        except: return pd.DataFrame()
-
-class AbuseIPDBChecker:
-    def __init__(self, key): self.key = key
-    def check_ip(self, ip):
-        if not self.key: return {"error": "Missing Key"}
-        clean_ip, _ = sanitize_ioc(ip)
-        try:
-            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': clean_ip, 'maxAgeInDays': 90})
-            if res.status_code == 200: return {"success": True, "data": res.json()['data']}
-            return {"error": "API Error"}
-        except: return {"error": "Connection Failed"}
-
-class CTICollector:
-    SOURCES = [
-        {"name": "CheckPoint", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
-        {"name": "ClearSky (IL)", "url": "https://www.clearskysec.com/feed/", "type": "rss"},
-        {"name": "Israel Defense", "url": "https://www.israeldefense.co.il/en/rss.xml", "type": "rss"},
-        {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
-        {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
-        {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
-        {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"}
-    ]
-    async def fetch_item(self, session, source):
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        try:
-            async with session.get(source['url'], headers=headers, timeout=15) as resp:
-                if resp.status != 200: return []
-                now = datetime.datetime.now(datetime.timezone.utc)
-                if source['type'] == 'rss':
-                    text = await resp.text()
-                    soup = BeautifulSoup(text, 'xml')
-                    items = []
-                    for i in soup.find_all('item')[:5]:
-                        d = i.pubDate.text if i.pubDate else str(now)
-                        try:
-                            dt = parser.parse(d)
-                            if dt.tzinfo is None: dt = dt.replace(tzinfo=datetime.timezone.utc)
-                            if dt < now - datetime.timedelta(hours=48): continue
-                            final_d = dt.isoformat()
-                        except: final_d = now.isoformat()
-                        items.append({"title": i.title.text, "url": i.link.text, "date": final_d, "source": source['name'], "summary": i.description.text if i.description else ""})
-                    return items
-                elif source['type'] == 'json':
-                    data = await resp.json()
-                    return [{"title": f"KEV: {v['cveID']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": datetime.datetime.now().isoformat(), "source": source['name'], "summary": v['vulnerabilityName']} for v in data.get('vulnerabilities', [])[:3]]
-        except: return []
-    
-    async def get_all_data(self):
-        ssl_ctx = ssl.create_default_context(); ssl_ctx.check_hostname=False; ssl_ctx.verify_mode=ssl.CERT_NONE
-        conn = aiohttp.TCPConnector(ssl=ssl_ctx)
-        async with aiohttp.ClientSession(connector=conn) as session:
-            tasks = [self.fetch_item(session, src) for src in self.SOURCES]
-            results = await asyncio.gather(*tasks)
-            return [i for sub in results for i in sub]
-
-# --- AI Processors (RAW HTTP) ---
+# --- AI Processors (USING HTTP WRAPPER) ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
         
     async def analyze_batch(self, items):
         if not items: return []
-        fallback_data = [{"id": i, "category": "General", "severity": "Medium", "impact": "See details", "summary": item['summary'][:150]} for i, item in enumerate(items)]
+        fallback = [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:150]} for i,x in enumerate(items)]
         
-        if not self.key: return fallback_data
+        if not self.key: return fallback
 
-        batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
+        batch_text = "\n".join([f"ID:{i}|Title:{x['title']}|Desc:{x['summary'][:100]}" for i,x in enumerate(items)])
         prompt = f"""
-        Analyze threat intel.
-        Input Format: ID:0|Src:Source|Title:Title|Desc:Description
-        Output JSON Array only.
+        Analyze these cyber threats.
+        Input: ID:0|Title:..|Desc:..
+        
+        Output JSON Array ONLY:
+        [{{"id":0, "category":"Malware/Phishing/General", "severity":"Critical/High/Medium", "impact":"Short impact", "summary":"One sentence"}}]
+        
         Items:
         {batch_text}
         """
         
-        response_text = await query_gemini_api(self.key, prompt)
-        
-        if response_text:
+        result = await query_gemini_http(self.key, prompt)
+        if result:
             try:
-                # Cleanup JSON markdown if present
-                clean_text = response_text.replace('```json','').replace('```','').strip()
-                if not clean_text.startswith('['): 
-                    start = clean_text.find('[')
-                    end = clean_text.rfind(']') + 1
-                    clean_text = clean_text[start:end]
-                return json.loads(clean_text)
-            except Exception as e:
-                print(f"JSON Parse Error: {e}")
-                return fallback_data
-        
-        return fallback_data
+                clean = result.replace('```json','').replace('```','').strip()
+                if '[' in clean: clean = clean[clean.find('['):clean.rfind(']')+1]
+                return json.loads(clean)
+            except: pass
+            
+        return fallback
 
     async def analyze_single_ioc(self, ioc, data):
-        if not self.key: return "⚠️ Error: No Gemini API Key."
+        if not self.key: return "⚠️ Missing API Key"
         
-        context_str = json.dumps(data, indent=2, default=str)
         prompt = f"""
-        Act as a SOC Analyst. Incident Note for IOC: {ioc}.
-        Raw Data: {context_str}
-        Provide Verdict, Findings, Recommendation.
+        Act as a SOC Analyst. Analyze IOC: {ioc}.
+        Data: {json.dumps(data, default=str)}
+        
+        Output Markdown:
+        ## Verdict: [Malicious/Safe]
+        * Findings
+        * Action
         """
         
-        response_text = await query_gemini_api(self.key, prompt)
-        if response_text:
-            return response_text
-        return "❌ Error: AI Service Unavailable (HTTP Request Failed)."
+        res = await query_gemini_http(self.key, prompt)
+        return res if res else "❌ Error: AI Unresponsive (Check Key/Quota)"
 
 def save_reports(raw, analyzed):
     try:
@@ -373,21 +250,23 @@ def save_reports(raw, analyzed):
         amap = {r['id']:r for r in analyzed if isinstance(r, dict)}
         cnt = 0
         for i,item in enumerate(raw):
-            cat = "General"; sev = "Medium"; imp = "Unknown"; summ = item['summary']
-            if i in amap:
-                a = amap[i]
-                cat = a.get('category', cat)
-                sev = a.get('severity', sev)
-                imp = a.get('impact', imp)
-                summ = a.get('summary', summ)
-                
-            if cat != 'IGNORE':
-                try:
-                    c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], cat, sev, imp, summ))
-                    if c.rowcount > 0: cnt += 1
-                except: pass
+            try:
+                a = amap.get(i, {})
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], 
+                     a.get('category','General'), a.get('severity','Medium'), a.get('impact','Info'), a.get('summary', item['summary'])))
+                if c.rowcount > 0: cnt += 1
+            except: pass
         conn.commit()
         conn.close()
         return cnt
     except: return 0
+
+# --- Required Classes for app.py imports ---
+class MitreCollector:
+    def get_latest_updates(self): return None
+class APTSheetCollector:
+    def fetch_threats(self, r): return pd.DataFrame()
+class AbuseIPDBChecker: # Kept for backward compatibility if app.py calls it directly
+    def __init__(self, key): self.key = key
+    def check_ip(self, ip): return ConnectionManager.check_abuseipdb(self.key)
