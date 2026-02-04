@@ -7,7 +7,7 @@ import datetime
 import ssl
 from bs4 import BeautifulSoup
 from dateutil import parser
-from langchain_google_genai import ChatGoogleGenerativeAI
+import google.generativeai as genai # השינוי הגדול: שימוש בדרייבר הישיר
 import streamlit as st
 
 DB_NAME = "cti_dashboard.db"
@@ -26,6 +26,9 @@ def init_db():
         country TEXT,
         summary TEXT
     )''')
+    # ניקוי רשומות ישנות
+    limit = (datetime.datetime.now() - datetime.timedelta(hours=24)).isoformat()
+    c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
     conn.close()
 
@@ -81,8 +84,8 @@ class CTICollector:
 class AIBatchProcessor:
     def __init__(self, api_key):
         self.api_key = api_key
-        # הוספתי עוד וריאציות של שמות מודלים למקרה שחלק חסומים
-        self.models_to_try = ["gemini-1.5-flash", "gemini-1.5-flash-latest", "gemini-pro", "gemini-1.0-pro"]
+        # הגדרת ה-API Key ישירות לדרייבר של גוגל
+        genai.configure(api_key=api_key)
         self.categories = ["Phishing", "Vulnerability", "Research", "Israel Focus", "Malware", "DDoS", "General"]
 
     async def analyze_batch(self, items):
@@ -90,36 +93,39 @@ class AIBatchProcessor:
         
         batch_text = "\n".join([f"ID:{i} | Title:{item['title']}" for i, item in enumerate(items)])
         prompt = f"""
-        Categorize these cyber threats.
+        You are a SOC Analyst. Analyze these items.
         Categories: {self.categories}.
         Rules:
-        1. JSON Array ONLY.
-        2. 'Israel Focus' if specific to Israel.
+        1. Return ONLY a JSON Array. No markdown formatting.
+        2. 'Israel Focus' if context is Israel/Hebrew.
         3. 'IGNORE' if marketing.
         
         Items:
         {batch_text}
         
-        Output: [{{"id": 0, "category": "...", "country": "...", "summary": "..."}}]
+        Output format: [{{"id": 0, "category": "...", "country": "...", "summary": "..."}}]
         """
 
-        last_error = None
-        for model_name in self.models_to_try:
+        # רשימת מודלים מעודכנת שעובדת עם הדרייבר הישיר
+        models_to_try = ["gemini-1.5-flash", "gemini-pro"]
+
+        for model_name in models_to_try:
             try:
-                # מנסה מודל ומדפיס הודעה קטנה כדי שתדע מה קורה
-                with st.spinner(f"Trying AI model: {model_name}..."):
-                    llm = ChatGoogleGenerativeAI(model=model_name, google_api_key=self.api_key)
-                    response = await llm.ainvoke(prompt)
-                    clean_res = response.content.replace('```json', '').replace('```', '').strip()
-                    return json.loads(clean_res)
+                # שימוש בדרייבר הישיר במקום LangChain
+                model = genai.GenerativeModel(model_name)
+                
+                # הרצה אסינכרונית
+                response = await model.generate_content_async(prompt)
+                
+                # ניקוי הטקסט למקרה שהמודל מחזיר Markdown
+                clean_res = response.text.replace('```json', '').replace('```', '').strip()
+                return json.loads(clean_res)
+            
             except Exception as e:
-                # כאן התיקון החשוב: מציג את השגיאה למסך!
-                st.warning(f"⚠️ Model {model_name} failed. Reason: {str(e)}")
-                last_error = e
-                continue 
+                st.warning(f"⚠️ Direct SDK Model {model_name} failed: {e}")
+                continue
         
-        # אם הכל נכשל, מציג שגיאה אדומה גדולה שנשארת
-        st.error(f"❌ Critical Failure: All AI models failed. Last error: {str(last_error)}")
+        st.error("❌ All models failed. Please check if your API Key is valid in Google AI Studio.")
         return []
 
 def save_reports(raw_items, analysis_results):
