@@ -39,12 +39,13 @@ st.markdown("""
     
     a { text-decoration: none; color: #2563eb; font-weight: bold; }
     
-    div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
+    /* Better styling for filters */
+    div[role="radiogroup"] { display: flex; gap: 8px; flex-wrap: wrap; }
     div[role="radiogroup"] label {
-        background-color: #fff; border: 1px solid #ddd; border-radius: 20px; padding: 5px 15px; transition: all 0.2s;
+        background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 4px 12px; transition: all 0.2s; font-size: 0.9rem;
     }
     div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #2563eb; color: white; border-color: #2563eb;
+        background-color: #0f172a; color: white; border-color: #0f172a;
     }
     div[role="radiogroup"] label > div:first-child { display: none; }
 </style>
@@ -121,26 +122,43 @@ with tab_feed:
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
     conn.close()
     
-    # Merge - ensuring INCD is prioritized if available
+    # Merge
     df_final = pd.concat([df_incd.head(8), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
         st.info("No active threats found. Try 'Force Global Update'.")
     else:
-        # Filters
-        cat_counts = df_final['category'].value_counts()
-        radio_labels = [f"All ({len(df_final)})"] + [f"{cat} ({cnt})" for cat, cnt in cat_counts.items()]
+        # --- FILTERS SECTION ---
+        st.write("##### 🕵️ Filter Intelligence")
         
-        st.markdown("##### 📌 Filter by Category")
-        selected_label = st.radio("Filters", radio_labels, horizontal=True, label_visibility="collapsed")
+        c_src, c_sev = st.columns([1, 2])
         
-        if "All" in selected_label:
-            df_display = df_final
-        else:
-            selected_cat = selected_label.split(" (")[0]
-            df_display = df_final[df_final['category'] == selected_cat]
+        with c_src:
+            st.caption("Source")
+            filter_source = st.radio("Source Filter", ["All", "INCD (מערך הסייבר)", "Global"], horizontal=True, label_visibility="collapsed")
+        
+        with c_sev:
+            st.caption("Severity")
+            filter_sev = st.radio("Severity Filter", ["All", "Critical", "Medium", "Info (Low)"], horizontal=True, label_visibility="collapsed")
 
-        st.write("") 
+        # Apply Filters
+        df_display = df_final.copy()
+        
+        # 1. Source Filter
+        if "INCD" in filter_source:
+            df_display = df_display[df_display['source'] == 'INCD']
+        elif filter_source == "Global":
+            df_display = df_display[df_display['source'] != 'INCD']
+            
+        # 2. Severity Filter
+        if filter_sev == "Critical":
+            df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
+        elif filter_sev == "Medium":
+            df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
+        elif "Info" in filter_sev:
+             df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
+
+        st.divider()
 
         for _, row in df_display.iterrows():
             # Parse Date
