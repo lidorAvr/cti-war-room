@@ -5,8 +5,7 @@ import sqlite3
 import datetime
 import pytz
 import streamlit.components.v1 as components
-from utils import * # Removed autorefresh import
-from dateutil import parser as date_parser
+from utils import * from dateutil import parser as date_parser
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
@@ -29,8 +28,8 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.05);
     }
     
-    .card-title { font-weight: 700; font-size: 1.15rem; color: #111; margin-bottom: 5px; }
-    .card-summary { color: #444; font-size: 0.95rem; margin-bottom: 10px; }
+    .card-title { font-weight: 700; font-size: 1.15rem; color: #111; margin-bottom: 8px; }
+    .card-summary { color: #444; font-size: 0.95rem; margin-bottom: 10px; line-height: 1.5; }
     
     .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 6px; }
     .tag-critical { background: #fee2e2; color: #991b1b; }
@@ -39,7 +38,6 @@ st.markdown("""
     
     a { text-decoration: none; color: #2563eb; font-weight: bold; }
     
-    /* Filter Pills */
     div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
     div[role="radiogroup"] label {
         background-color: #fff; border: 1px solid #ddd; border-radius: 20px; padding: 5px 15px; transition: all 0.2s;
@@ -54,17 +52,18 @@ st.markdown("""
 # --- INITIALIZATION ---
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
+REFRESH_MINUTES = 15
+
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-# --- NATIVE AUTO-REFRESH LOGIC (Replaces Broken Component) ---
-# This runs on every script interaction.
+# --- AUTO-LOAD & UPDATE LOGIC ---
 if "last_run" not in st.session_state:
     st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-    # FIRST LOAD: Run update automatically
-    with st.spinner("🚀 System Startup: Fetching Intelligence..."):
+    # First time load
+    with st.spinner("🚀 Initializing CTI Feeds..."):
         async def startup_update():
             col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
             raw = await col.get_all_data()
@@ -85,7 +84,7 @@ with st.sidebar:
         with st.status("Fetching New Intelligence...", expanded=True):
             async def run_update():
                 col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-                st.write("Connecting to Sources (RSS/Tele)...")
+                st.write("Connecting to Sources...")
                 raw = await col.get_all_data()
                 if not raw: 
                     st.warning("No new data found.")
@@ -104,36 +103,28 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SO
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
-    # 1. Status Header
+    # 1. Update Status with Calc
     last_up = st.session_state["last_run"]
-    c1, c2 = st.columns([1, 4])
-    with c1: st.info(f"Updated: {last_up.strftime('%H:%M')} (IL)")
+    next_up = last_up + datetime.timedelta(minutes=REFRESH_MINUTES)
+    
+    c1, c2, c3 = st.columns([2, 2, 4])
+    with c1: st.info(f"Last Update: {last_up.strftime('%H:%M')} (IL)")
+    with c2: st.warning(f"Next Auto-Update: {next_up.strftime('%H:%M')} (IL)")
     
     st.divider()
 
     conn = sqlite3.connect(DB_NAME)
     
-    # Logic: INCD (Last 4 OR <96h) + Others (<48h)
+    # Priority Fetch: INCD top
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
     conn.close()
     
-    now_ts = pd.Timestamp.now(tz=IL_TZ)
-    
-    if not df_incd.empty:
-        df_incd['dt'] = pd.to_datetime(df_incd['published_at'], utc=True).dt.tz_convert(IL_TZ)
-        cond_time = (now_ts - df_incd['dt']).dt.total_seconds() < (96 * 3600)
-        df_incd_filtered = df_incd[cond_time | (df_incd.index < 4)].copy()
-    else:
-        df_incd_filtered = df_incd
-
-    if not df_others.empty:
-         df_others['dt'] = pd.to_datetime(df_others['published_at'], utc=True).dt.tz_convert(IL_TZ)
-    
-    df_final = pd.concat([df_incd_filtered, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
+    # Merge
+    df_final = pd.concat([df_incd.head(5), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
-        st.info("No active threats found. Click 'Force Update' in sidebar.")
+        st.info("No active threats found. Try 'Force Global Update'.")
     else:
         # Filters
         cat_counts = df_final['category'].value_counts()
@@ -142,19 +133,23 @@ with tab_feed:
         st.markdown("##### 📌 Filter by Category")
         selected_label = st.radio("Filters", radio_labels, horizontal=True, label_visibility="collapsed")
         
-        # Parse selection
         if "All" in selected_label:
             df_display = df_final
         else:
             selected_cat = selected_label.split(" (")[0]
             df_display = df_final[df_final['category'] == selected_cat]
 
-        st.write("") # Spacer
+        st.write("") 
 
-        # Render Cards
         for _, row in df_display.iterrows():
-            pub_date = row['dt']
-            
+            # Parse Date
+            try:
+                dt = date_parser.parse(row['published_at'])
+                if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
+                else: dt = dt.astimezone(IL_TZ)
+                date_str = dt.strftime('%d/%m %H:%M')
+            except: date_str = "Unknown"
+
             sev_class = "tag-critical" if "Critical" in row['severity'] else ""
             source_tag = "tag-incd" if row['source'] == "INCD" else "tag-time"
             
@@ -162,7 +157,7 @@ with tab_feed:
             <div class="report-card">
                 <div style="margin-bottom: 8px;">
                     <span class="tag {source_tag}">{row['source']}</span>
-                    <span class="tag tag-time">{pub_date.strftime('%d/%m %H:%M')}</span>
+                    <span class="tag tag-time">{date_str}</span>
                     <span class="tag {sev_class}">{row['severity']}</span>
                     <span class="tag tag-time">{row['category']}</span>
                 </div>
@@ -180,7 +175,7 @@ with tab_tools:
     
     c_input, c_btn = st.columns([4, 1])
     with c_input:
-        ioc_input = st.text_input("Enter Indicator (IP, Domain, Hash)", placeholder="e.g., 1.2.3.4, evil.com").strip()
+        ioc_input = st.text_input("Enter Indicator", placeholder="e.g., 1.2.3.4, evil.com").strip()
     with c_btn:
         st.write("") 
         st.write("") 
