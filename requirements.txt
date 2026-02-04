@@ -7,3 +7,4 @@ pytz
 streamlit-autorefresh
 aiohttp
 feedparser
+ipaddress
