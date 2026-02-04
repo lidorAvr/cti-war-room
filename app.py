@@ -4,17 +4,18 @@ import pandas as pd
 import sqlite3
 import base64
 import json
-import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
-from utils import * st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
+from utils import * # --- CONFIGURATION ---
+st.set_page_config(page_title="SOC War Room", layout="wide", page_icon="🛡️")
 
+# --- STYLING ---
 st.markdown("""
 <style>
     .report-card { background-color: #1E1E1E; padding: 15px; border-radius: 8px; border: 1px solid #333; margin-bottom: 10px; }
     .tag { padding: 2px 8px; border-radius: 4px; font-weight: bold; font-size: 0.75rem; margin-right: 5px; }
-    .tag-critical { background-color: #721c24; color: #f8d7da; border: 1px solid #f5c6cb; }
+    .tag-critical { background-color: #721c24; color: #f8d7da; }
     .tag-high { background-color: #856404; color: #fff3cd; }
-    .tag-israel { background-color: #004085; color: #cce5ff; border: 1px solid #b8daff; }
+    .tag-israel { background-color: #004085; color: #cce5ff; }
     .tag-medium { background-color: #0c5460; color: #d1ecf1; }
     .tool-box { background-color: #252526; padding: 20px; border-radius: 10px; border-left: 5px solid #007acc; }
     iframe { border-radius: 10px; border: 1px solid #333; }
@@ -31,57 +32,60 @@ if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
 st.title("🛡️ SOC War Room")
 st.caption("Integrated Threat Intelligence, Investigation Tools & Global Monitoring")
 
-# --- SIDEBAR & KEYS ---
-def load_secret(key_name):
-    try: return st.secrets.get(key_name, "")
-    except: return ""
-
+# --- SIDEBAR: KEY CONFIGURATION ---
 with st.sidebar:
-    st.header("⚙️ System Status")
+    st.header("🔧 API Configuration")
     
-    # טעינת מפתחות רגילים
-    abuse_key = load_secret("abuseipdb_key")
-    abuse_ch_key = load_secret("abuse_ch_key")
-    vt_key = load_secret("vt_key")
-    urlscan_key = load_secret("urlscan_key")
-    cyscan_key = load_secret("cyscan_key")
+    # ניסיון לטעון מ-Secrets, ואם אין - מחרוזת ריקה
+    try: 
+        secret_key = st.secrets["gemini_key"]
+    except: 
+        secret_key = ""
     
-    # Gemini Key - Manual Override (THE FIX)
-    try: secret_gemini = st.secrets["gemini_key"]
-    except: secret_gemini = ""
+    # תיבת טקסט למפתח - מאפשרת דריסה ידנית או הזנה ראשונית
+    user_key = st.text_input("Gemini API Key:", value=secret_key, type="password")
     
-    user_gemini = st.text_input("Gemini API Key:", value=secret_gemini, type="password")
-    gemini_key = user_gemini if user_gemini else secret_gemini
+    # המפתח בפועל לשימוש
+    gemini_key = user_key
 
-    if st.button("🔄 Test API Connections"):
-        with st.spinner("Checking endpoints..."):
-            st.markdown("---")
-            ok, msg = ConnectionManager.check_gemini(gemini_key)
-            icon = "✅" if ok else "❌"
-            st.markdown(f"{icon} **Gemini AI**: {msg}")
+    if st.button("🧪 Test Connection"):
+        if gemini_key:
+            with st.spinner("Connecting to Google..."):
+                ok, msg = ConnectionManager.check_gemini(gemini_key)
+                if ok:
+                    st.success(msg)
+                else:
+                    st.error(msg)
+        else:
+            st.warning("Please enter a key first.")
             
-            ok, msg = ConnectionManager.check_abuseipdb(abuse_key)
-            st.markdown(f"{'✅' if ok else '❌'} **AbuseIPDB**: {msg}")
-            
-            ok, msg = ConnectionManager.check_virustotal(vt_key)
-            st.markdown(f"{'✅' if ok else '⚠️'} **VirusTotal**: {msg}")
-            st.markdown("---")
-    
+    # בדיקות נוספות
+    with st.expander("System Checks"):
+        try: secret_abuse = st.secrets["abuseipdb_key"]
+        except: secret_abuse = ""
+        if st.button("Check Integrations"):
+             ok, msg = ConnectionManager.check_abuseipdb(secret_abuse)
+             st.write(f"AbuseIPDB: {msg}")
+
     st.divider()
     
     if st.button("🚀 Run Global Intel Scan", disabled=not gemini_key):
         with st.spinner("Scanning RSS Feeds & CISA..."):
             async def scan():
-                col, proc = CTICollector(), AIBatchProcessor(gemini_key)
+                # אתחול האובייקטים
+                col = CTICollector()
+                # מעבירים את המפתח ל-Processor
+                proc = AIBatchProcessor(gemini_key)
+                
                 raw = await col.get_all_data()
                 analyzed = await proc.analyze_batch(raw)
                 return save_reports(raw, analyzed)
             
             c = asyncio.run(scan())
-            st.success(f"Scan complete. {c} new reports.")
+            st.success(f"Scan Logic Finished. Items processed: {c}")
             st.rerun()
 
-# --- MAIN TABS ---
+# --- TABS ---
 tab_feed, tab_tools, tab_landscape, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape", "🗺️ Live Attack Map"])
 
 with tab_feed:
@@ -101,7 +105,7 @@ with tab_feed:
     elif st.session_state.filter_type == 'Malware': view_df = df[df['category'] == 'Malware']
 
     if view_df.empty:
-        st.info("No reports found. Try running a scan from the sidebar.")
+        st.info("No reports yet. Click 'Run Global Intel Scan' in the sidebar.")
     else:
         for _, row in view_df.iterrows():
             sev_class = "tag-critical" if row['severity']=='Critical' else ("tag-high" if row['severity']=='High' else "tag-medium")
@@ -121,105 +125,43 @@ with tab_feed:
             </div>""", unsafe_allow_html=True)
 
 with tab_tools:
-    st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3><p>Active tools for IOC analysis. Enter an IP, Domain, Hash, or URL.</p></div>", unsafe_allow_html=True)
+    st.markdown("<div class='tool-box'><h3>🛠️ Analyst Investigation Suite</h3><p>Active tools for IOC analysis.</p></div>", unsafe_allow_html=True)
     
-    t1, t2, t3 = st.tabs(["🔍 Universal Lookup", "📝 IOC Extractor", "🔓 Decoders"])
+    t1, t2 = st.tabs(["🔍 Universal Lookup", "📝 IOC Extractor"])
     
     with t1:
-        st.caption("Auto-checks: AbuseIPDB, ThreatFox, URLhaus, VirusTotal, urlscan.io")
-        col1, col2 = st.columns([3, 1])
-        ioc_input = col1.text_input("Enter Indicator", placeholder="e.g. 1.2.3.4, evil.com, or file hash")
-        
-        if 'analysis_results' not in st.session_state: st.session_state.analysis_results = None
-        if 'ioc_target' not in st.session_state: st.session_state.ioc_target = None
-
-        if col2.button("Investigate"):
-            if not ioc_input: st.warning("Enter an IOC")
+        ioc_input = st.text_input("Enter Indicator (IP/Domain/Hash)", placeholder="e.g. 1.1.1.1")
+        if st.button("Investigate"):
+            if gemini_key:
+                # 1. Get Tools Data
+                try: secret_vt = st.secrets["vt_key"]
+                except: secret_vt = ""
+                
+                st.info("Querying Threat Intelligence Sources...")
+                tl = ThreatLookup(vt_key=secret_vt)
+                vt_res = tl.query_virustotal(ioc_input)
+                
+                # 2. AI Analysis
+                st.info("Asking AI Analyst...")
+                proc = AIBatchProcessor(gemini_key)
+                
+                # Combine data for AI
+                context = {"ioc": ioc_input, "virustotal": vt_res}
+                res = asyncio.run(proc.analyze_single_ioc(ioc_input, context))
+                
+                st.markdown("### 🤖 AI Analyst Report")
+                st.markdown(res)
+                
+                if vt_res.get('status') == 'found':
+                    st.json(vt_res)
             else:
-                st.session_state.ioc_target = ioc_input
-                st.divider()
-                ioc_type = get_ioc_type(ioc_input)
-                st.markdown(f"**Detected Type:** `{ioc_type.upper()}`")
-                
-                intel_data = {"ioc": ioc_input, "type": ioc_type, "timestamp": str(pd.Timestamp.now())}
-
-                # 1. AbuseIPDB
-                if ioc_type == "ip" and abuse_key:
-                    res = AbuseIPDBChecker(abuse_key).check_ip(ioc_input)
-                    intel_data['abuseipdb'] = res
-                    if "success" in res:
-                        d = res['data']
-                        score = d['abuseConfidenceScore']
-                        color = "red" if score > 50 else "green"
-                        st.markdown(f"#### 🌐 AbuseIPDB: :{color}[{score}% Malicious]")
-                        st.write(f"ISP: {d['isp']} | {d['countryCode']}")
-                    else: st.warning(f"AbuseIPDB: {res.get('error')}")
-                
-                # 2. Universal Threat Lookup
-                tl = ThreatLookup(abuse_ch_key, vt_key, urlscan_key, cyscan_key)
-                
-                # ThreatFox
-                tf = tl.query_threatfox(ioc_input)
-                intel_data['threatfox'] = tf
-                if tf['status'] == 'found':
-                    st.error(f"🚨 ThreatFox: Found {len(tf['data'])} records")
-                    st.json(tf['data'][0])
-                
-                # URLhaus
-                uh = tl.query_urlhaus(ioc_input)
-                intel_data['urlhaus'] = uh
-                if uh['status'] == 'found':
-                    st.error(f"🚨 URLhaus: Found")
-                    st.write(uh['data'])
-
-                # VirusTotal
-                vt = tl.query_virustotal(ioc_input)
-                intel_data['virustotal'] = vt
-                if vt['status'] == 'found':
-                    stats = vt['stats']
-                    malicious = stats.get('malicious', 0)
-                    total = sum(stats.values())
-                    color = "red" if malicious > 0 else "green"
-                    st.markdown(f"#### 🦠 VirusTotal: :{color}[{malicious}/{total} Malicious]")
-                    st.bar_chart(stats)
-                elif vt['status'] == 'not_found': st.success("VirusTotal: Clean / Not Found")
-                
-                # urlscan.io
-                us = tl.query_urlscan(ioc_input)
-                intel_data['urlscan'] = us
-                if us['status'] == 'found':
-                    st.markdown("#### 📷 urlscan.io Result")
-                    c1, c2 = st.columns([1,2])
-                    with c1:
-                         if us.get('screenshot'): st.image(us['screenshot'], caption="Latest Scan")
-                    with c2:
-                         st.write(f"**Verdict:** {us.get('verdict', {}).get('overall', 'Unknown')}")
-                         
-                st.session_state.analysis_results = intel_data
-        
-        # --- AI Analyst Button ---
-        if st.session_state.analysis_results and gemini_key:
-            st.divider()
-            if st.button("✨ Ask AI Analyst to Summarize"):
-                with st.spinner("AI Analyst is reviewing the evidence..."):
-                    proc = AIBatchProcessor(gemini_key)
-                    res = asyncio.run(proc.analyze_single_ioc(st.session_state.ioc_target, st.session_state.analysis_results))
-                    st.markdown("### 🤖 AI Analyst Report")
-                    st.markdown(res)
+                st.error("Enter API Key first.")
 
     with t2:
-        st.subheader("Extract IOCs from Text")
-        raw_text = st.text_area("Paste text here:", height=150)
+        raw_text = st.text_area("Paste text to extract IOCs:", height=150)
         if st.button("Extract"):
             extracted = IOCExtractor().extract(raw_text)
             st.json(extracted)
-
-    with t3:
-        st.subheader("Quick Decoders")
-        d_in = st.text_input("Encoded String")
-        if d_in:
-            try: st.code(base64.b64decode(d_in).decode(), language="text")
-            except: st.error("Invalid Base64")
 
 with tab_landscape:
     mitre = MitreCollector().get_latest_updates()
