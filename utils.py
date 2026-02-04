@@ -96,18 +96,25 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
+        # PROMPT ENGINEERED FOR FLUENT HEBREW REWRITING (NOT TRANSLATION)
         system_instruction = """
-        You are an Israeli CTI Analyst. Analyze cyber news.
-        1. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
-        2. CATEGORY (Choose ONE strictly): 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
-        3. SUMMARY: Concise **Hebrew** summary (max 20 words). Write specifically for Israeli security teams.
-        Return JSON format: {"items": [{"id": 0, "category": "...", "severity": "...", "summary": "..."}]}
+        Role: Expert Israeli Cyber Intelligence Analyst.
+        Task: Analyze raw cyber news and rewrite them into a professional Hebrew Intelligence Feed.
+        
+        STRICT RULES:
+        1. DO NOT TRANSLATE. Read the English text, understand it, and write a NEW Hebrew text.
+        2. HEBREW TITLE: Short, punchy, focused (Max 7 words). No clickbait.
+        3. HEBREW SUMMARY: Professional, clear Hebrew. 3-4 sentences. Explain WHAT happened and WHY it matters. Do NOT just repeat the title.
+        4. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        5. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
+        
+        Output JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title_he": "...", "summary_he": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
-            batch_text = "\n".join([f"ID:{idx}|Title:{x['title']}|Src:{x['source']}|Txt:{x['summary'][:200]}" for idx, x in enumerate(chunk)])
-            prompt = f"{system_instruction}\nData to Analyze:\n{batch_text}"
+            batch_text = "\n".join([f"ID:{idx}|Title:{x['title']}|Txt:{x['summary'][:300]}" for idx, x in enumerate(chunk)])
+            prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
             res = await query_groq_api(self.key, prompt, json_mode=True)
             chunk_map = {}
@@ -118,34 +125,34 @@ class AIBatchProcessor:
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
+                # Save the AI-Generated Hebrew Title/Summary into the standard fields
                 results.append({
                     "category": ai.get('category', 'News'), 
                     "severity": ai.get('severity', 'Medium'), 
-                    "summary": ai.get('summary', chunk[j]['summary'][:100])
+                    "title": ai.get('title_he', chunk[j]['title']), # Use AI Hebrew Title
+                    "summary": ai.get('summary_he', chunk[j]['summary']) # Use AI Hebrew Summary
                 })
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
         prompt = f"""
-        Act as a Tier 3 CTI Mentor explaining findings to a Tier 1 Analyst (Hebrew Speaker).
-        Target: {ioc} ({ioc_type}).
+        Act as a Senior Israeli SOC Tier 3 Analyst.
+        Task: Analyze {ioc} ({ioc_type}) and write a report in HEBREW.
         Raw Data: {json.dumps(data)}
         
-        **CRITICAL LANGUAGE INSTRUCTIONS:**
-        1. Write primarily in **HEBREW**.
-        2. **STRICTLY AVOID** English transliteration for technical terms. Use proper Hebrew terms:
-           - Malicious -> **זדוני** (Not "מליציוס")
-           - Suspicious -> **חשוד**
-           - Clean/Harmless -> **נקי**
-           - Vulnerability -> **חולשה**
-           - Attack -> **תקיפה**
-        3. Keep specific tool names or error codes in English (e.g., "HTTP 404", "Cobalt Strike").
-
+        LANGUAGE RULES:
+        - Write naturally in Hebrew (Do not translate literally).
+        - Use professional terminology:
+          * Malicious -> **זדוני**
+          * Suspicious -> **חשוד**
+          * Clean -> **נקי**
+          * Vulnerability -> **חולשה**
+        
         Output Structure (Markdown):
-        1. **פסיקת מנהלים (Verdict)**: Is it זדוני? Why? (Be decisive).
-        2. **ניתוח טכני (Analysis)**: Explain findings.
-        3. **העשרה (Enrichment)**: Context about this threat type.
-        4. **צעדים להמשך (Next Steps)**: Actionable items.
+        1. **פסיקת מנהלים (Verdict)**: Clear decision.
+        2. **ניתוח טכני (Technical Analysis)**: Deep dive into findings.
+        3. **משמעות (Significance)**: What is this threat?
+        4. **המלצות אופרטיביות (Action Items)**: Block/Monitor/Ignore.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -154,17 +161,11 @@ class AIBatchProcessor:
         Generate Hunting Queries for Actor: {actor['name']}.
         Context: {actor.get('mitre', 'N/A')} | {actor.get('tools', 'N/A')}.
         
-        **INSTRUCTIONS:**
-        1. The Code Blocks must be valid syntax (English).
-        2. The **Explanations** describing the logic MUST be in **HEBREW**.
-        
         Provide:
-        1. **Google Chronicle (YARA-L)**
-           - Code block
-           - Hebrew Explanation of what it hunts for.
-        2. **Cortex XDR (XQL)**
-           - Code block
-           - Hebrew Explanation.
+        1. **Google Chronicle (YARA-L)** (Code Block)
+        2. **Cortex XDR (XQL)** (Code Block)
+        
+        Explain the logic of each query in CLEAR, PROFESSIONAL HEBREW.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
