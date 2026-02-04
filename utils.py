@@ -14,7 +14,7 @@ from dateutil import parser
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
-# --- DATABASE MANAGEMENT ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -30,8 +30,6 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    
-    # Auto-cleanup: Delete reports older than 48 hours
     limit = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
@@ -45,7 +43,7 @@ def get_ioc_type(ioc):
     if len(ioc) in [32, 40, 64]: return "hash"
     return "domain"
 
-# --- AI LOGIC ---
+# --- AI CORE ---
 async def get_valid_model_name(api_key, session):
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
@@ -79,7 +77,7 @@ async def query_gemini_auto(api_key, prompt):
         except Exception as e:
             return f"Connection Error: {e}"
 
-# --- HEALTH CHECKS ---
+# --- CONNECTION MGR ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
@@ -114,7 +112,6 @@ class CTICollector:
                     if not entries: entries = soup.find_all('item')
 
                     for i in entries[:7]:
-                        # Date Handling
                         date_tag = i.published if i.published else (i.pubDate if i.pubDate else None)
                         if date_tag:
                             try:
@@ -122,15 +119,12 @@ class CTICollector:
                                 if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj)
                                 dt_il = dt_obj.astimezone(IL_TZ)
                                 dt_iso = dt_il.isoformat()
-                            except:
-                                dt_iso = datetime.datetime.now(IL_TZ).isoformat()
-                        else:
-                            dt_iso = datetime.datetime.now(IL_TZ).isoformat()
+                            except: dt_iso = datetime.datetime.now(IL_TZ).isoformat()
+                        else: dt_iso = datetime.datetime.now(IL_TZ).isoformat()
                         
                         raw_desc = (i.summary.text if i.summary else (i.description.text if i.description else ""))
                         clean_desc = BeautifulSoup(raw_desc, "html.parser").get_text()[:600]
                         link = i.link['href'] if i.link and i.link.has_attr('href') else (i.link.text if i.link else "#")
-
                         items.append({"title": i.title.text, "url": link, "date": dt_iso, "source": source['name'], "summary": clean_desc})
                     return items
                     
@@ -146,7 +140,7 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- AI PROCESSOR ---
+# --- AI PROCESSORS ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
@@ -164,8 +158,8 @@ class AIBatchProcessor:
         1. 'Israel'/'Iran'/'Hamas'/'Hezbollah' in text -> Category 'Israel Focus'.
         2. 'CISA' or 'CVE' -> Severity 'Critical'.
         3. 'MITRE' -> Category 'Research'.
-        4. Categories choices: [Israel Focus, Malware, Phishing, Vulnerability, Research, General].
-        5. Severity choices: [Critical, High, Medium, Low].
+        4. Categories: [Israel Focus, Malware, Phishing, Vulnerability, Research, General].
+        5. Severity: [Critical, High, Medium, Low].
         
         Output JSON Array ONLY:
         [
@@ -175,7 +169,6 @@ class AIBatchProcessor:
         Items:
         {batch_text}
         """
-        
         res = await query_gemini_auto(self.key, prompt)
         if res:
             try:
@@ -189,7 +182,23 @@ class AIBatchProcessor:
         prompt = f"""
         **SOC Analyst Request:** Investigate IOC: {ioc}
         **Data:** {json.dumps(data, indent=2, default=str)}
-        **Task:** Markdown report. 1. Verdict (Malicious/Safe). 2. Summary. 3. Key Evidence. 4. Actions.
+        **Task:** Markdown report. 1. Verdict. 2. Summary. 3. Evidence. 4. Actions.
+        """
+        return await query_gemini_auto(self.key, prompt)
+
+    async def generate_hunting_queries(self, actor_profile):
+        prompt = f"""
+        Act as a Threat Hunter. Create hunting queries for the Threat Actor: {actor_profile['name']}.
+        
+        Actor Profile:
+        {json.dumps(actor_profile, indent=2)}
+        
+        Output Markdown:
+        1. **KQL (Microsoft Sentinel) Query**: To detect their TTPs (e.g., Powershell, unique file names).
+        2. **Splunk SPL**: Equivalent query.
+        3. **Suricata/Snort Rule**: If applicable for network.
+        
+        Keep it strict and copy-paste ready.
         """
         return await query_gemini_auto(self.key, prompt)
 
@@ -233,28 +242,71 @@ class ThreatLookup:
         except: return {"status": "error"}
 
     def query_urlscan(self, ioc):
-        if not self.keys['urlscan']: return {"status": "skipped"}
+        if not self.keys['urlscan']: return {"status": "skipped", "msg": "No API Key"}
         try:
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.keys['urlscan']}, timeout=10)
-            if res.status_code == 200 and res.json().get("results"):
-                result = res.json()["results"][0]
-                return {"status": "found", "screenshot": result.get("screenshot"), "verdict": result.get("verdict"), "page": result.get("page")}
-            return {"status": "not_found"}
-        except: return {"status": "error"}
+            headers = {"API-Key": self.keys['urlscan'], "Content-Type": "application/json"}
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers=headers, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                if data.get("results"):
+                    result = data["results"][0]
+                    return {"status": "found", "screenshot": result.get("screenshot"), "verdict": result.get("verdict"), "page": result.get("page")}
+                return {"status": "not_found"}
+            elif res.status_code == 401: return {"status": "error", "msg": "Invalid API Key (401)"}
+            return {"status": "error", "msg": f"HTTP {res.status_code}"}
+        except Exception as e: return {"status": "error", "msg": str(e)}
 
 class APTSheetCollector:
-    def fetch_threats(self, region):
-        try:
-            return pd.DataFrame([
-                {"Group": "MuddyWater", "Target": "Israel", "Type": "Espionage", "Origin": "Iran"},
-                {"Group": "Lazarus", "Target": "Global", "Type": "Financial", "Origin": "North Korea"},
-                {"Group": "APT28", "Target": "Ukraine/NATO", "Type": "Sabotage", "Origin": "Russia"},
-                {"Group": "OilRig", "Target": "Middle East", "Type": "Espionage", "Origin": "Iran"},
-                {"Group": "Agonizing Serpens", "Target": "Israel", "Type": "Wiper", "Origin": "Iran"},
-            ])
-        except: return pd.DataFrame()
+    def fetch_threats(self):
+        # Rich Dictionary Data for Analyst Context
+        return [
+            {
+                "name": "MuddyWater", 
+                "origin": "🇮🇷 Iran", 
+                "type": "Espionage", 
+                "target": "Israel, Saudi Arabia, Turkey",
+                "tools": "PowerShell, ScreenConnect, Ligolo",
+                "desc": "Subordinate to MOIS. Known for social engineering and using legitimate RMM tools.",
+                "mitre": ["T1059.001", "T1105", "T1021.001"]
+            },
+            {
+                "name": "OilRig (APT34)", 
+                "origin": "🇮🇷 Iran", 
+                "type": "Espionage", 
+                "target": "Middle East, Finance, Gov",
+                "tools": "DNS Tunneling, Karkoff, SideTwist",
+                "desc": "Focuses on supply chain attacks and DNS tunneling for C2 communications.",
+                "mitre": ["T1071.004", "T1102", "T1048"]
+            },
+            {
+                "name": "Agonizing Serpens", 
+                "origin": "🇮🇷 Iran", 
+                "type": "Destructive (Wiper)", 
+                "target": "Israel Education & Tech",
+                "tools": "Multi-Layer Wipers, SQL Injection",
+                "desc": "Recently active group focusing on data destruction and psychological warfare.",
+                "mitre": ["T1485", "T1190"]
+            },
+            {
+                "name": "Lazarus Group", 
+                "origin": "🇰🇵 North Korea", 
+                "type": "Financial Theft", 
+                "target": "Global, Crypto, Defense",
+                "tools": "Manuscrypt, NukeSped",
+                "desc": "State-sponsored group focused on funding the regime through crypto heists.",
+                "mitre": ["T1003", "T1204"]
+            },
+            {
+                "name": "APT28 (Fancy Bear)", 
+                "origin": "🇷🇺 Russia", 
+                "type": "Espionage / Sabotage", 
+                "target": "NATO, Ukraine",
+                "tools": "X-Agent, X-Tunnel",
+                "desc": "GRU-affiliated group known for high-profile hacks and interference.",
+                "mitre": ["T1110", "T1003.001"]
+            }
+        ]
 
-# --- MISSING FUNCTION ADDED HERE ---
 def save_reports(raw, analyzed):
     try:
         conn = sqlite3.connect(DB_NAME)
