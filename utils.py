@@ -30,7 +30,6 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    # ניקוי דוחות ישנים מאוד (מעל 48 שעות) כדי לא להעמיס, אך משאיר היסטוריה קצרה
     limit = (datetime.datetime.now() - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
@@ -53,6 +52,28 @@ def get_ioc_type(ioc):
 def vt_url_id(url):
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
+async def get_working_model(api_key):
+    """Dynamically finds a working model from the user's available list."""
+    genai.configure(api_key=api_key)
+    try:
+        # Get list of available models
+        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        
+        # Priority list
+        preferences = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-1.0-pro', 'models/gemini-pro']
+        
+        for pref in preferences:
+            for m in models:
+                if pref in m: # Match partial name
+                    return m
+        
+        # If no match from preference, pick the first valid one
+        if models: return models[0]
+        return 'gemini-pro' # Fallback default
+    except Exception as e:
+        print(f"Error listing models: {e}")
+        return 'gemini-pro'
+
 # --- Health Check Manager ---
 class ConnectionManager:
     @staticmethod
@@ -60,10 +81,14 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             genai.configure(api_key=key)
-            # ניסיון ממשי לייצר תוכן כדי לוודא הרשאות, לא רק list_models
-            model = genai.GenerativeModel('gemini-1.5-flash')
+            # Find a valid model first
+            models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+            if not models: return False, "No models available for API Key"
+            
+            # Test generation
+            model = genai.GenerativeModel(models[0])
             response = model.generate_content("test")
-            return True, "Connected"
+            return True, f"Connected ({models[0]})"
         except Exception as e: return False, str(e)
 
     @staticmethod
@@ -81,9 +106,10 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             headers = {'API-KEY': key.strip()}
-            # בדיקה מול נקודת קצה פשוטה יותר אם ה-urlhaus נכשל
-            res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=10)
-            if res.status_code == 200: return True, "Connected (Public)"
+            # Simple check
+            res = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data={'url':'http://google.com'}, headers=headers, timeout=10)
+            if res.status_code == 200: return True, "Connected"
+            if res.status_code == 401: return False, "Invalid Key"
             return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
@@ -136,8 +162,6 @@ class ThreatLookup:
         self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
 
     def query_threatfox(self, ioc):
-        # ThreatFox allows public queries without API key for some endpoints, but search usually requires it.
-        # However, let's try gracefully.
         ioc = ioc.strip()
         payload = {"query": "search_ioc", "search_term": ioc}
         headers = {}
@@ -285,24 +309,21 @@ class CTICollector:
                     text = await resp.text()
                     soup = BeautifulSoup(text, 'xml')
                     items = []
-                    for i in soup.find_all('item')[:5]: # Limit to 5 per source to avoid overloading
+                    for i in soup.find_all('item')[:5]:
                         d = i.pubDate.text if i.pubDate else str(now)
                         try:
                             dt = parser.parse(d)
                             if dt.tzinfo is None: dt = dt.replace(tzinfo=datetime.timezone.utc)
-                            # Allow items up to 48 hours to ensure content appears
                             if dt < now - datetime.timedelta(hours=48): continue
                             final_d = dt.isoformat()
                         except: final_d = now.isoformat()
                         
-                        # Add default description if missing
                         desc = i.description.text if i.description else "No description available."
                         items.append({"title": i.title.text, "url": i.link.text, "date": final_d, "source": source['name'], "summary": desc})
                     print(f"DEBUG: {source['name']} found {len(items)} items")
                     return items
                 elif source['type'] == 'json':
                     data = await resp.json()
-                    print(f"DEBUG: {source['name']} found items")
                     return [{"title": f"KEV: {v['cveID']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": datetime.datetime.now().isoformat(), "source": source['name'], "summary": v['vulnerabilityName']} for v in data.get('vulnerabilities', [])[:3]]
         except Exception as e:
             print(f"DEBUG: Exception in {source['name']} - {str(e)}")
@@ -315,22 +336,29 @@ class CTICollector:
             tasks = [self.fetch_item(session, src) for src in self.SOURCES]
             results = await asyncio.gather(*tasks)
             flat_results = [i for sub in results for i in sub]
-            print(f"DEBUG: Total items collected: {len(flat_results)}")
             return flat_results
 
 # --- AI Processors ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
-        if key:
-            genai.configure(api_key=key)
+        self.model_name = "gemini-pro" # Default safe fallback
+        
+    async def _get_model(self):
+        if not self.key: return None
+        # Try to dynamically get a working model name
+        try:
+            return await get_working_model(self.key)
+        except:
+            return "gemini-pro"
 
     async def analyze_batch(self, items):
         if not items: return []
         if not self.key:
-            print("DEBUG: No API Key, returning items without AI analysis")
-            # Fallback if no key: Just format them simply
-            return [{"id": i, "category": "General", "severity": "Medium", "impact": "Unknown", "summary": item['summary'][:200]} for i, item in enumerate(items)]
+            return [{"id": i, "category": "General", "severity": "Medium", "impact": "Manual Review Needed", "summary": item['summary'][:200]} for i, item in enumerate(items)]
+
+        model_name = await self._get_model()
+        print(f"DEBUG: Using model {model_name} for batch analysis")
 
         batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
         prompt = f"""
@@ -359,38 +387,28 @@ class AIBatchProcessor:
         {batch_text}
         """
         
-        # Tried models in order of stability
-        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
-        
-        for m in models_to_try:
-            try:
-                print(f"DEBUG: Trying AI model {m}...")
-                model = genai.GenerativeModel(m)
-                res = await model.generate_content_async(prompt)
-                
-                # Cleaning response
-                text = res.text.replace('```json','').replace('```','').strip()
-                if not text.startswith('['): 
-                    # Sometimes Gemini puts text before the JSON
-                    start = text.find('[')
-                    end = text.rfind(']') + 1
-                    if start != -1 and end != -1:
-                        text = text[start:end]
-                
-                parsed = json.loads(text)
-                print("DEBUG: AI Analysis success")
-                return parsed
-            except Exception as e:
-                print(f"DEBUG: Model {m} failed: {e}")
-                continue
-        
-        print("DEBUG: All AI models failed. Returning raw data.")
-        # Fallback if AI completely fails
-        return [{"id": i, "category": "General", "severity": "Medium", "impact": "Manual Review Needed", "summary": item['summary'][:200]} for i, item in enumerate(items)]
+        try:
+            genai.configure(api_key=self.key)
+            model = genai.GenerativeModel(model_name)
+            res = await model.generate_content_async(prompt)
+            
+            text = res.text.replace('```json','').replace('```','').strip()
+            if not text.startswith('['): 
+                start = text.find('[')
+                end = text.rfind(']') + 1
+                if start != -1 and end != -1:
+                    text = text[start:end]
+            
+            return json.loads(text)
+        except Exception as e:
+            print(f"DEBUG: AI Batch failed with {model_name}: {e}")
+            # Fallback
+            return [{"id": i, "category": "General", "severity": "Medium", "impact": "AI Error", "summary": item['summary'][:200]} for i, item in enumerate(items)]
 
     async def analyze_single_ioc(self, ioc, data):
-        if not self.key: return "⚠️ Error: No Gemini API Key provided. Cannot generate report."
+        if not self.key: return "⚠️ Error: No Gemini API Key provided."
         
+        model_name = await self._get_model()
         context_str = json.dumps(data, indent=2, default=str)
         prompt = f"""
         Act as a Senior SOC Analyst. Write a short incident response note for IOC: {ioc}.
@@ -403,31 +421,25 @@ class AIBatchProcessor:
         **Confidence:** [0-100%]
         
         ### 🔍 Key Findings
-        * bullet points of critical data (e.g. VT score, Malware families, ISP).
+        * bullet points of critical data.
         
         ### 🛡️ Recommendation
-        [Actionable advice: Block in Firewall / Hunt in EDR / Ignore]
+        [Actionable advice]
         """
         
-        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash"]
-        for m in models_to_try:
-            try:
-                model = genai.GenerativeModel(m)
-                res = await model.generate_content_async(prompt)
-                return res.text
-            except Exception as e:
-                print(f"Single IOC Analysis failed with {m}: {e}")
-                continue
-        return "❌ Error: AI Service Unavailable. Please analyze raw data manually."
+        try:
+            genai.configure(api_key=self.key)
+            model = genai.GenerativeModel(model_name)
+            res = await model.generate_content_async(prompt)
+            return res.text
+        except Exception as e:
+            return f"❌ Error: AI Service Unavailable ({e}). Please analyze raw data manually."
 
 def save_reports(raw, analyzed):
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        
-        # Map analysis by ID
         amap = {r['id']:r for r in analyzed if isinstance(r, dict) and r.get('category')!='IGNORE'}
-        
         cnt = 0
         for i,item in enumerate(raw):
             if i in amap:
@@ -436,12 +448,8 @@ def save_reports(raw, analyzed):
                     c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
                         (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], a.get('category','General'), a.get('severity','Low'), a.get('impact','None'), a.get('summary','')))
                     if c.rowcount > 0: cnt += 1
-                except Exception as db_err:
-                    print(f"DB Insert Error: {db_err}")
-                    
+                except: pass
         conn.commit()
         conn.close()
         return cnt
-    except Exception as e:
-        print(f"Save Reports Error: {e}")
-        return 0
+    except: return 0
