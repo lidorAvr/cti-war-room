@@ -37,6 +37,21 @@ def init_db():
     conn.commit()
     conn.close()
 
+# --- Helper: Input Sanitizer ---
+def sanitize_ioc(ioc):
+    """
+    Cleans the input to handle IP:Port combinations.
+    Returns a tuple: (clean_ioc, port_if_exists)
+    Example: "1.1.1.1:80" -> ("1.1.1.1", "80")
+             "google.com" -> ("google.com", None)
+    """
+    ioc = ioc.strip()
+    # Regex for IP:Port
+    match = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$', ioc)
+    if match:
+        return match.group(1), match.group(2) # Return IP, Port
+    return ioc, None
+
 # --- SOC Tools: IOC Extractor ---
 class IOCExtractor:
     def extract(self, text):
@@ -51,67 +66,62 @@ class IOCExtractor:
         
         return {"IPs": ips, "Domains": domains, "Hashes": hashes}
 
-# --- SOC Tools: Universal Lookup (SMART VERSION) ---
+# --- SOC Tools: Universal Lookup (SMART & ROBUST VERSION) ---
 class ThreatLookup:
     def __init__(self):
         self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
-        # כתובות שונות לסוגים שונים ב-URLhaus
         self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
         self.uh_host = "https://urlhaus-api.abuse.ch/v1/host/"
         self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
 
     def identify_type(self, ioc):
         ioc = ioc.strip()
-        # זיהוי Hash (MD5/SHA256)
-        if re.match(r'^[a-fA-F0-9]{32}$', ioc) or re.match(r'^[a-fA-F0-9]{64}$', ioc):
-            return "hash"
-        # זיהוי IP
-        elif re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ioc):
-            return "ip"
-        # זיהוי URL
-        elif "http" in ioc or "/" in ioc:
-            return "url"
-        # כל השאר כנראה דומיין
-        else:
-            return "domain"
+        if re.match(r'^[a-fA-F0-9]{32}$', ioc) or re.match(r'^[a-fA-F0-9]{64}$', ioc): return "hash"
+        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ioc): return "ip"
+        if "http" in ioc or "/" in ioc: return "url"
+        return "domain"
 
     def query_threatfox(self, ioc):
-        ioc = ioc.strip()
+        # 1. ניסיון ראשון: חיפוש מדויק (כפי שהוזן)
         payload = {"query": "search_ioc", "search_term": ioc}
         try:
             res = requests.post(self.tf_url, json=payload, timeout=5)
-            if res.status_code == 200:
+            data = res.json()
+            if data.get("query_status") == "ok":
+                return data.get("data", [])
+            
+            # 2. ניסיון שני: אם זה IP:Port, ננסה לחפש רק את ה-IP
+            clean_ip, port = sanitize_ioc(ioc)
+            if port: # אם היה פורט בקלט המקורי
+                payload["search_term"] = clean_ip
+                res = requests.post(self.tf_url, json=payload, timeout=5)
                 data = res.json()
-                return data.get("data", []) if data.get("query_status") == "ok" else []
+                if data.get("query_status") == "ok":
+                    return data.get("data", [])
+            
             return []
         except: return []
 
     def query_urlhaus(self, ioc):
-        ioc = ioc.strip()
-        ioc_type = self.identify_type(ioc)
+        # ניקוי פורט אם קיים (URLhaus לא אוהב פורטים בחיפוש HOST)
+        clean_ioc, _ = sanitize_ioc(ioc)
+        ioc_type = self.identify_type(clean_ioc)
         
-        # בחירת האסטרטגיה הנכונה מול URLhaus
         try:
             if ioc_type == "hash":
-                # חיפוש לפי קובץ זדוני (Hash)
-                res = requests.post(self.uh_payload, data={'md5_hash': ioc} if len(ioc)==32 else {'sha256_hash': ioc}, timeout=5)
+                res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, timeout=5)
             elif ioc_type == "url":
-                # חיפוש לפי URL מלא
-                res = requests.post(self.uh_url, data={'url': ioc}, timeout=5)
+                res = requests.post(self.uh_url, data={'url': ioc}, timeout=5) # URL מלא משאירים כמו שהוא
             else:
-                # חיפוש לפי דומיין או IP (Host)
-                res = requests.post(self.uh_host, data={'host': ioc}, timeout=5)
+                res = requests.post(self.uh_host, data={'host': clean_ioc}, timeout=5)
 
             if res.status_code == 200:
                 data = res.json()
-                if data.get("query_status") == "ok":
-                    return data
-                # לפעמים התשובה חוזרת כרשימת urls תחת המארח
+                if data.get("query_status") == "ok": return data
                 elif "urls" in data and len(data["urls"]) > 0:
                     return {"query_status": "ok", "url_status": "active_host", "tags": ["hosting_malware"], "urls_count": len(data["urls"])}
             return None
-        except Exception as e:
-            return None
+        except: return None
 
 # --- Existing Collectors ---
 class MitreCollector:
@@ -142,8 +152,12 @@ class AbuseIPDBChecker:
     def __init__(self, key): self.key = key
     def check_ip(self, ip):
         if not self.key: return {"error": "Missing Key"}
+        
+        # Sanitization: AbuseIPDB חייב לקבל IP נקי ללא פורט
+        clean_ip, _ = sanitize_ioc(ip)
+        
         try:
-            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': ip, 'maxAgeInDays': 90})
+            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': clean_ip, 'maxAgeInDays': 90})
             return {"success": True, "data": res.json()['data']} if res.status_code==200 else {"error": res.text}
         except: return {"error": "Connection Failed"}
 
