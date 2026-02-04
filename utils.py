@@ -1,4 +1,3 @@
-import os
 import sqlite3
 import asyncio
 import aiohttp
@@ -11,7 +10,9 @@ import re
 import base64
 from bs4 import BeautifulSoup
 from dateutil import parser
-import google.generativeai as genai
+# New Google Library
+from google import genai
+from google.genai import types
 
 DB_NAME = "cti_dashboard.db"
 
@@ -52,25 +53,21 @@ def get_ioc_type(ioc):
 def vt_url_id(url):
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
-# --- Health Check Manager ---
+# --- Health Check Manager (Updated for New SDK) ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
         try:
-            genai.configure(api_key=key)
-            # DIRECT ATTACK: Don't list models. Just try to generate.
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content("Ping")
-            return True, "Connected (1.5-flash)"
+            client = genai.Client(api_key=key)
+            # Simple ping to check auth
+            response = client.models.generate_content(
+                model='gemini-1.5-flash',
+                contents='Ping'
+            )
+            return True, "Connected (google-genai)"
         except Exception as e:
-            # Fallback to Pro if Flash fails
-            try:
-                model = genai.GenerativeModel('gemini-1.5-pro')
-                response = model.generate_content("Ping")
-                return True, "Connected (1.5-pro)"
-            except Exception as e2:
-                return False, f"Error: {str(e)[:100]}"
+            return False, f"Error: {str(e)[:100]}"
 
     @staticmethod
     def check_abuseipdb(key):
@@ -78,15 +75,13 @@ class ConnectionManager:
         try:
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': key}, params={'ipAddress': '8.8.8.8'}, timeout=5)
             if res.status_code == 200: return True, "Connected"
-            elif res.status_code == 401: return False, "Invalid API Key"
-            else: return False, f"HTTP {res.status_code}"
+            return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
     @staticmethod
     def check_abusech(key):
         if not key: return False, "Missing Key"
         try:
-            # Public endpoint check to avoid key issues during connection test
             res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=10)
             if res.status_code == 200: return True, "Connected (Public)"
             return False, f"HTTP {res.status_code}"
@@ -99,9 +94,7 @@ class ConnectionManager:
             headers = {"x-apikey": key}
             res = requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers=headers, timeout=5)
             if res.status_code == 200: return True, "Connected"
-            elif res.status_code == 401: return False, "Invalid API Key"
-            elif res.status_code == 403: return False, "Forbidden"
-            else: return False, f"HTTP {res.status_code}"
+            return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
     @staticmethod
@@ -111,8 +104,7 @@ class ConnectionManager:
             headers = {"API-Key": key}
             res = requests.get("https://urlscan.io/api/v1/search/?q=domain:google.com", headers=headers, timeout=5)
             if res.status_code == 200: return True, "Connected"
-            elif res.status_code == 401: return False, "Invalid API Key"
-            else: return False, f"HTTP {res.status_code}"
+            return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
 # --- IOC Extractor ---
@@ -128,12 +120,14 @@ class IOCExtractor:
             "Hashes": list(set(re.findall(md5_pattern, text) + re.findall(sha256_pattern, text)))
         }
 
-# --- UNIVERSAL THREAT LOOKUP ---
+# --- Threat Lookup (Fixed Arguments) ---
 class ThreatLookup:
+    # FIX: Added cyscan_key to init to match app.py call
     def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None, cyscan_key=None):
         self.abuse_ch_key = abuse_ch_key.strip() if abuse_ch_key else None
         self.vt_key = vt_key.strip() if vt_key else None
         self.urlscan_key = urlscan_key.strip() if urlscan_key else None
+        self.cyscan_key = cyscan_key.strip() if cyscan_key else None
         
         self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
         self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
@@ -247,8 +241,6 @@ class AbuseIPDBChecker:
         try:
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': clean_ip, 'maxAgeInDays': 90})
             if res.status_code == 200: return {"success": True, "data": res.json()['data']}
-            elif res.status_code == 422: return {"error": "Invalid IP"}
-            elif res.status_code == 401: return {"error": "Invalid API Key"}
             return {"error": "API Error"}
         except: return {"error": "Connection Failed"}
 
@@ -295,16 +287,17 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- AI Processors ---
+# --- AI Processors (UPDATED TO NEW SDK) ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
+        self.client = genai.Client(api_key=key) if key else None
         
     async def analyze_batch(self, items):
         if not items: return []
         fallback_data = [{"id": i, "category": "General", "severity": "Medium", "impact": "See details", "summary": item['summary'][:150]} for i, item in enumerate(items)]
         
-        if not self.key: return fallback_data
+        if not self.client: return fallback_data
 
         batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
         prompt = f"""
@@ -315,18 +308,14 @@ class AIBatchProcessor:
         {batch_text}
         """
         
-        # --- DIRECT MODEL SELECTION ---
-        # We stop guessing. We assume 0.8.6 is installed and 1.5-flash is available.
-        # If this fails, the API key is 100% the problem.
-        
-        genai.configure(api_key=self.key)
-        
         try:
-            # Try 1.5 Flash directly
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            res = await model.generate_content_async(prompt)
+            # Using new SDK syntax
+            response = await self.client.aio.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=prompt
+            )
             
-            text = res.text.replace('```json','').replace('```','').strip()
+            text = response.text.replace('```json','').replace('```','').strip()
             if not text.startswith('['): 
                 start = text.find('[')
                 end = text.rfind(']') + 1
@@ -334,22 +323,11 @@ class AIBatchProcessor:
             return json.loads(text)
             
         except Exception as e:
-            # print(f"Flash failed: {e}")
-            try:
-                # One last desperate try with Pro
-                model = genai.GenerativeModel('gemini-1.5-pro')
-                res = await model.generate_content_async(prompt)
-                text = res.text.replace('```json','').replace('```','').strip()
-                if not text.startswith('['): 
-                    start = text.find('[')
-                    end = text.rfind(']') + 1
-                    text = text[start:end]
-                return json.loads(text)
-            except:
-                return fallback_data
+            print(f"AI Fail: {e}")
+            return fallback_data
 
     async def analyze_single_ioc(self, ioc, data):
-        if not self.key: return "⚠️ Error: No Gemini API Key."
+        if not self.client: return "⚠️ Error: No Gemini API Key."
         
         context_str = json.dumps(data, indent=2, default=str)
         prompt = f"""
@@ -358,15 +336,13 @@ class AIBatchProcessor:
         Provide Verdict, Findings, Recommendation.
         """
         
-        genai.configure(api_key=self.key)
-        
         try:
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            res = await model.generate_content_async(prompt)
-            return res.text
+            response = await self.client.aio.models.generate_content(
+                model='gemini-1.5-flash',
+                contents=prompt
+            )
+            return response.text
         except Exception as e:
-            if "429" in str(e): return "⚠️ AI Quota Exceeded."
-            if "404" in str(e): return "⚠️ API Error: Model not found (Check API Key restrictions)."
             return f"❌ AI Error: {str(e)}"
 
 def save_reports(raw, analyzed):
