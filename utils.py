@@ -54,10 +54,8 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Cleanup: Keep INCD forever (or manage manually), others 48h
+    # Cleanup: Keep INCD forever, others 48h
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
-    
-    # Only delete NON-INCD sources that are old
     c.execute("DELETE FROM intel_reports WHERE source != 'INCD' AND published_at < ?", (limit_regular,))
     conn.commit()
     conn.close()
@@ -109,9 +107,12 @@ class AIBatchProcessor:
         Task: Analyze cyber news items.
         
         OUTPUT RULES:
-        1. LANGUAGE: Hebrew (Translate/Rewrite in professional Hebrew).
+        1. LANGUAGE CONDITION:
+           - IF the item source is 'INCD' (Israel National Cyber Directorate): Output MUST be in HEBREW.
+           - FOR ALL OTHER SOURCES: Output MUST be in ENGLISH.
+           
         2. TITLE: Short, informative (Max 8 words).
-        3. SUMMARY: 3-4 professional sentences in Hebrew. Explain 'What', 'Who', and 'Impact'.
+        3. SUMMARY: 3-4 professional sentences. Explain 'What', 'Who', and 'Impact'.
         4. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
         5. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
@@ -141,35 +142,26 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        # UPDATED TIER 3 ANALYST PROMPT
         prompt = f"""
         Act as a Senior Tier 3 CTI Analyst & Malware Researcher.
-        You are mentoring a junior analyst. Do not just output data, EXPLAIN it.
-        
         Target IOC: {ioc} ({ioc_type})
         Intelligence Sources Data: {json.dumps(data)}
         
         Your Goal: Determine if this is TRULY malicious or a False Positive, and guide the next steps.
 
-        Output Structure (Markdown, Hebrew Language):
+        Output Structure (Markdown, ENGLISH ONLY):
         
-        ### 🛡️ הערכת אנליסט (Verdict)
-        * **פסק דין**: [זדוני / חשוד / נקי / לא ידוע]
-        * **רמת ביטחון**: [גבוהה / בינונית / נמוכה] (הסבר בקצרה למה)
-        * **סבירות ל-False Positive**: [גבוהה / נמוכה]. האם ייתכן שזה שירות לגיטימי שסומן בטעות?
+        ### 🛡️ Analyst Verdict
+        * **Verdict**: [Malicious / Suspicious / Clean / Unknown]
+        * **Confidence**: [High / Medium / Low] (Explain why)
+        * **False Positive Chance**: [High / Low]. Is it a legitimate service?
         
-        ### 🔬 ניתוח טכני מעמיק
-        * נתח את הממצאים. למה המנועים סימנו את זה? (למשל: האם זה Cobalt Strike Beacon? פישינג למייקרוסופט? סריקת פורטים?)
-        * אם המידע מ-VirusTotal ישן - ציין זאת כגורם מחשיד ל-FP.
-        * הקשר (Context): לאיזה קמפיין או שחקן תקיפה זה עשוי להיות שייך?
+        ### 🔬 Technical Deep Dive
+        * Analyze the findings. Why did engines flag it? (e.g., Cobalt Strike Beacon? Phishing? Scanning?)
+        * Context: Which campaign or APT is this related to?
         
-        ### 🕵️‍♂️ צעדים להמשך חקירה (Action Items)
-        תן 3-4 צעדים פרקטיים לצוות ה-SOC. למשל:
-        1. "חפש בלוגים של Proxy/FW תקשורת ל..."
-        2. "בדוק אם הקובץ חתום דיגיטלית..."
-        3. "הורד את ה-PCAP מ-URLScan ובדוק..."
-        
-        Write in professional, clear Hebrew.
+        ### 🕵️‍♂️ Actionable Next Steps
+        Provide 3-4 specific actions for the SOC team.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -177,12 +169,8 @@ class AIBatchProcessor:
         prompt = f"""
         Generate Hunting Queries for Actor: {actor['name']}.
         Context: {actor.get('mitre', 'N/A')} | {actor.get('tools', 'N/A')}.
-        
-        Provide:
-        1. **Google Chronicle (YARA-L)**
-        2. **Cortex XDR (XQL)**
-        
-        Explain the logic briefly in English.
+        Provide: 1. Google Chronicle (YARA-L) 2. Cortex XDR (XQL).
+        Explain logic in English.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -241,13 +229,10 @@ class CTICollector:
                 content = await resp.text()
                 now = datetime.datetime.now(IL_TZ)
                 
-                # UPDATED: Determine if we enforce strict time limits
                 is_incd = source['name'] == 'INCD'
                 
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    
-                    # If INCD, take top 4 regardless of date. If other, take top 10.
                     entries_to_check = feed.entries[:4] if is_incd else feed.entries[:10]
                     
                     for entry in entries_to_check:
@@ -259,10 +244,8 @@ class CTICollector:
                                 pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
                         except: pass
                         
-                        # LOGIC: If NOT INCD, check 48h limit. If INCD, skip check (always take).
                         if not is_incd:
-                            if (now - pub_date).total_seconds() > (48 * 3600):
-                                continue
+                            if (now - pub_date).total_seconds() > (48 * 3600): continue
 
                         if _is_url_processed(entry.link): continue
                         
@@ -282,8 +265,6 @@ class CTICollector:
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    
-                    # If INCD, take last 4 messages. Else take last 10.
                     msgs_to_check = msgs[-4:] if is_incd else msgs[-10:]
                     
                     for msg in msgs_to_check:
@@ -298,7 +279,6 @@ class CTICollector:
                                 try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
                                 except: pass
                             
-                            # Only check time if NOT INCD
                             if not is_incd:
                                 if (now - pub_date).total_seconds() > 432000: continue
                             
