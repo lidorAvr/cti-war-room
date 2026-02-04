@@ -10,6 +10,7 @@ import pandas as pd
 import io
 import re
 import base64
+import hashlib
 from bs4 import BeautifulSoup
 from dateutil import parser
 import google.generativeai as genai
@@ -37,11 +38,11 @@ def init_db():
     conn.commit()
     conn.close()
 
+# --- Helpers ---
 def sanitize_ioc(ioc):
     ioc = ioc.strip()
     match = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$', ioc)
-    if match:
-        return match.group(1), match.group(2)
+    if match: return match.group(1), match.group(2)
     return ioc, None
 
 def get_ioc_type(ioc):
@@ -51,6 +52,11 @@ def get_ioc_type(ioc):
     if "http" in ioc or "/" in ioc: return "url"
     return "domain"
 
+def vt_url_id(url):
+    """Generate VirusTotal URL ID (Base64 without padding)"""
+    return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+
+# --- Health Check Manager ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
@@ -74,101 +80,170 @@ class ConnectionManager:
     @staticmethod
     def check_abusech(key):
         if not key: return False, "Missing Key"
-        # Test against URLhaus which is strict on Auth Keys
         try:
-            # We try to lookup a fake payload hash. 
-            # If the key is valid, it returns 200 (with no_results) or 404.
-            # If the key is invalid, it returns 403 or 401.
             headers = {'API-KEY': key.strip()}
-            payload = {'md5_hash': '5e884898da28047151d0e56f8dc62927'} # Dummy hash
-            res = requests.post("https://urlhaus-api.abuse.ch/v1/payload/", data=payload, headers=headers, timeout=10)
-            
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("query_status") in ["ok", "no_results"]:
-                    return True, "Connected (URLhaus)"
-                return False, f"API Error: {data.get('query_status')}"
-            
-            # If URLhaus fails, try ThreatFox as fallback
-            res_tf = requests.post("https://threatfox-api.abuse.ch/api/v1/", json={"query": "get_recent", "days": 1}, headers=headers, timeout=10)
-            if res_tf.status_code == 200:
-                 if res_tf.json().get("query_status") == "ok": return True, "Connected (ThreatFox)"
-            
-            if res.status_code == 403 or res_tf.status_code == 403:
-                return False, "403 Forbidden (Key valid but account not active?)"
-            if res.status_code == 401 or res_tf.status_code == 401:
-                return False, "401 Unauthorized (Invalid Key)"
-                
-            return False, f"HTTP Error {res.status_code}"
+            data = {'url': 'http://google.com'}
+            res = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data=data, headers=headers, timeout=10)
+            if res.status_code == 200: return True, "Connected"
+            if res.status_code == 401: return False, "Invalid Key"
+            return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
+    @staticmethod
+    def check_virustotal(key):
+        if not key: return False, "Missing Key"
+        try:
+            headers = {"x-apikey": key}
+            # בדיקת IP פשוטה (8.8.8.8)
+            res = requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers=headers, timeout=5)
+            if res.status_code == 200: return True, "Connected"
+            elif res.status_code == 401: return False, "Invalid API Key"
+            elif res.status_code == 403: return False, "Forbidden"
+            else: return False, f"HTTP {res.status_code}"
+        except Exception as e: return False, str(e)
+
+    @staticmethod
+    def check_urlscan(key):
+        if not key: return False, "Missing Key"
+        try:
+            headers = {"API-Key": key}
+            res = requests.get("https://urlscan.io/api/v1/search/?q=domain:google.com", headers=headers, timeout=5)
+            if res.status_code == 200: return True, "Connected"
+            elif res.status_code == 401: return False, "Invalid API Key"
+            else: return False, f"HTTP {res.status_code}"
+        except Exception as e: return False, str(e)
+
+# --- IOC Extractor ---
 class IOCExtractor:
     def extract(self, text):
         ipv4_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
         domain_pattern = r'\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b'
         md5_pattern = r'\b[a-fA-F0-9]{32}\b'
         sha256_pattern = r'\b[a-fA-F0-9]{64}\b'
-        
-        ips = list(set(re.findall(ipv4_pattern, text)))
-        domains = list(set(re.findall(domain_pattern, text)))
-        hashes = list(set(re.findall(md5_pattern, text) + re.findall(sha256_pattern, text)))
-        return {"IPs": ips, "Domains": domains, "Hashes": hashes}
+        return {
+            "IPs": list(set(re.findall(ipv4_pattern, text))),
+            "Domains": list(set(re.findall(domain_pattern, text))),
+            "Hashes": list(set(re.findall(md5_pattern, text) + re.findall(sha256_pattern, text)))
+        }
 
+# --- UNIVERSAL THREAT LOOKUP (The Brain) ---
 class ThreatLookup:
-    def __init__(self, api_key=None):
-        self.api_key = api_key.strip() if api_key else None
+    def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None):
+        self.abuse_ch_key = abuse_ch_key.strip() if abuse_ch_key else None
+        self.vt_key = vt_key.strip() if vt_key else None
+        self.urlscan_key = urlscan_key.strip() if urlscan_key else None
+        
+        # Abuse.ch URLs
         self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
         self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
         self.uh_host = "https://urlhaus-api.abuse.ch/v1/host/"
         self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
-        
-    def _get_headers(self):
-        return {'API-KEY': self.api_key} if self.api_key else {}
 
+    # --- Abuse.ch Logic ---
     def query_threatfox(self, ioc):
+        if not self.abuse_ch_key: return {"status": "skipped", "msg": "No Key"}
         ioc = ioc.strip()
         payload = {"query": "search_ioc", "search_term": ioc}
         try:
-            res = requests.post(self.tf_url, json=payload, headers=self._get_headers(), timeout=10)
-            if res.status_code in [401, 403]: return {"status": "error", "msg": "Invalid API Key or Forbidden"}
+            res = requests.post(self.tf_url, json=payload, headers={'API-KEY': self.abuse_ch_key}, timeout=10)
+            if res.status_code == 401: return {"status": "error", "msg": "Invalid Key"}
             data = res.json()
-            if data.get("query_status") == "ok":
-                return {"status": "found", "data": data.get("data", [])}
+            if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
             elif data.get("query_status") == "no_result":
+                # Fallback: Remove port
                 clean_ip, port = sanitize_ioc(ioc)
                 if port:
                     payload["search_term"] = clean_ip
-                    res = requests.post(self.tf_url, json=payload, headers=self._get_headers(), timeout=10)
+                    res = requests.post(self.tf_url, json=payload, headers={'API-KEY': self.abuse_ch_key}, timeout=10)
                     data = res.json()
-                    if data.get("query_status") == "ok":
-                        return {"status": "found", "data": data.get("data", [])}
+                    if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
                 return {"status": "not_found"}
-            else:
-                return {"status": "error", "msg": data.get("query_status", "Unknown")}
+            return {"status": "error", "msg": data.get("query_status")}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
     def query_urlhaus(self, ioc):
+        if not self.abuse_ch_key: return {"status": "skipped", "msg": "No Key"}
         clean_ioc, _ = sanitize_ioc(ioc)
         ioc_type = get_ioc_type(clean_ioc)
         try:
+            headers = {'API-KEY': self.abuse_ch_key}
             if ioc_type == "hash":
-                res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, headers=self._get_headers(), timeout=10)
+                res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, headers=headers, timeout=10)
             elif ioc_type == "url":
-                res = requests.post(self.uh_url, data={'url': ioc}, headers=self._get_headers(), timeout=10)
+                res = requests.post(self.uh_url, data={'url': ioc}, headers=headers, timeout=10)
             else:
-                res = requests.post(self.uh_host, data={'host': clean_ioc}, headers=self._get_headers(), timeout=10)
-
-            if res.status_code in [401, 403]: return {"status": "error", "msg": "Invalid API Key"}
+                res = requests.post(self.uh_host, data={'host': clean_ioc}, headers=headers, timeout=10)
+            
             if res.status_code == 200:
                 data = res.json()
                 if data.get("query_status") == "ok": return {"status": "found", "data": data}
-                elif "urls" in data and len(data["urls"]) > 0:
-                    return {"status": "found", "data": {"url_status": "active_hosting", "tags": ["malware_download"], "urls_count": len(data["urls"])}}
-                elif data.get("query_status") == "no_results": return {"status": "not_found"}
-                return {"status": "error", "msg": data.get("query_status")}
+                elif "urls" in data and len(data["urls"]) > 0: return {"status": "found", "data": {"tags": ["hosting_malware"], "count": len(data["urls"])}}
+                return {"status": "not_found"}
             return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
+    # --- VirusTotal Logic ---
+    def query_virustotal(self, ioc):
+        if not self.vt_key: return {"status": "skipped", "msg": "No Key"}
+        
+        clean_ioc, _ = sanitize_ioc(ioc)
+        ioc_type = get_ioc_type(clean_ioc)
+        
+        headers = {"x-apikey": self.vt_key}
+        base_url = "https://www.virustotal.com/api/v3"
+        
+        try:
+            endpoint = ""
+            if ioc_type == "ip": endpoint = f"/ip_addresses/{clean_ioc}"
+            elif ioc_type == "domain": endpoint = f"/domains/{clean_ioc}"
+            elif ioc_type == "hash": endpoint = f"/files/{clean_ioc}"
+            elif ioc_type == "url": 
+                url_id = vt_url_id(ioc)
+                endpoint = f"/urls/{url_id}"
+            
+            res = requests.get(base_url + endpoint, headers=headers, timeout=10)
+            
+            if res.status_code == 200:
+                data = res.json().get("data", {}).get("attributes", {})
+                stats = data.get("last_analysis_stats", {})
+                return {"status": "found", "stats": stats, "reputation": data.get("reputation", 0)}
+            elif res.status_code == 404:
+                return {"status": "not_found"}
+            elif res.status_code == 401: return {"status": "error", "msg": "Invalid VT Key"}
+            elif res.status_code == 429: return {"status": "error", "msg": "Rate Limit Exceeded"}
+            else: return {"status": "error", "msg": f"HTTP {res.status_code}"}
+        except Exception as e: return {"status": "error", "msg": str(e)}
+
+    # --- urlscan.io Logic ---
+    def query_urlscan(self, ioc):
+        if not self.urlscan_key: return {"status": "skipped", "msg": "No Key"}
+        clean_ioc, _ = sanitize_ioc(ioc)
+        
+        try:
+            headers = {"API-Key": self.urlscan_key}
+            # urlscan search query
+            query = f'"{clean_ioc}"'
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={query}", headers=headers, timeout=10)
+            
+            if res.status_code == 200:
+                data = res.json()
+                results = data.get("results", [])
+                if results:
+                    # Return latest scan
+                    latest = results[0]
+                    return {
+                        "status": "found",
+                        "page": latest.get("page", {}),
+                        "task": latest.get("task", {}),
+                        "verdict": latest.get("verdict", {}),
+                        "screenshot": latest.get("screenshot")
+                    }
+                return {"status": "not_found"}
+            elif res.status_code == 401: return {"status": "error", "msg": "Invalid URLScan Key"}
+            else: return {"status": "error", "msg": f"HTTP {res.status_code}"}
+        except Exception as e: return {"status": "error", "msg": str(e)}
+
+# --- Collectors ---
 class MitreCollector:
     def get_latest_updates(self):
         try:
@@ -176,8 +251,7 @@ class MitreCollector:
             resp = requests.get("https://attack.mitre.org/resources/updates/", headers=headers, timeout=5)
             soup = BeautifulSoup(resp.text, 'html.parser')
             update = soup.find('h2')
-            if update:
-                return {"title": update.text.strip(), "url": "https://attack.mitre.org" + (update.find('a')['href'] if update.find('a') else "")}
+            if update: return {"title": update.text.strip(), "url": "https://attack.mitre.org" + (update.find('a')['href'] if update.find('a') else "")}
             return None
         except: return None
 
@@ -238,7 +312,7 @@ class CTICollector:
                     data = await resp.json()
                     return [{"title": f"KEV: {v['cveID']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": datetime.datetime.now().isoformat(), "source": source['name'], "summary": v['vulnerabilityName']} for v in data.get('vulnerabilities', [])[:3]]
         except: return []
-
+    
     async def get_all_data(self):
         ssl_ctx = ssl.create_default_context(); ssl_ctx.check_hostname=False; ssl_ctx.verify_mode=ssl.CERT_NONE
         conn = aiohttp.TCPConnector(ssl=ssl_ctx)
