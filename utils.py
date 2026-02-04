@@ -7,14 +7,11 @@ import datetime
 import ssl
 import requests
 import pandas as pd
-import io
 import re
 import base64
-import hashlib
 from bs4 import BeautifulSoup
 from dateutil import parser
 import google.generativeai as genai
-import streamlit as st
 
 DB_NAME = "cti_dashboard.db"
 
@@ -53,7 +50,6 @@ def get_ioc_type(ioc):
     return "domain"
 
 def vt_url_id(url):
-    """Generate VirusTotal URL ID (Base64 without padding)"""
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
 # --- Health Check Manager ---
@@ -94,7 +90,6 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             headers = {"x-apikey": key}
-            # בדיקת IP פשוטה (8.8.8.8)
             res = requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers=headers, timeout=5)
             if res.status_code == 200: return True, "Connected"
             elif res.status_code == 401: return False, "Invalid API Key"
@@ -126,20 +121,18 @@ class IOCExtractor:
             "Hashes": list(set(re.findall(md5_pattern, text) + re.findall(sha256_pattern, text)))
         }
 
-# --- UNIVERSAL THREAT LOOKUP (The Brain) ---
+# --- UNIVERSAL THREAT LOOKUP ---
 class ThreatLookup:
-    def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None):
+    def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None, cyscan_key=None):
         self.abuse_ch_key = abuse_ch_key.strip() if abuse_ch_key else None
         self.vt_key = vt_key.strip() if vt_key else None
         self.urlscan_key = urlscan_key.strip() if urlscan_key else None
         
-        # Abuse.ch URLs
         self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
         self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
         self.uh_host = "https://urlhaus-api.abuse.ch/v1/host/"
         self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
 
-    # --- Abuse.ch Logic ---
     def query_threatfox(self, ioc):
         if not self.abuse_ch_key: return {"status": "skipped", "msg": "No Key"}
         ioc = ioc.strip()
@@ -150,7 +143,6 @@ class ThreatLookup:
             data = res.json()
             if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
             elif data.get("query_status") == "no_result":
-                # Fallback: Remove port
                 clean_ip, port = sanitize_ioc(ioc)
                 if port:
                     payload["search_term"] = clean_ip
@@ -182,16 +174,12 @@ class ThreatLookup:
             return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
-    # --- VirusTotal Logic ---
     def query_virustotal(self, ioc):
         if not self.vt_key: return {"status": "skipped", "msg": "No Key"}
-        
         clean_ioc, _ = sanitize_ioc(ioc)
         ioc_type = get_ioc_type(clean_ioc)
-        
         headers = {"x-apikey": self.vt_key}
         base_url = "https://www.virustotal.com/api/v3"
-        
         try:
             endpoint = ""
             if ioc_type == "ip": endpoint = f"/ip_addresses/{clean_ioc}"
@@ -202,34 +190,27 @@ class ThreatLookup:
                 endpoint = f"/urls/{url_id}"
             
             res = requests.get(base_url + endpoint, headers=headers, timeout=10)
-            
             if res.status_code == 200:
                 data = res.json().get("data", {}).get("attributes", {})
                 stats = data.get("last_analysis_stats", {})
                 return {"status": "found", "stats": stats, "reputation": data.get("reputation", 0)}
-            elif res.status_code == 404:
-                return {"status": "not_found"}
+            elif res.status_code == 404: return {"status": "not_found"}
             elif res.status_code == 401: return {"status": "error", "msg": "Invalid VT Key"}
             elif res.status_code == 429: return {"status": "error", "msg": "Rate Limit Exceeded"}
             else: return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
-    # --- urlscan.io Logic ---
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return {"status": "skipped", "msg": "No Key"}
         clean_ioc, _ = sanitize_ioc(ioc)
-        
         try:
             headers = {"API-Key": self.urlscan_key}
-            # urlscan search query
             query = f'"{clean_ioc}"'
             res = requests.get(f"https://urlscan.io/api/v1/search/?q={query}", headers=headers, timeout=10)
-            
             if res.status_code == 200:
                 data = res.json()
                 results = data.get("results", [])
                 if results:
-                    # Return latest scan
                     latest = results[0]
                     return {
                         "status": "found",
@@ -242,6 +223,9 @@ class ThreatLookup:
             elif res.status_code == 401: return {"status": "error", "msg": "Invalid URLScan Key"}
             else: return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
+
+    def query_cyscan(self, ioc):
+        return {"link": f"https://cyscan.io/search/{ioc}"}
 
 # --- Collectors ---
 class MitreCollector:
@@ -321,12 +305,15 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
+# --- AI Processors ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
-        genai.configure(api_key=key)
+        if key:
+            genai.configure(api_key=key)
+
     async def analyze_batch(self, items):
-        if not items: return []
+        if not items or not self.key: return []
         batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}" for i,item in enumerate(items)])
         prompt = f"""
         SOC Analysis.
@@ -343,6 +330,39 @@ class AIBatchProcessor:
                 return json.loads(res.text.replace('```json','').replace('```','').strip())
             except: continue
         return []
+
+    # This was missing in your previous code
+    async def analyze_single_ioc(self, ioc, data):
+        if not self.key: return "No API Key configured."
+        
+        # Prepare context data as string
+        context_str = json.dumps(data, indent=2, default=str)
+        
+        prompt = f"""
+        Act as a Level 3 SOC Analyst. 
+        I have investigated an Indicator of Compromise (IOC): {ioc}.
+        
+        Here is the collected intelligence data from various sources (VirusTotal, AbuseIPDB, ThreatFox, etc.):
+        {context_str}
+        
+        Please provide a concise but professional investigation report in Markdown format.
+        Include:
+        1. **Verdict**: (Malicious / Suspicious / Benign / Inconclusive) with a confidence score.
+        2. **Summary of Findings**: What makes this IOC good or bad based on the data provided?
+        3. **Key Evidence**: Bullet points of specific flags (e.g., high abuse score, specific malware tag).
+        4. **Recommended Action**: What should the SOC team do? (Block, Monitor, Ignore).
+        
+        Keep it operational and direct.
+        """
+        
+        for m in ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+            try:
+                model = genai.GenerativeModel(m)
+                res = await model.generate_content_async(prompt)
+                return res.text
+            except Exception as e:
+                continue
+        return "Error: Could not generate analysis. Please check API Key or Quota."
 
 def save_reports(raw, analyzed):
     try:
