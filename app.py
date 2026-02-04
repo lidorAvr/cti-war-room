@@ -29,6 +29,12 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.05);
     }
     
+    /* RTL Specific Style */
+    .rtl-content {
+        direction: rtl;
+        text-align: right;
+    }
+
     .card-title { font-weight: 700; font-size: 1.15rem; color: #111; margin-bottom: 8px; }
     .card-summary { color: #444; font-size: 0.95rem; margin-bottom: 10px; line-height: 1.5; }
     
@@ -39,7 +45,6 @@ st.markdown("""
     
     a { text-decoration: none; color: #2563eb; font-weight: bold; }
     
-    /* Better styling for filters */
     div[role="radiogroup"] { display: flex; gap: 8px; flex-wrap: wrap; }
     div[role="radiogroup"] label {
         background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 4px 12px; transition: all 0.2s; font-size: 0.9rem;
@@ -171,25 +176,26 @@ with tab_feed:
 
             sev_class = "tag-critical" if "Critical" in row['severity'] else ""
             
-            # CUSTOM TAG LOGIC FOR INCD
+            # CUSTOM LOGIC FOR INCD
             if row['source'] == "INCD":
                 source_display = "מערך הסייבר"
                 source_tag_class = "tag-incd"
+                rtl_class = "rtl-content" # Apply RTL only for INCD
             else:
                 source_display = row['source']
                 source_tag_class = "tag-time"
+                rtl_class = ""
             
             st.markdown(f"""
             <div class="report-card">
-                <div style="margin-bottom: 8px;">
-                    <span class="tag {source_tag_class}">{source_display}</span>
+                <div style="margin-bottom: 8px; direction: ltr;"> <span class="tag {source_tag_class}">{source_display}</span>
                     <span class="tag tag-time">{date_str}</span>
                     <span class="tag {sev_class}">{row['severity']}</span>
                     <span class="tag tag-time">{row['category']}</span>
                 </div>
-                <div class="card-title">{row['title']}</div>
-                <div class="card-summary">{row['summary']}</div>
-                <div style="font-size: 0.85rem;">
+                <div class="card-title {rtl_class}">{row['title']}</div>
+                <div class="card-summary {rtl_class}">{row['summary']}</div>
+                <div style="font-size: 0.85rem; margin-top: 10px; text-align: left; direction: ltr;">
                     <a href="{row['url']}" target="_blank">🔗 Read Full Report</a>
                 </div>
             </div>
