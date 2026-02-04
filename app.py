@@ -57,7 +57,6 @@ if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {}
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
 
 # --- SAFE SECRETS LOADING ---
-# This ensures variables exist even if secrets are missing in Streamlit Cloud
 GROQ_KEY = st.secrets.get("groq_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
@@ -84,7 +83,6 @@ with st.sidebar:
     st.header("⚙️ Controls")
     
     with st.expander("API Status", expanded=True):
-        # Using ConnectionManager from utils.py
         ok, msg = ConnectionManager.check_groq(GROQ_KEY)
         st.write(f"{'✅' if ok else '❌'} **Groq AI:** {msg}")
         st.write(f"{'✅' if VT_KEY else '⚠️'} **VirusTotal**")
