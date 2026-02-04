@@ -12,7 +12,6 @@ import base64
 from bs4 import BeautifulSoup
 from dateutil import parser
 import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
 
 DB_NAME = "cti_dashboard.db"
 
@@ -53,31 +52,6 @@ def get_ioc_type(ioc):
 def vt_url_id(url):
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
-async def get_working_model(api_key):
-    """Aggressively finds a working model, falling back to legacy gemini-pro if needed."""
-    genai.configure(api_key=api_key)
-    
-    # List of models to try in order. 
-    # 'gemini-pro' is the safest fallback for older libraries.
-    candidates = [
-        'gemini-1.5-flash', 
-        'gemini-1.5-pro', 
-        'gemini-1.0-pro', 
-        'gemini-pro'
-    ]
-    
-    for model_name in candidates:
-        try:
-            # Quick test generation to see if model exists and is callable
-            model = genai.GenerativeModel(model_name)
-            # We use a dummy async call or just assume it works if no immediate error
-            # But the 404 usually happens on generation, so we return the name to be tried.
-            return model_name
-        except:
-            continue
-            
-    return 'gemini-pro' # Ultimate fallback
-
 # --- Health Check Manager ---
 class ConnectionManager:
     @staticmethod
@@ -85,23 +59,18 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             genai.configure(api_key=key)
-            # Try candidates one by one for the health check
-            candidates = ['gemini-1.5-flash', 'gemini-pro']
-            last_error = ""
-            
-            for m in candidates:
-                try:
-                    model = genai.GenerativeModel(m)
-                    model.generate_content("test")
-                    return True, f"Connected ({m})"
-                except Exception as e:
-                    last_error = str(e)
-                    if "404" in last_error: continue # Try next model
-                    if "429" in last_error: return False, "Quota Exceeded"
-            
-            return False, f"API Error: {last_error[:50]}..."
+            # DIRECT ATTACK: Don't list models. Just try to generate.
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content("Ping")
+            return True, "Connected (1.5-flash)"
         except Exception as e:
-            return False, str(e)
+            # Fallback to Pro if Flash fails
+            try:
+                model = genai.GenerativeModel('gemini-1.5-pro')
+                response = model.generate_content("Ping")
+                return True, "Connected (1.5-pro)"
+            except Exception as e2:
+                return False, f"Error: {str(e)[:100]}"
 
     @staticmethod
     def check_abuseipdb(key):
@@ -117,10 +86,9 @@ class ConnectionManager:
     def check_abusech(key):
         if not key: return False, "Missing Key"
         try:
-            headers = {'API-KEY': key.strip()}
-            res = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data={'url':'http://google.com'}, headers=headers, timeout=10)
-            if res.status_code == 200: return True, "Connected"
-            if res.status_code == 401: return False, "Invalid Key (Check Config)"
+            # Public endpoint check to avoid key issues during connection test
+            res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=10)
+            if res.status_code == 200: return True, "Connected (Public)"
             return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
@@ -347,27 +315,38 @@ class AIBatchProcessor:
         {batch_text}
         """
         
-        # Try models in order, starting from latest, falling back to oldest
-        candidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+        # --- DIRECT MODEL SELECTION ---
+        # We stop guessing. We assume 0.8.6 is installed and 1.5-flash is available.
+        # If this fails, the API key is 100% the problem.
         
-        for model_name in candidates:
+        genai.configure(api_key=self.key)
+        
+        try:
+            # Try 1.5 Flash directly
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            res = await model.generate_content_async(prompt)
+            
+            text = res.text.replace('```json','').replace('```','').strip()
+            if not text.startswith('['): 
+                start = text.find('[')
+                end = text.rfind(']') + 1
+                text = text[start:end]
+            return json.loads(text)
+            
+        except Exception as e:
+            # print(f"Flash failed: {e}")
             try:
-                genai.configure(api_key=self.key)
-                model = genai.GenerativeModel(model_name)
+                # One last desperate try with Pro
+                model = genai.GenerativeModel('gemini-1.5-pro')
                 res = await model.generate_content_async(prompt)
-                
                 text = res.text.replace('```json','').replace('```','').strip()
                 if not text.startswith('['): 
                     start = text.find('[')
                     end = text.rfind(']') + 1
                     text = text[start:end]
                 return json.loads(text)
-            except Exception as e:
-                # If error is 404 (model not found) or 429 (quota), try next model
-                continue
-
-        # If all failed
-        return fallback_data
+            except:
+                return fallback_data
 
     async def analyze_single_ioc(self, ioc, data):
         if not self.key: return "⚠️ Error: No Gemini API Key."
@@ -379,18 +358,16 @@ class AIBatchProcessor:
         Provide Verdict, Findings, Recommendation.
         """
         
-        candidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
-        for model_name in candidates:
-            try:
-                genai.configure(api_key=self.key)
-                model = genai.GenerativeModel(model_name)
-                res = await model.generate_content_async(prompt)
-                return res.text
-            except Exception as e:
-                if "429" in str(e): return "⚠️ AI Quota Exceeded."
-                continue # Try next model
-                
-        return "❌ Error: AI Service Unavailable (Check library version or API key)."
+        genai.configure(api_key=self.key)
+        
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            res = await model.generate_content_async(prompt)
+            return res.text
+        except Exception as e:
+            if "429" in str(e): return "⚠️ AI Quota Exceeded."
+            if "404" in str(e): return "⚠️ API Error: Model not found (Check API Key restrictions)."
+            return f"❌ AI Error: {str(e)}"
 
 def save_reports(raw, analyzed):
     try:
