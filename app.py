@@ -30,7 +30,7 @@ st.markdown("""
         border-left: 6px solid #444;
         margin-bottom: 15px;
         box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        color: #1a1a1a; /* Darker text */
+        color: #1a1a1a;
     }
     
     /* Tags */
@@ -138,10 +138,9 @@ with tab_feed:
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
     conn.close()
 
-    # --- BUTTON FILTERS (RESTORED) ---
+    # --- BUTTON FILTERS ---
     c1, c2, c3, c4 = st.columns(4)
     
-    # Counts
     count_crit = len(df[df['severity'].str.contains('Critical', case=False)])
     count_il = len(df[df['category'].str.contains('Israel', case=False)])
     count_mal = len(df[df['category'].str.contains('Malware', case=False)])
@@ -151,7 +150,6 @@ with tab_feed:
     if c3.button(f"🦠 Malware ({count_mal})", use_container_width=True): st.session_state.filter_type = 'Malware'
     if c4.button("🌐 Show All", use_container_width=True): st.session_state.filter_type = 'All'
 
-    # Filter Logic
     view_df = df
     if st.session_state.filter_type == 'Critical': view_df = df[df['severity'].str.contains('Critical', case=False)]
     elif st.session_state.filter_type == 'Israel': view_df = df[df['category'].str.contains('Israel', case=False)]
@@ -161,7 +159,6 @@ with tab_feed:
         st.info(f"No reports found for filter: {st.session_state.filter_type}")
     else:
         for _, row in view_df.iterrows():
-            # Date Formatting
             try:
                 dt_obj = parser.parse(row['published_at'])
                 if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj)
@@ -169,7 +166,6 @@ with tab_feed:
                 display_date = dt_il.strftime("%d/%m %H:%M")
             except: display_date = row['published_at']
 
-            # Styles
             sev = row['severity']
             bord = "#cc0000" if "Critical" in sev else ("#ff8800" if "High" in sev else "#444")
             sev_cls = "tag-critical" if "Critical" in sev else ("tag-high" if "High" in sev else "tag-medium")
@@ -239,6 +235,7 @@ with tab_tools:
             if d.get('status') == 'found':
                 st.write(f"**Verdict:** {d.get('verdict', {}).get('overall')}")
                 if d.get('screenshot'): st.image(d['screenshot'])
+                if d.get('page'): st.write(f"**Page:** {d['page'].get('url')}")
             else: st.info("Not Found / No Key")
 
         with t3:
