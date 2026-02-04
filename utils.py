@@ -1,12 +1,11 @@
 import sqlite3
 import datetime
 import pandas as pd
-import re
-import pytz
 import requests
 import json
 import time
 import random
+import pytz
 from bs4 import BeautifulSoup
 from dateutil import parser
 
@@ -34,67 +33,61 @@ def init_db():
     conn.commit()
     conn.close()
 
-# --- AI WRAPPER (DYNAMIC MODEL DISCOVERY) ---
+# --- AI HANDLER (SMART MODEL DISCOVERY) ---
 class AIHandler:
     def __init__(self, api_key):
         self.api_key = api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
-        self.working_model = None
 
-    def _discover_model(self):
-        """Asks Google which models are available for this Key to avoid 404"""
-        if self.working_model: return self.working_model
-        
+    def _get_working_model(self):
+        """Asks Google which models are enabled for this key"""
+        if not self.api_key: return None
         try:
             url = f"{self.base_url}/models?key={self.api_key}"
-            resp = requests.get(url, timeout=10)
+            resp = requests.get(url, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
-                # Prefer Flash, but take whatever works
-                for m in data.get('models', []):
-                    if 'generateContent' in m.get('supportedGenerationMethods', []):
-                        # print(f"DEBUG: Found model {m['name']}")
-                        self.working_model = m['name'].replace('models/', '')
-                        if 'flash' in self.working_model: break # Stop if we found flash
-                return self.working_model
+                # Prefer Flash > Pro > Default
+                models = [m['name'] for m in data.get('models', []) if 'generateContent' in m['supportedGenerationMethods']]
+                for m in models:
+                    if 'flash' in m: return m.replace('models/', '')
+                return models[0].replace('models/', '') if models else "gemini-1.5-flash"
         except: pass
         return "gemini-1.5-flash" # Fallback
 
     def _query(self, prompt):
         if not self.api_key: return "Error: Missing Key"
         
-        model = self._discover_model()
-        url = f"{self.base_url}/models/{model}:generateContent?key={self.api_key}"
+        model_name = self._get_working_model()
+        url = f"{self.base_url}/models/{model_name}:generateContent?key={self.api_key}"
         headers = {'Content-Type': 'application/json'}
         payload = {"contents": [{"parts": [{"text": prompt}]}]}
         
-        for i in range(3): # Retry logic
+        for i in range(2): # Retry logic
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=40)
-                if response.status_code == 200:
-                    return response.json()['candidates'][0]['content']['parts'][0]['text']
-                elif response.status_code == 429:
-                    time.sleep(2) # Wait for rate limit
+                res = requests.post(url, json=payload, headers=headers, timeout=25)
+                if res.status_code == 200:
+                    return res.json()['candidates'][0]['content']['parts'][0]['text']
+                elif res.status_code == 429: # Rate limit
+                    time.sleep(2)
                     continue
                 else:
-                    return f"AI Error {response.status_code}: {response.text}"
+                    return f"Google Error ({res.status_code}): {res.text}"
             except Exception as e:
                 return f"Conn Error: {str(e)}"
-        return "AI Busy"
+        return "AI Service Busy"
 
     def analyze_batch(self, items):
         if not items: return []
-        # Analyze in batches of 15 to save requests
-        batch = items[:15]
+        batch = items[:12] # Limit batch size
         text_data = "\n".join([f"ID:{i} | Title: {x['title']}" for i,x in enumerate(batch)])
         
         prompt = f"""
         Act as a SOC Analyst.
         Rules:
-        1. Categories: Israel Focus, Malware, Vulnerability, General.
-        2. Severity: Critical, High, Medium, Low.
-        3. 'Israel'/'Iran'/'Hamas' in title -> 'Israel Focus'.
-        4. 'CISA'/'CVE' -> 'Critical'.
+        1. 'Israel'/'Iran'/'Hamas' -> Category 'Israel Focus'.
+        2. 'CISA'/'CVE' -> Severity 'Critical'.
+        3. Marketing -> Severity 'Low'.
         
         Input:
         {text_data}
@@ -109,16 +102,18 @@ class AIHandler:
             clean = res.replace('```json','').replace('```','').strip()
             return json.loads(clean)
         except:
-            return [{"id": i, "category": "General", "severity": "Medium", "summary": "Pending Analysis"} for i in range(len(batch))]
+            return [{"id": i, "category": "General", "severity": "Medium", "summary": "Pending"} for i in range(len(batch))]
 
     def generate_hunting(self, actor):
         prompt = f"""
-        Create hunting queries for Threat Actor: {actor['name']} ({actor['tools']}).
+        Detection Engineering Task: Create hunting queries for '{actor['name']}'.
+        Tools: {actor['tools']}
+        
         Output Markdown:
-        1. **Google Chronicle (YARA-L)**
+        1. **Google SecOps (YARA-L)**
         2. **Cortex XDR (XQL)**
         3. **Splunk (SPL)**
-        4. **Analyst Note (Tier 1)**
+        4. **Analyst Explanation**
         """
         return self._query(prompt)
 
@@ -130,8 +125,7 @@ class CTICollector:
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
-        {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
-        {"name": "CheckPoint", "url": "https://research.checkpoint.com/feed/", "type": "rss"}
+        {"name": "CheckPoint Research", "url": "https://research.checkpoint.com/feed/", "type": "rss"}
     ]
 
     def fetch_all(self):
@@ -147,21 +141,11 @@ class CTICollector:
                 if source['type'] == 'rss':
                     soup = BeautifulSoup(r.text, 'xml')
                     for item in soup.find_all('item')[:4]:
-                        results.append({
-                            "title": item.title.text,
-                            "url": item.link.text,
-                            "date": now,
-                            "source": source['name']
-                        })
+                        results.append({"title": item.title.text, "url": item.link.text, "date": now, "source": source['name']})
                 elif source['type'] == 'json':
                     data = r.json()
                     for v in data.get('vulnerabilities', [])[:4]:
-                        results.append({
-                            "title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}",
-                            "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog",
-                            "date": now,
-                            "source": "CISA"
-                        })
+                        results.append({"title": f"KEV: {v['cveID']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": now, "source": "CISA"})
                 elif source['type'] == 'html_gov':
                     soup = BeautifulSoup(r.text, 'html.parser')
                     for div in soup.find_all('div', class_='row item')[:4]:
@@ -176,26 +160,23 @@ class CTICollector:
             except: continue
         return results
 
-# --- SAVE ---
+# --- SAVE & TOOLS ---
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
     cnt = 0
     amap = {x['id']:x for x in analyzed if isinstance(x, dict) and 'id' in x}
-    
     for i, item in enumerate(raw):
         a = amap.get(i, {})
         try:
             c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
-                (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], item['title'], 
-                 a.get('category','General'), a.get('severity','Medium'), 'Info', a.get('summary', item['title'])))
+                (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], item['title'], a.get('category','General'), a.get('severity','Medium'), 'Info', a.get('summary', item['title'])))
             if c.rowcount > 0: cnt += 1
         except: pass
     conn.commit()
     conn.close()
     return cnt
 
-# --- LOOKUP TOOLS ---
 class ThreatLookup:
     def __init__(self, vt, us, ab):
         self.vt = vt
@@ -207,27 +188,29 @@ class ThreatLookup:
         try:
             u = f"https://www.virustotal.com/api/v3/search?query={ioc}"
             r = requests.get(u, headers={'x-apikey': self.vt})
-            if r.status_code == 200 and r.json().get('data'):
-                return {"status": "found", "data": "Found in VT Database"}
+            if r.status_code == 200 and r.json().get('data'): return {"status": "found", "data": "Found in VT"}
             return {"status": "not_found"}
-        except: return {"error"}
+        except: return {"status": "error"}
 
     def check_urlscan(self, ioc):
         if not self.us: return {"status": "skipped"}
         try:
             r = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={'API-Key': self.us})
-            if r.status_code == 200 and r.json().get('results'):
-                return {"status": "found", "data": r.json()['results'][0]}
+            if r.status_code == 200:
+                d = r.json()
+                if d.get('results'):
+                    res = d['results'][0]
+                    return {"status": "found", "verdict": res.get('verdict', {}).get('overall', 'N/A'), "screenshot": res.get('screenshot')}
             return {"status": "not_found"}
-        except: return {"error"}
+        except: return {"status": "error"}
 
 class APTData:
     @staticmethod
     def get_actors():
         return [
-            {"name": "MuddyWater", "origin": "🇮🇷 Iran", "target": "Israel", "tools": "PowerShell, ScreenConnect"},
-            {"name": "OilRig (APT34)", "origin": "🇮🇷 Iran", "target": "Finance", "tools": "DNS Tunneling"},
+            {"name": "MuddyWater", "origin": "🇮🇷 Iran", "target": "Israel", "tools": "PowerShell, Ligolo"},
+            {"name": "OilRig", "origin": "🇮🇷 Iran", "target": "Finance", "tools": "DNS Tunneling"},
             {"name": "Agonizing Serpens", "origin": "🇮🇷 Iran", "target": "Education", "tools": "Wipers"},
             {"name": "Lazarus", "origin": "🇰🇵 NK", "target": "Crypto", "tools": "Manuscrypt"},
-            {"name": "APT28", "origin": "🇷🇺 Russia", "target": "Ukraine", "tools": "Mimikatz"}
+            {"name": "APT28", "origin": "🇷🇺 Russia", "target": "NATO", "tools": "Mimikatz"}
         ]
