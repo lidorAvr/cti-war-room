@@ -28,32 +28,22 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    # שמירה של 72 שעות אחרונות
-    limit = (datetime.datetime.now() - datetime.timedelta(hours=72)).isoformat()
+    # מחיקת ידיעות ישנות מ-48 שעות
+    limit = (datetime.datetime.now() - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
     conn.close()
 
 # --- HELPERS ---
-def sanitize_ioc(ioc):
-    ioc = ioc.strip()
-    match = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$', ioc)
-    if match: return match.group(1), match.group(2)
-    return ioc, None
-
 def get_ioc_type(ioc):
     ioc = ioc.strip()
     if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', ioc): return "ip"
-    if re.match(r'^[a-fA-F0-9]{32}$', ioc) or re.match(r'^[a-fA-F0-9]{64}$', ioc): return "hash"
-    if "http" in ioc or "/" in ioc: return "url"
+    if "http" in ioc: return "url"
+    if len(ioc) in [32, 40, 64]: return "hash"
     return "domain"
 
-def vt_url_id(url):
-    return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
-
-# --- AI LOGIC (THE WORKING FIX) ---
+# --- AI LOGIC (Direct HTTP) ---
 async def get_valid_model_name(api_key, session):
-    """מגלה אוטומטית איזה מודל פתוח למפתח הזה"""
     list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
     try:
         async with session.get(list_url) as resp:
@@ -63,15 +53,13 @@ async def get_valid_model_name(api_key, session):
                 if 'generateContent' in model.get('supportedGenerationMethods', []):
                     return model['name']
     except: return None
-    return "models/gemini-1.5-flash" # Fallback
+    return "models/gemini-1.5-flash"
 
 async def query_gemini_auto(api_key, prompt):
     if not api_key: return None
-    
     async with aiohttp.ClientSession() as session:
         model_name = await get_valid_model_name(api_key, session)
-        if not model_name: return None
-        
+        if not model_name: return "Error: Check API Key scope."
         if not model_name.startswith("models/"): model_name = f"models/{model_name}"
             
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={api_key}"
@@ -84,57 +72,33 @@ async def query_gemini_auto(api_key, prompt):
                     data = await resp.json()
                     return data['candidates'][0]['content']['parts'][0]['text']
                 else:
-                    print(f"AI Error: {await resp.text()}")
-                    return None
+                    return f"AI Error {resp.status}: {await resp.text()}"
         except Exception as e:
-            print(f"AI Exception: {e}")
-            return None
+            return f"Connection Error: {e}"
 
 # --- HEALTH CHECK ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
         if not key: return False, "Missing Key"
-        # בדיקה מהירה
         try:
             res = requests.post(f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}", 
                               json={"contents":[{"parts":[{"text":"Ping"}]}]}, timeout=5)
             if res.status_code == 200: return True, "✅ Connected!"
             return False, f"❌ Error {res.status_code}"
         except: return False, "❌ Connection Failed"
-
+    
     @staticmethod
     def check_abuseipdb(key):
-        if not key: return False, "Missing Key"
-        try:
-            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': key}, params={'ipAddress': '8.8.8.8'}, timeout=5)
-            return (True, "Connected") if res.status_code == 200 else (False, f"HTTP {res.status_code}")
+        try: return (True, "Connected") if requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': key}, params={'ipAddress':'8.8.8.8'}, timeout=5).status_code == 200 else (False, "Error")
         except: return False, "Error"
-
-    @staticmethod
-    def check_abusech(key):
-        try:
-            res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=5)
-            return (True, "Connected") if res.status_code == 200 else (False, "Error")
-        except: return False, "Error"
-
+    
     @staticmethod
     def check_virustotal(key):
-        if not key: return False, "Missing Key"
-        try:
-            res = requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers={"x-apikey": key}, timeout=5)
-            return (True, "Connected") if res.status_code == 200 else (False, f"HTTP {res.status_code}")
+        try: return (True, "Connected") if requests.get("https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8", headers={"x-apikey": key}, timeout=5).status_code == 200 else (False, "Error")
         except: return False, "Error"
 
-    @staticmethod
-    def check_urlscan(key):
-        if not key: return False, "Missing Key"
-        try:
-            res = requests.get("https://urlscan.io/api/v1/search/?q=domain:google.com", headers={"API-Key": key}, timeout=5)
-            return (True, "Connected") if res.status_code == 200 else (False, f"HTTP {res.status_code}")
-        except: return False, "Error"
-
-# --- COLLECTORS (Real Data Fetching) ---
+# --- COLLECTORS ---
 class CTICollector:
     SOURCES = [
         {"name": "CheckPoint", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
@@ -152,22 +116,26 @@ class CTICollector:
                     text = await resp.text()
                     soup = BeautifulSoup(text, 'xml')
                     items = []
-                    for i in soup.find_all('item')[:7]: # 7 items per source
-                        d = i.pubDate.text if i.pubDate else str(datetime.datetime.now())
-                        try: dt = parser.parse(d).isoformat()
-                        except: dt = str(datetime.datetime.now())
+                    for i in soup.find_all('item')[:7]:
+                        # טיפול חכם בתאריכים
+                        pub_date = i.pubDate.text if i.pubDate else str(datetime.datetime.now())
+                        try:
+                            # המרה לפורמט אחיד לשמירה במסד נתונים
+                            dt_obj = parser.parse(pub_date)
+                            dt_iso = dt_obj.isoformat()
+                        except:
+                            dt_iso = datetime.datetime.now().isoformat()
                         
                         desc = i.description.text if i.description else ""
                         soup_desc = BeautifulSoup(desc, "html.parser")
-                        clean_desc = soup_desc.get_text()[:600]
-                        
-                        items.append({"title": i.title.text, "url": i.link.text, "date": dt, "source": source['name'], "summary": clean_desc})
+                        items.append({"title": i.title.text, "url": i.link.text, "date": dt_iso, "source": source['name'], "summary": soup_desc.get_text()[:600]})
                     return items
                 elif source['type'] == 'json':
                     data = await resp.json()
-                    return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": str(datetime.datetime.now()), "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
+                    # ב-KEV התאריך הוא dateAdded
+                    return [{"title": f"KEV: {v['cveID']} - {v['vulnerabilityName']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", 
+                             "date": f"{v.get('dateAdded')}T00:00:00", "source": "CISA", "summary": v['shortDescription']} for v in data.get('vulnerabilities', [])[:5]]
         except Exception as e: 
-            print(f"Error fetching {source['name']}: {e}")
             return []
 
     async def get_all_data(self):
@@ -183,29 +151,22 @@ class AIBatchProcessor:
         
     async def analyze_batch(self, items):
         if not items: return []
-        
-        # Fallback if no key
         if not self.key: 
             return [{"id": i, "category": "General", "severity": "Medium", "impact": "Info", "summary": x['summary'][:200]} for i,x in enumerate(items)]
             
         batch_text = "\n".join([f"ID:{i}|Src:{x['source']}|Title:{x['title']}|Desc:{x['summary'][:150]}" for i,x in enumerate(items)])
         prompt = f"""
-        You are a SOC Analyst. Analyze these threat intel items.
+        Act as a Cyber Intelligence Analyst. Analyze these items.
         Input Format: ID:0|Src:Source|Title:Title|Desc:Description
         
-        Tasks:
-        1. Categorize: [Phishing, Vulnerability, Research, Israel Focus, Malware, DDoS, General].
-        2. Assign Severity: [Critical, High, Medium, Low].
-        3. Summarize Impact: 5 words max.
-        4. Summary: One sentence.
-
         Rules:
-        - If 'Israel' or 'Iran' is mentioned -> 'Israel Focus'.
-        - If 'CISA KEV' -> Severity 'Critical'.
+        1. 'Israel'/'Iran'/'Hamas' in text -> Category 'Israel Focus'.
+        2. 'CISA' or 'CVE' -> Severity 'Critical'.
+        3. Marketing/Sales -> Category 'General', Severity 'Low'.
         
         Output JSON Array ONLY:
         [
-          {{"id": 0, "category": "Malware", "severity": "High", "impact": "Data theft", "summary": "Short summary."}}
+          {{"id": 0, "category": "Malware/Phishing/Vulnerability/Israel Focus", "severity": "Critical/High/Medium/Low", "impact": "Short impact desc", "summary": "One sentence summary."}}
         ]
         
         Items:
@@ -223,7 +184,20 @@ class AIBatchProcessor:
         return [{"id": i, "category": "General", "severity": "Medium", "impact": "AI Error", "summary": x['summary'][:200]} for i,x in enumerate(items)]
 
     async def analyze_single_ioc(self, ioc, data):
-        prompt = f"Analyze IOC: {ioc}. Data: {json.dumps(data, default=str)}. Return Markdown with Verdict, Findings, Recommendations."
+        prompt = f"""
+        **SOC Analyst Request:**
+        Investigate this IOC: {ioc}
+        
+        **Collected Intelligence Data:**
+        {json.dumps(data, indent=2, default=str)}
+        
+        **Task:**
+        Provide a professional markdown report.
+        1. **Verdict:** (Malicious / Suspicious / Benign) with Confidence Level.
+        2. **Summary:** Why is this good/bad?
+        3. **Key Evidence:** Bullet points from the data (e.g. VirusTotal score, ISP, Country).
+        4. **Recommended Action:** (Block, Monitor, Ignore).
+        """
         return await query_gemini_auto(self.key, prompt)
 
 def save_reports(raw, analyzed):
@@ -245,13 +219,13 @@ def save_reports(raw, analyzed):
         return cnt
     except: return 0
 
-# --- TOOLS (Restored) ---
+# --- TOOLS ---
 class ThreatLookup:
     def __init__(self, abuse_ch_key=None, vt_key=None, urlscan_key=None, cyscan_key=None):
         self.keys = {'vt': vt_key, 'urlscan': urlscan_key, 'abuse_ch': abuse_ch_key}
 
     def query_virustotal(self, ioc):
-        if not self.keys['vt']: return {"status": "skipped"}
+        if not self.keys['vt']: return {"status": "skipped", "msg": "No API Key"}
         try:
             url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
             ep = f"https://www.virustotal.com/api/v3/urls/{url_id}" if "http" in ioc else f"https://www.virustotal.com/api/v3/ip_addresses/{ioc}"
@@ -293,8 +267,6 @@ class ThreatLookup:
             return {"status": "not_found"}
         except: return {"status": "error"}
 
-    def query_cyscan(self, ioc): return {"link": f"https://cyscan.io/search/{ioc}"}
-
 class AbuseIPDBChecker:
     def __init__(self, key): self.key = key
     def check_ip(self, ip): 
@@ -310,17 +282,6 @@ class IOCExtractor:
         }
 
 class MitreCollector:
-    def get_latest_updates(self):
-        try:
-            res = requests.get("https://attack.mitre.org/resources/updates/", timeout=5)
-            soup = BeautifulSoup(res.text, 'html.parser')
-            h2 = soup.find('h2')
-            if h2: return {"title": h2.text.strip(), "url": "https://attack.mitre.org"}
-        except: return None
-
+    def get_latest_updates(self): return None
 class APTSheetCollector:
-    def fetch_threats(self, region):
-        try:
-            url = "https://docs.google.com/spreadsheets/d/1H9_xaxQHpWaa4O_Son4Gx0YOIzlcBWMsdvePFX68EKU/export?format=csv&gid=1864660085"
-            return pd.read_csv(url).head(30)
-        except: return pd.DataFrame()
+    def fetch_threats(self, region): return pd.DataFrame()
