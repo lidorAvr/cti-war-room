@@ -7,6 +7,7 @@ import datetime
 import pytz
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
+# FIXED IMPORT LINE:
 from utils import * from dateutil import parser
 
 # --- CONFIGURATION ---
@@ -57,6 +58,7 @@ if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {}
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
 
 # --- SAFE SECRETS LOADING ---
+# Uses .get() so it won't crash if secrets are missing
 GROQ_KEY = st.secrets.get("groq_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
@@ -83,6 +85,7 @@ with st.sidebar:
     st.header("⚙️ Controls")
     
     with st.expander("API Status", expanded=True):
+        # Using ConnectionManager from utils.py
         ok, msg = ConnectionManager.check_groq(GROQ_KEY)
         st.write(f"{'✅' if ok else '❌'} **Groq AI:** {msg}")
         st.write(f"{'✅' if VT_KEY else '⚠️'} **VirusTotal**")
@@ -215,46 +218,4 @@ with tab_tools:
 
         with t3: st.json(st.session_state.ioc_data)
 
-        with t4:
-            if st.button("🤖 Ask Groq AI"):
-                with st.spinner("Analyzing..."):
-                    proc = AIBatchProcessor(GROQ_KEY)
-                    res = asyncio.run(proc.analyze_single_ioc(st.session_state.current_ioc, st.session_state.ioc_data))
-                    st.markdown(res)
-
-# ---------------- TAB 3: STRATEGIC ----------------
-with tab_strat:
-    st.subheader("🧠 APT Tracker")
-    col = APTSheetCollector()
-    threats = col.fetch_threats()
-    
-    cols = st.columns(3)
-    for i, actor in enumerate(threats):
-        with cols[i % 3]:
-            with st.container(border=True):
-                st.markdown(f"#### {actor['origin']} {actor['name']}")
-                st.caption(actor['type'])
-                st.write(actor['desc'])
-                st.markdown(f"**Target:** {actor['target']}")
-                
-                if st.button(f"🏹 Hunt {actor['name']}", key=f"h_{i}"):
-                    with st.spinner("Generating Queries..."):
-                        proc = AIBatchProcessor(GROQ_KEY)
-                        q = asyncio.run(proc.generate_hunting_queries(actor))
-                        st.markdown(q)
-
-# ---------------- TAB 4: MAP ----------------
-with tab_map:
-    st.subheader("🌍 Global Threat Map")
-    components.iframe("https://threatmap.checkpoint.com/", height=600, scrolling=False)
-    
-    if st.button("🤖 Analyze Global Trends"):
-        with st.spinner("AI Thinking..."):
-            conn = sqlite3.connect(DB_NAME)
-            df_map = pd.read_sql_query("SELECT title FROM intel_reports LIMIT 30", conn)
-            conn.close()
-            
-            proc = AIBatchProcessor(GROQ_KEY)
-            prompt = f"Summarize top 3 global cyber trends based on: {df_map.to_string()}"
-            res = asyncio.run(query_groq_api(GROQ_KEY, prompt))
-            st.markdown(res)
+        with t4
