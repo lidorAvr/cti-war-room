@@ -3,6 +3,7 @@ import asyncio
 import pandas as pd
 import sqlite3
 import base64
+import streamlit.components.v1 as components  # <--- הוספנו את זה בשביל המפה
 from streamlit_autorefresh import st_autorefresh
 from utils import (init_db, CTICollector, AIBatchProcessor, save_reports, 
                    AbuseIPDBChecker, APTSheetCollector, MitreCollector, 
@@ -21,6 +22,9 @@ st.markdown("""
     .tag-israel { background-color: #004085; color: #cce5ff; border: 1px solid #b8daff; }
     .tag-medium { background-color: #0c5460; color: #d1ecf1; }
     .tool-box { background-color: #252526; padding: 20px; border-radius: 10px; border-left: 5px solid #007acc; }
+    
+    /* התאמה למפה כדי שתראה טוב */
+    iframe { border-radius: 10px; border: 1px solid #333; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -52,7 +56,8 @@ with st.sidebar:
             st.rerun()
 
 # --- MAIN TABS ---
-tab_feed, tab_tools, tab_landscape = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape"])
+# הוספנו כאן את הטאב הרביעי למפה
+tab_feed, tab_tools, tab_landscape, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape", "🗺️ Live Attack Map"])
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
@@ -116,7 +121,7 @@ with tab_tools:
                         st.success(f"✅ AbuseIPDB: {d['abuseConfidenceScore']}% Malicious | ISP: {d['isp']} | {d['countryCode']}")
                     else: st.warning("AbuseIPDB: Not an IP or Key missing")
                 
-                # 2. ThreatFox & URLhaus (Abuse.ch)
+                # 2. ThreatFox & URLhaus
                 tl = ThreatLookup()
                 tf_res = tl.query_threatfox(ioc_input)
                 if tf_res:
@@ -149,7 +154,6 @@ with tab_tools:
 
 # --- TAB 3: THREAT LANDSCAPE ---
 with tab_landscape:
-    # MITRE Update
     mitre = MitreCollector().get_latest_updates()
     if mitre:
         st.info(f"📢 **MITRE ATT&CK Update:** [{mitre['title']}]({mitre['url']})")
@@ -166,3 +170,12 @@ with tab_landscape:
                 st.dataframe(df_apt, use_container_width=True)
             else:
                 st.warning("No data found.")
+
+# --- TAB 4: LIVE MAP (החלק החדש) ---
+with tab_map:
+    st.subheader("🌐 Check Point ThreatCloud Map")
+    st.caption("Real-time visualization of global cyber attacks")
+    
+    # שימוש ברכיב iframe להטמעת המפה החיה
+    # הגדרנו גובה 800px כדי שיראה מרשים
+    components.iframe("https://threatmap.checkpoint.com/", height=800, scrolling=False)
