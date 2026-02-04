@@ -3,7 +3,7 @@ import asyncio
 import pandas as pd
 import sqlite3
 import base64
-import streamlit.components.v1 as components  # <--- הוספנו את זה בשביל המפה
+import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
 from utils import (init_db, CTICollector, AIBatchProcessor, save_reports, 
                    AbuseIPDBChecker, APTSheetCollector, MitreCollector, 
@@ -22,8 +22,6 @@ st.markdown("""
     .tag-israel { background-color: #004085; color: #cce5ff; border: 1px solid #b8daff; }
     .tag-medium { background-color: #0c5460; color: #d1ecf1; }
     .tool-box { background-color: #252526; padding: 20px; border-radius: 10px; border-left: 5px solid #007acc; }
-    
-    /* התאמה למפה כדי שתראה טוב */
     iframe { border-radius: 10px; border: 1px solid #333; }
 </style>
 """, unsafe_allow_html=True)
@@ -42,6 +40,8 @@ with st.sidebar:
     st.header("⚙️ Config")
     gemini_key = st.text_input("Gemini API Key", type="password").strip() or None
     abuse_key = st.text_input("AbuseIPDB Key", type="password").strip() or None
+    # שדה חדש למפתח Abuse.ch
+    abuse_ch_key = st.text_input("Abuse.ch API Key (ThreatFox/URLhaus)", type="password", help="Free key from abuse.ch user settings").strip() or None
     
     st.divider()
     if st.button("🚀 Force Global Scan", disabled=not gemini_key):
@@ -56,7 +56,6 @@ with st.sidebar:
             st.rerun()
 
 # --- MAIN TABS ---
-# הוספנו כאן את הטאב הרביעי למפה
 tab_feed, tab_tools, tab_landscape, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🌍 Threat Landscape", "🗺️ Live Attack Map"])
 
 # --- TAB 1: LIVE FEED ---
@@ -65,14 +64,12 @@ with tab_feed:
     df = pd.read_sql_query("SELECT * FROM intel_reports ORDER BY published_at DESC", conn)
     conn.close()
     
-    # Filter Bar
     c1, c2, c3, c4 = st.columns(4)
     if c1.button(f"🚨 Critical ({len(df[df['severity']=='Critical'])})", use_container_width=True): st.session_state.filter_type = 'Critical'
     if c2.button(f"🇮🇱 Israel ({len(df[df['category']=='Israel Focus'])})", use_container_width=True): st.session_state.filter_type = 'Israel'
     if c3.button(f"🦠 Malware", use_container_width=True): st.session_state.filter_type = 'Malware'
     if c4.button("🌐 All Reports", use_container_width=True): st.session_state.filter_type = 'All'
 
-    # Filter Logic
     view_df = df
     if st.session_state.filter_type == 'Critical': view_df = df[df['severity'] == 'Critical']
     elif st.session_state.filter_type == 'Israel': view_df = df[df['category'] == 'Israel Focus']
@@ -106,6 +103,7 @@ with tab_tools:
     
     with t1:
         st.subheader("Check IP / Hash / URL")
+        st.caption("Supports AbuseIPDB, ThreatFox, and URLhaus. Please provide API Keys in sidebar for best results.")
         col1, col2 = st.columns([3, 1])
         ioc_input = col1.text_input("Enter Indicator (IP, Domain, MD5, SHA256)")
         
@@ -119,20 +117,28 @@ with tab_tools:
                     if "success" in res:
                         d = res['data']
                         st.success(f"✅ AbuseIPDB: {d['abuseConfidenceScore']}% Malicious | ISP: {d['isp']} | {d['countryCode']}")
-                    else: st.warning("AbuseIPDB: Not an IP or Key missing")
+                    else: st.warning(f"AbuseIPDB Error: {res.get('error')}")
+                else: st.info("AbuseIPDB: Key Missing")
                 
                 # 2. ThreatFox & URLhaus
-                tl = ThreatLookup()
+                # העברת המפתח למחלקה
+                tl = ThreatLookup(abuse_ch_key)
+                
                 tf_res = tl.query_threatfox(ioc_input)
-                if tf_res:
-                    st.error(f"🚨 ThreatFox Found: {len(tf_res)} records!")
-                    st.json(tf_res[0])
+                if tf_res['status'] == 'found':
+                    st.error(f"🚨 ThreatFox Found: {len(tf_res['data'])} records!")
+                    st.json(tf_res['data'][0]) # מציג את הרשומה הראשונה והכי רלוונטית
+                elif tf_res['status'] == 'error':
+                    st.warning(f"ThreatFox Error: {tf_res['msg']}")
                 else: st.info("ThreatFox: No Match")
                 
                 uh_res = tl.query_urlhaus(ioc_input)
-                if uh_res and uh_res['query_status'] == 'ok':
-                    st.error(f"🚨 URLhaus Found: {uh_res['url_status']}")
-                    st.write(f"Tags: {uh_res['tags']}")
+                if uh_res['status'] == 'found':
+                    data = uh_res['data']
+                    st.error(f"🚨 URLhaus Found: {data.get('url_status', 'Unknown')}")
+                    st.write(f"Tags: {data.get('tags')}")
+                elif uh_res['status'] == 'error':
+                    st.warning(f"URLhaus Error: {uh_res['msg']}")
                 else: st.info("URLhaus: No Match")
 
     with t2:
@@ -171,11 +177,7 @@ with tab_landscape:
             else:
                 st.warning("No data found.")
 
-# --- TAB 4: LIVE MAP (החלק החדש) ---
+# --- TAB 4: LIVE MAP ---
 with tab_map:
     st.subheader("🌐 Check Point ThreatCloud Map")
-    st.caption("Real-time visualization of global cyber attacks")
-    
-    # שימוש ברכיב iframe להטמעת המפה החיה
-    # הגדרנו גובה 800px כדי שיראה מרשים
     components.iframe("https://threatmap.checkpoint.com/", height=800, scrolling=False)
