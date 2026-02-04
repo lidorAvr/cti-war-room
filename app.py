@@ -6,7 +6,6 @@ from streamlit_autorefresh import st_autorefresh
 import sqlite3
 
 st.set_page_config(page_title="SOC War Room", layout="wide")
-# Auto-refresh every 15 minutes
 st_autorefresh(interval=15 * 60 * 1000, key="auto_refresh")
 
 init_db()
@@ -19,18 +18,33 @@ async def sync_data():
     if not api_key:
         st.error("Please enter a Gemini API Key in the sidebar.")
         return
+    
+    # אזור להצגת לוגים בזמן אמת
+    log_container = st.empty()
+    
     with st.spinner("Executing Global Scan (< 60s target)..."):
         collector = CTICollector()
         processor = AIBatchProcessor(api_key)
         
-        # 1. Concurrent Fetch
+        # 1. Fetch
+        log_container.info("Fetching data from 7 sources...")
         raw_data = await collector.get_all_data()
-        # 2. Batch AI Analysis
+        log_container.success(f"Fetched {len(raw_data)} items.")
+        
+        # 2. Analyze
+        log_container.info("Sending to Gemini AI...")
         analysis = await processor.analyze_batch(raw_data)
-        # 3. Save to Database
-        save_reports(raw_data, analysis)
-        st.success("Analysis Complete")
-        st.rerun()
+        
+        if not analysis:
+            st.error("AI Analysis returned empty results. Check the warnings above.")
+            return # עוצר כאן כדי לא למחוק את המסך
+
+        # 3. Save
+        count = save_reports(raw_data, analysis)
+        st.success(f"Analysis Complete! Saved {count} new reports.")
+        
+        # הערה: ביטלתי את st.rerun() כדי שתוכל לראות את השגיאות
+        st.info("Please refresh the page manually to see new data in the table below.")
 
 if st.sidebar.button("Run Global Scan"):
     asyncio.run(sync_data())
