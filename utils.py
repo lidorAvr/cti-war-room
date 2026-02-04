@@ -19,7 +19,6 @@ IL_TZ = pytz.timezone('Asia/Jerusalem')
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
-    # Create main report table
     c.execute('''CREATE TABLE IF NOT EXISTS intel_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
@@ -34,14 +33,13 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Auto-cleanup: Keep only last 48 hours of data
+    # Auto-cleanup: Keep only last 48 hours
     limit = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
     conn.close()
 
 def _is_url_processed(url):
-    """Check if URL exists in DB to prevent re-processing"""
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
@@ -53,9 +51,6 @@ def _is_url_processed(url):
 
 # --- CONNECTION MANAGER ---
 class ConnectionManager:
-    """
-    Helper class to test API connections.
-    """
     @staticmethod
     def check_groq(key):
         if not key: return False, "Missing Key"
@@ -76,7 +71,7 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant"):
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.1,
-        "response_format": {"type": "json_object"} # Force JSON structure
+        "response_format": {"type": "json_object"}
     }
     
     async with aiohttp.ClientSession() as session:
@@ -100,40 +95,35 @@ class AIBatchProcessor:
     async def analyze_batch(self, items):
         if not items: return []
         if not self.key: 
-            # Fallback if no key: just return items as is
             return [{"category": "General", "severity": "Low", "summary": x['summary']} for x in items]
 
-        # Process in chunks of 10 to utilize Groq speed
         chunk_size = 10
         analyzed_results = []
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
             
-            # Create a compressed prompt
             batch_text = "\n".join([f"ID:{idx}|Title:{x['title']}|Src:{x['source']}|Txt:{x['summary'][:300]}" for idx, x in enumerate(chunk)])
             
             prompt = f"""
-            You are a Cyber Threat Intelligence (CTI) Analyst. Analyze these {len(chunk)} articles.
+            You are a CTI Analyst. Analyze these {len(chunk)} articles.
             
-            INPUT DATA:
+            INPUT:
             {batch_text}
             
             INSTRUCTIONS:
-            1. Return a JSON Object with a key "items" containing a list.
-            2. Each item must have: "id" (int), "category", "severity", "summary" (concise).
-            3. Logic:
-               - "Israel Focus": Mention of Israel, Iran, Hamas, Hezbollah, Gov.il, Check Point, Wiz.
-               - "Critical": CVE, Active Exploitation, Zero-Day, Ransomware.
-               - "Malware": Trojan, Backdoor, Loader, Stealer.
+            Return a JSON Object with a key "items".
+            Each item: "id" (int), "category", "severity", "summary".
+            Logic:
+            - Israel Focus: Israel, Iran, Hamas, Hezbollah, Gov.il.
+            - Critical: CVE, Exploit, Ransomware.
             
             JSON OUTPUT EXAMPLE:
-            {{ "items": [ {{ "id": 0, "category": "Israel Focus", "severity": "High", "summary": "Short summary here." }} ] }}
+            {{ "items": [ {{ "id": 0, "category": "Israel Focus", "severity": "High", "summary": "..." }} ] }}
             """
             
             res = await query_groq_api(self.key, prompt)
             
-            # Parse the JSON response
             chunk_map = {}
             if res and "{" in res:
                 try:
@@ -143,7 +133,6 @@ class AIBatchProcessor:
                             chunk_map[item.get('id')] = item
                 except: pass
             
-            # Map back to original order
             for j in range(len(chunk)):
                 ai_data = chunk_map.get(j, {})
                 analyzed_results.append({
@@ -156,27 +145,21 @@ class AIBatchProcessor:
         return analyzed_results
 
     async def analyze_single_ioc(self, ioc, data):
-        prompt = f"Analyze this IOC: {ioc}. Threat Data: {json.dumps(data)}. Return JSON with fields: verdict, summary, next_steps."
+        prompt = f"Analyze IOC: {ioc}. Data: {json.dumps(data)}. Return JSON: verdict, summary, next_steps."
         return await query_groq_api(self.key, prompt)
 
     async def generate_hunting_queries(self, actor, news=""):
-        prompt = f"Create hunting queries (YARA-L, Splunk) for threat actor: {actor['name']}. Return formatted Markdown."
+        prompt = f"Create hunting queries (YARA-L, Splunk) for actor: {actor['name']}. Return Markdown."
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile")
 
 # --- COLLECTOR ---
 class CTICollector:
     SOURCES = [
-        # ISRAEL
         {"name": "Gov.il Publications", "url": "https://www.gov.il/he/rss/publications", "type": "rss"},
         {"name": "INCD Alerts", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"},
         {"name": "JPost Cyber", "url": "https://www.jpost.com/rss/rssfeedscontainer.aspx?type=115", "type": "rss"},
-        
-        # GLOBAL
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "The Hacker News", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
-        {"name": "The Record", "url": "https://therecord.media/feed", "type": "rss"},
-        
-        # RESEARCH
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
     ]
@@ -190,36 +173,20 @@ class CTICollector:
                 items = []
                 now_iso = datetime.datetime.now(IL_TZ).isoformat()
                 
-                # RSS Handler
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    for entry in feed.entries[:5]: # Top 5 items
+                    for entry in feed.entries[:5]:
                         if _is_url_processed(entry.link): continue
-                        
                         summary = getattr(entry, 'summary', getattr(entry, 'description', ''))
                         clean_sum = BeautifulSoup(summary, "html.parser").get_text()[:600]
-                        
-                        items.append({
-                            "title": entry.title, 
-                            "url": entry.link, 
-                            "date": now_iso, 
-                            "source": source['name'], 
-                            "summary": clean_sum
-                        })
+                        items.append({"title": entry.title, "url": entry.link, "date": now_iso, "source": source['name'], "summary": clean_sum})
                 
-                # JSON Handler (CISA)
                 elif source['type'] == 'json':
                      data = json.loads(content)
                      for v in data.get('vulnerabilities', [])[:5]:
                          url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
                          if _is_url_processed(url): continue
-                         items.append({
-                             "title": f"KEV: {v['cveID']}", 
-                             "url": url, 
-                             "date": now_iso, 
-                             "source": "CISA", 
-                             "summary": v.get('shortDescription')
-                         })
+                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": now_iso, "source": "CISA", "summary": v.get('shortDescription')})
                 return items
         except: return []
 
@@ -229,10 +196,9 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- TOOLS & HELPERS ---
+# --- TOOLS ---
 class ThreatLookup:
     def __init__(self, **kwargs): pass
-    # Placeholder methods for API lookups
     def query_virustotal(self, ioc): return {"status": "mock", "msg": "API Key Required"}
     def query_urlscan(self, ioc): return {"status": "mock", "msg": "API Key Required"}
     def query_abuseipdb(self, ip, k): return {}
@@ -242,9 +208,8 @@ class ThreatLookup:
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell", "desc": "MOIS-affiliated group.", "mitre": "T1059"},
-            {"name": "OilRig", "origin": "Iran", "target": "Finance", "type": "Espionage", "tools": "DNS Tunneling", "desc": "APT34 Supply Chain.", "mitre": "T1071"},
-            {"name": "Lazarus Group", "origin": "North Korea", "target": "Defense", "type": "Financial", "tools": "Manuscrypt", "desc": "Crypto theft & Espionage.", "mitre": "T1003"}
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell", "desc": "MOIS-affiliated.", "mitre": "T1059"},
+            {"name": "OilRig", "origin": "Iran", "target": "Finance", "type": "Espionage", "tools": "DNS Tunneling", "desc": "APT34.", "mitre": "T1071"}
         ]
 
 def save_reports(raw, analyzed):
