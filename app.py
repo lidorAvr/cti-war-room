@@ -7,7 +7,7 @@ import re
 import json
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
-import google.generativeai as genai # Import explicitly for version check
+# REMOVED: import google.generativeai as genai (Old lib caused crash)
 from utils import (init_db, CTICollector, AIBatchProcessor, save_reports, 
                    AbuseIPDBChecker, APTSheetCollector, MitreCollector, 
                    IOCExtractor, ThreatLookup, DB_NAME, get_ioc_type, ConnectionManager)
@@ -49,16 +49,9 @@ def load_secret(key_name):
     except FileNotFoundError:
         return ""
 
-# --- Sidebar Controls & DEBUG ---
+# --- Sidebar Controls ---
 with st.sidebar:
     st.header("⚙️ System Status")
-    
-    # --- SPY CODE: VERSION CHECK ---
-    try:
-        st.error(f"🔍 Lib Version: {genai.__version__}")
-    except Exception as e:
-        st.error(f"🔍 Lib Error: {str(e)}")
-    # -------------------------------
     
     # Load keys
     gemini_key = load_secret("gemini_key")
