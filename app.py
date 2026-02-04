@@ -5,14 +5,13 @@ import sqlite3
 import datetime
 import pytz
 import streamlit.components.v1 as components
-from streamlit_autorefresh import st_autorefresh
-from utils import *
+from utils import * # Removed autorefresh import
 from dateutil import parser as date_parser
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
 
-# --- UI STYLING (English & Clean) ---
+# --- UI STYLING ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
@@ -21,7 +20,6 @@ st.markdown("""
         font-family: 'Roboto', sans-serif;
     }
     
-    /* Card Design */
     .report-card { 
         background-color: #ffffff; 
         padding: 15px 20px; 
@@ -34,32 +32,20 @@ st.markdown("""
     .card-title { font-weight: 700; font-size: 1.15rem; color: #111; margin-bottom: 5px; }
     .card-summary { color: #444; font-size: 0.95rem; margin-bottom: 10px; }
     
-    /* Tags */
     .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 6px; }
     .tag-critical { background: #fee2e2; color: #991b1b; }
     .tag-incd { background: #1e3a8a; color: #fff; }
     .tag-time { background: #f3f4f6; color: #666; }
     
     a { text-decoration: none; color: #2563eb; font-weight: bold; }
-    a:hover { text-decoration: underline; }
     
     /* Filter Pills */
-    div[role="radiogroup"] {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-    }
+    div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
     div[role="radiogroup"] label {
-        background-color: #fff;
-        border: 1px solid #ddd;
-        border-radius: 20px;
-        padding: 5px 15px;
-        transition: all 0.2s;
+        background-color: #fff; border: 1px solid #ddd; border-radius: 20px; padding: 5px 15px; transition: all 0.2s;
     }
     div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #2563eb;
-        color: white;
-        border-color: #2563eb;
+        background-color: #2563eb; color: white; border-color: #2563eb;
     }
     div[role="radiogroup"] label > div:first-child { display: none; }
 </style>
@@ -67,18 +53,17 @@ st.markdown("""
 
 # --- INITIALIZATION ---
 init_db() 
-REFRESH_MINUTES = 15
-st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="auto_refresh")
-
+IL_TZ = pytz.timezone('Asia/Jerusalem')
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-IL_TZ = pytz.timezone('Asia/Jerusalem')
-
-# --- AUTO-LOAD LOGIC ---
-if "data_loaded" not in st.session_state:
+# --- NATIVE AUTO-REFRESH LOGIC (Replaces Broken Component) ---
+# This runs on every script interaction.
+if "last_run" not in st.session_state:
+    st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
+    # FIRST LOAD: Run update automatically
     with st.spinner("🚀 System Startup: Fetching Intelligence..."):
         async def startup_update():
             col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
@@ -87,8 +72,6 @@ if "data_loaded" not in st.session_state:
                 analyzed = await proc.analyze_batch(raw)
                 save_reports(raw, analyzed)
         asyncio.run(startup_update())
-        st.session_state["data_loaded"] = True
-        st.session_state["last_update"] = datetime.datetime.now(IL_TZ)
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -102,7 +85,7 @@ with st.sidebar:
         with st.status("Fetching New Intelligence...", expanded=True):
             async def run_update():
                 col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-                st.write("Connecting to Sources...")
+                st.write("Connecting to Sources (RSS/Tele)...")
                 raw = await col.get_all_data()
                 if not raw: 
                     st.warning("No new data found.")
@@ -112,7 +95,7 @@ with st.sidebar:
                 cnt = save_reports(raw, analyzed)
                 return cnt
             count = asyncio.run(run_update())
-            st.session_state["last_update"] = datetime.datetime.now(IL_TZ)
+            st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
             st.success(f"Discovered {count} new items.")
             st.rerun()
 
@@ -122,12 +105,9 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SO
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     # 1. Status Header
-    last_up = st.session_state.get("last_update", datetime.datetime.now(IL_TZ))
-    next_up = last_up + datetime.timedelta(minutes=REFRESH_MINUTES)
-    
-    c1, c2, c3 = st.columns([2, 2, 6])
-    with c1: st.markdown(f"**Last Updated:** `{last_up.strftime('%H:%M:%S')} (IL)`")
-    with c2: st.markdown(f"**Next Auto-Update:** `{next_up.strftime('%H:%M')} (IL)`")
+    last_up = st.session_state["last_run"]
+    c1, c2 = st.columns([1, 4])
+    with c1: st.info(f"Updated: {last_up.strftime('%H:%M')} (IL)")
     
     st.divider()
 
@@ -153,7 +133,7 @@ with tab_feed:
     df_final = pd.concat([df_incd_filtered, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
-        st.info("No active threats found. Attempting auto-fetch...")
+        st.info("No active threats found. Click 'Force Update' in sidebar.")
     else:
         # Filters
         cat_counts = df_final['category'].value_counts()
@@ -166,7 +146,6 @@ with tab_feed:
         if "All" in selected_label:
             df_display = df_final
         else:
-            # Extract category name from "Category (Count)"
             selected_cat = selected_label.split(" (")[0]
             df_display = df_final[df_final['category'] == selected_cat]
 
