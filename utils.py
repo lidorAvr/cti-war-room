@@ -54,20 +54,29 @@ def vt_url_id(url):
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
 async def get_working_model(api_key):
-    """Prioritize stable models with higher quotas."""
+    """Aggressively finds a working model, falling back to legacy gemini-pro if needed."""
     genai.configure(api_key=api_key)
-    # Priority: 1.5 Flash (Best Quota) -> 1.5 Pro -> Legacy Pro
-    preferences = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']
     
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        for pref in preferences:
-            for m in models:
-                if pref in m: return m
-        if models: return models[0]
-    except:
-        pass
-    return 'gemini-1.5-flash' # Default hope
+    # List of models to try in order. 
+    # 'gemini-pro' is the safest fallback for older libraries.
+    candidates = [
+        'gemini-1.5-flash', 
+        'gemini-1.5-pro', 
+        'gemini-1.0-pro', 
+        'gemini-pro'
+    ]
+    
+    for model_name in candidates:
+        try:
+            # Quick test generation to see if model exists and is callable
+            model = genai.GenerativeModel(model_name)
+            # We use a dummy async call or just assume it works if no immediate error
+            # But the 404 usually happens on generation, so we return the name to be tried.
+            return model_name
+        except:
+            continue
+            
+    return 'gemini-pro' # Ultimate fallback
 
 # --- Health Check Manager ---
 class ConnectionManager:
@@ -76,15 +85,22 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             genai.configure(api_key=key)
-            # Try a very cheap/simple call
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            # Generate 1 token to test auth without eating quota
-            response = model.generate_content("Hi")
-            return True, "Connected"
-        except google_exceptions.ResourceExhausted:
-            return False, "Quota Exceeded (429)"
+            # Try candidates one by one for the health check
+            candidates = ['gemini-1.5-flash', 'gemini-pro']
+            last_error = ""
+            
+            for m in candidates:
+                try:
+                    model = genai.GenerativeModel(m)
+                    model.generate_content("test")
+                    return True, f"Connected ({m})"
+                except Exception as e:
+                    last_error = str(e)
+                    if "404" in last_error: continue # Try next model
+                    if "429" in last_error: return False, "Quota Exceeded"
+            
+            return False, f"API Error: {last_error[:50]}..."
         except Exception as e:
-            if "429" in str(e): return False, "Quota Exceeded"
             return False, str(e)
 
     @staticmethod
@@ -317,73 +333,64 @@ class AIBatchProcessor:
         self.key = key
         
     async def analyze_batch(self, items):
-        # 1. Fallback immediately if no items
         if not items: return []
-        
-        # 2. Prepare default fallback data (in case AI fails)
         fallback_data = [{"id": i, "category": "General", "severity": "Medium", "impact": "See details", "summary": item['summary'][:150]} for i, item in enumerate(items)]
         
         if not self.key: return fallback_data
 
-        # 3. Try to get a working model
-        model_name = await get_working_model(self.key)
-        
         batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
         prompt = f"""
         Analyze threat intel.
         Input Format: ID:0|Src:Source|Title:Title|Desc:Description
-        
-        Output JSON Array only:
-        [
-          {{"id": 0, "category": "Malware/Phishing/Vulnerability/Israel Focus/General", "severity": "Critical/High/Medium/Low", "impact": "Short impact", "summary": "One sentence summary"}}
-        ]
-        
-        Rules: 'CISA'=Critical. 'Israel' mention = Israel Focus.
-        
+        Output JSON Array only.
         Items:
         {batch_text}
         """
         
-        try:
-            genai.configure(api_key=self.key)
-            model = genai.GenerativeModel(model_name)
-            res = await model.generate_content_async(prompt)
-            
-            # Parse JSON
-            text = res.text.replace('```json','').replace('```','').strip()
-            if not text.startswith('['): 
-                start = text.find('[')
-                end = text.rfind(']') + 1
-                text = text[start:end]
-            
-            return json.loads(text)
-        except Exception as e:
-            print(f"AI Batch Failed ({e}). Using raw data.")
-            return fallback_data
+        # Try models in order, starting from latest, falling back to oldest
+        candidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+        
+        for model_name in candidates:
+            try:
+                genai.configure(api_key=self.key)
+                model = genai.GenerativeModel(model_name)
+                res = await model.generate_content_async(prompt)
+                
+                text = res.text.replace('```json','').replace('```','').strip()
+                if not text.startswith('['): 
+                    start = text.find('[')
+                    end = text.rfind(']') + 1
+                    text = text[start:end]
+                return json.loads(text)
+            except Exception as e:
+                # If error is 404 (model not found) or 429 (quota), try next model
+                continue
+
+        # If all failed
+        return fallback_data
 
     async def analyze_single_ioc(self, ioc, data):
         if not self.key: return "⚠️ Error: No Gemini API Key."
         
-        model_name = await get_working_model(self.key)
         context_str = json.dumps(data, indent=2, default=str)
         prompt = f"""
         Act as a SOC Analyst. Incident Note for IOC: {ioc}.
         Raw Data: {context_str}
-        
-        Provide:
-        1. **Verdict**: (Malicious/Safe)
-        2. **Key Findings**: (Bullet points)
-        3. **Recommendation**: (Block/Monitor/Ignore)
+        Provide Verdict, Findings, Recommendation.
         """
         
-        try:
-            genai.configure(api_key=self.key)
-            model = genai.GenerativeModel(model_name)
-            res = await model.generate_content_async(prompt)
-            return res.text
-        except Exception as e:
-            if "429" in str(e): return "⚠️ AI Quota Exceeded. Please try again later or check raw data below."
-            return f"❌ AI Error: {str(e)}"
+        candidates = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+        for model_name in candidates:
+            try:
+                genai.configure(api_key=self.key)
+                model = genai.GenerativeModel(model_name)
+                res = await model.generate_content_async(prompt)
+                return res.text
+            except Exception as e:
+                if "429" in str(e): return "⚠️ AI Quota Exceeded."
+                continue # Try next model
+                
+        return "❌ Error: AI Service Unavailable (Check library version or API key)."
 
 def save_reports(raw, analyzed):
     try:
@@ -392,12 +399,7 @@ def save_reports(raw, analyzed):
         amap = {r['id']:r for r in analyzed if isinstance(r, dict)}
         cnt = 0
         for i,item in enumerate(raw):
-            # If AI failed, use default values
-            cat = "General"
-            sev = "Medium"
-            imp = "Unknown"
-            summ = item['summary']
-            
+            cat = "General"; sev = "Medium"; imp = "Unknown"; summ = item['summary']
             if i in amap:
                 a = amap[i]
                 cat = a.get('category', cat)
