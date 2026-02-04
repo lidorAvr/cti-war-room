@@ -62,7 +62,7 @@ init_db()
 
 # --- INIT STATE ---
 if 'filter_type' not in st.session_state: st.session_state.filter_type = 'All'
-if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {} # Fixed init
+if 'ioc_data' not in st.session_state: st.session_state.ioc_data = {} 
 if 'current_ioc' not in st.session_state: st.session_state.current_ioc = ""
 
 # --- LOAD SECRETS ---
@@ -131,7 +131,7 @@ with tab_feed:
     if c1.button(f"🚨 Critical ({count_crit})", use_container_width=True): st.session_state.filter_type = 'Critical'
     if c2.button(f"🇮🇱 Israel ({count_il})", use_container_width=True): st.session_state.filter_type = 'Israel'
     if c3.button(f"🦠 Malware ({count_mal})", use_container_width=True): st.session_state.filter_type = 'Malware'
-    if c4.button("🌐 Show All", use_container_width=True): st.session_state.filter_type = 'All'
+    if c4.button(f"🌐 Show All ({len(df)})", use_container_width=True): st.session_state.filter_type = 'All'
 
     view_df = df
     if st.session_state.filter_type == 'Critical': view_df = df[df['severity'].str.contains('Critical', case=False)]
@@ -185,7 +185,6 @@ with tab_tools:
                 vt_res = tl.query_virustotal(ioc_input)
                 st.write(f"VirusTotal: {vt_res.get('status')}")
                 
-                # Pass URLSCAN_KEY explicitly
                 us_res = tl.query_urlscan(ioc_input)
                 st.write(f"URLScan: {us_res.get('status')}")
 
@@ -217,7 +216,9 @@ with tab_tools:
         with t2:
             d = st.session_state.ioc_data.get('urlscan', {})
             if d.get('status') == 'found':
-                st.write(f"**Verdict:** {d.get('verdict', {}).get('overall')}")
+                # FIXED: Safer access to nested keys to prevent AttributeError
+                verdict = (d.get('verdict') or {}).get('overall', 'Unknown')
+                st.write(f"**Verdict:** {verdict}")
                 if d.get('screenshot'): st.image(d['screenshot'])
                 if d.get('page'): st.write(f"**Page:** {d['page'].get('url')}")
             else: 
