@@ -5,7 +5,8 @@ import sqlite3
 import datetime
 import pytz
 import streamlit.components.v1 as components
-from utils import * from dateutil import parser as date_parser
+from utils import *
+from dateutil import parser as date_parser
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
