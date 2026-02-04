@@ -122,7 +122,7 @@ with tab_feed:
     conn.close()
     
     # Merge - ensuring INCD is prioritized if available
-    df_final = pd.concat([df_incd.head(5), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
+    df_final = pd.concat([df_incd.head(8), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
         st.info("No active threats found. Try 'Force Global Update'.")
@@ -152,12 +152,19 @@ with tab_feed:
             except: date_str = "Unknown"
 
             sev_class = "tag-critical" if "Critical" in row['severity'] else ""
-            source_tag = "tag-incd" if row['source'] == "INCD" else "tag-time"
+            
+            # CUSTOM TAG LOGIC FOR INCD
+            if row['source'] == "INCD":
+                source_display = "מערך הסייבר"
+                source_tag_class = "tag-incd"
+            else:
+                source_display = row['source']
+                source_tag_class = "tag-time"
             
             st.markdown(f"""
             <div class="report-card">
                 <div style="margin-bottom: 8px;">
-                    <span class="tag {source_tag}">{row['source']}</span>
+                    <span class="tag {source_tag_class}">{source_display}</span>
                     <span class="tag tag-time">{date_str}</span>
                     <span class="tag {sev_class}">{row['severity']}</span>
                     <span class="tag tag-time">{row['category']}</span>
