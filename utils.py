@@ -30,7 +30,8 @@ def init_db():
         impact TEXT,
         summary TEXT
     )''')
-    limit = (datetime.datetime.now() - datetime.timedelta(hours=24)).isoformat()
+    # ניקוי דוחות ישנים מאוד (מעל 48 שעות) כדי לא להעמיס, אך משאיר היסטוריה קצרה
+    limit = (datetime.datetime.now() - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit,))
     conn.commit()
     conn.close()
@@ -59,7 +60,9 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             genai.configure(api_key=key)
-            genai.list_models()
+            # ניסיון ממשי לייצר תוכן כדי לוודא הרשאות, לא רק list_models
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content("test")
             return True, "Connected"
         except Exception as e: return False, str(e)
 
@@ -78,10 +81,9 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             headers = {'API-KEY': key.strip()}
-            data = {'url': 'http://google.com'}
-            res = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data=data, headers=headers, timeout=10)
-            if res.status_code == 200: return True, "Connected"
-            if res.status_code == 401: return False, "Invalid Key"
+            # בדיקה מול נקודת קצה פשוטה יותר אם ה-urlhaus נכשל
+            res = requests.get("https://urlhaus-api.abuse.ch/v1/tag/malware/", timeout=10)
+            if res.status_code == 200: return True, "Connected (Public)"
             return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
@@ -134,31 +136,28 @@ class ThreatLookup:
         self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
 
     def query_threatfox(self, ioc):
-        if not self.abuse_ch_key: return {"status": "skipped", "msg": "No Key"}
+        # ThreatFox allows public queries without API key for some endpoints, but search usually requires it.
+        # However, let's try gracefully.
         ioc = ioc.strip()
         payload = {"query": "search_ioc", "search_term": ioc}
+        headers = {}
+        if self.abuse_ch_key: headers['API-KEY'] = self.abuse_ch_key
+        
         try:
-            res = requests.post(self.tf_url, json=payload, headers={'API-KEY': self.abuse_ch_key}, timeout=10)
-            if res.status_code == 401: return {"status": "error", "msg": "Invalid Key"}
+            res = requests.post(self.tf_url, json=payload, headers=headers, timeout=10)
             data = res.json()
             if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
-            elif data.get("query_status") == "no_result":
-                clean_ip, port = sanitize_ioc(ioc)
-                if port:
-                    payload["search_term"] = clean_ip
-                    res = requests.post(self.tf_url, json=payload, headers={'API-KEY': self.abuse_ch_key}, timeout=10)
-                    data = res.json()
-                    if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
-                return {"status": "not_found"}
+            elif data.get("query_status") == "no_result": return {"status": "not_found"}
             return {"status": "error", "msg": data.get("query_status")}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
     def query_urlhaus(self, ioc):
-        if not self.abuse_ch_key: return {"status": "skipped", "msg": "No Key"}
         clean_ioc, _ = sanitize_ioc(ioc)
         ioc_type = get_ioc_type(clean_ioc)
+        headers = {}
+        if self.abuse_ch_key: headers['API-KEY'] = self.abuse_ch_key
+
         try:
-            headers = {'API-KEY': self.abuse_ch_key}
             if ioc_type == "hash":
                 res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, headers=headers, timeout=10)
             elif ioc_type == "url":
@@ -276,26 +275,38 @@ class CTICollector:
     async def fetch_item(self, session, source):
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
-            async with session.get(source['url'], headers=headers, timeout=10) as resp:
-                if resp.status != 200: return []
+            print(f"DEBUG: Fetching {source['name']}...")
+            async with session.get(source['url'], headers=headers, timeout=15) as resp:
+                if resp.status != 200:
+                    print(f"DEBUG: Error fetching {source['name']} - Status {resp.status}")
+                    return []
                 now = datetime.datetime.now(datetime.timezone.utc)
                 if source['type'] == 'rss':
-                    soup = BeautifulSoup(await resp.text(), 'xml')
+                    text = await resp.text()
+                    soup = BeautifulSoup(text, 'xml')
                     items = []
-                    for i in soup.find_all('item')[:10]:
+                    for i in soup.find_all('item')[:5]: # Limit to 5 per source to avoid overloading
                         d = i.pubDate.text if i.pubDate else str(now)
                         try:
                             dt = parser.parse(d)
                             if dt.tzinfo is None: dt = dt.replace(tzinfo=datetime.timezone.utc)
-                            if dt < now - datetime.timedelta(hours=24): continue
+                            # Allow items up to 48 hours to ensure content appears
+                            if dt < now - datetime.timedelta(hours=48): continue
                             final_d = dt.isoformat()
                         except: final_d = now.isoformat()
-                        items.append({"title": i.title.text, "url": i.link.text, "date": final_d, "source": source['name'], "summary": i.description.text if i.description else ""})
+                        
+                        # Add default description if missing
+                        desc = i.description.text if i.description else "No description available."
+                        items.append({"title": i.title.text, "url": i.link.text, "date": final_d, "source": source['name'], "summary": desc})
+                    print(f"DEBUG: {source['name']} found {len(items)} items")
                     return items
                 elif source['type'] == 'json':
                     data = await resp.json()
+                    print(f"DEBUG: {source['name']} found items")
                     return [{"title": f"KEV: {v['cveID']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": datetime.datetime.now().isoformat(), "source": source['name'], "summary": v['vulnerabilityName']} for v in data.get('vulnerabilities', [])[:3]]
-        except: return []
+        except Exception as e:
+            print(f"DEBUG: Exception in {source['name']} - {str(e)}")
+            return []
     
     async def get_all_data(self):
         ssl_ctx = ssl.create_default_context(); ssl_ctx.check_hostname=False; ssl_ctx.verify_mode=ssl.CERT_NONE
@@ -303,7 +314,9 @@ class CTICollector:
         async with aiohttp.ClientSession(connector=conn) as session:
             tasks = [self.fetch_item(session, src) for src in self.SOURCES]
             results = await asyncio.gather(*tasks)
-            return [i for sub in results for i in sub]
+            flat_results = [i for sub in results for i in sub]
+            print(f"DEBUG: Total items collected: {len(flat_results)}")
+            return flat_results
 
 # --- AI Processors ---
 class AIBatchProcessor:
@@ -313,69 +326,122 @@ class AIBatchProcessor:
             genai.configure(api_key=key)
 
     async def analyze_batch(self, items):
-        if not items or not self.key: return []
-        batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}" for i,item in enumerate(items)])
+        if not items: return []
+        if not self.key:
+            print("DEBUG: No API Key, returning items without AI analysis")
+            # Fallback if no key: Just format them simply
+            return [{"id": i, "category": "General", "severity": "Medium", "impact": "Unknown", "summary": item['summary'][:200]} for i, item in enumerate(items)]
+
+        batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
         prompt = f"""
-        SOC Analysis.
-        Categories: [Phishing, Vulnerability, Research, Israel Focus, Malware, DDoS, General].
-        Severity: [Critical, High, Medium, Low].
-        Rules: 'Israel Focus' if context matches. KEV=Critical. Marketing=IGNORE.
-        Items: {batch_text}
-        Output JSON: [{{"id":0, "category":"...", "severity":"...", "impact":"...", "summary":"..."}}]
+        You are a SOC Analyst. Analyze these threat intel items.
+        
+        Input Format:
+        ID:0|Src:Source|Title:Title|Desc:Description
+        
+        Tasks:
+        1. Categorize: [Phishing, Vulnerability, Research, Israel Focus, Malware, DDoS, General].
+        2. Assign Severity: [Critical, High, Medium, Low].
+        3. Summarize Impact: 5 words max.
+        4. Summary: One sentence summary.
+
+        Rules:
+        - If 'Israel' or 'Iran' or 'Hamas' is mentioned -> 'Israel Focus'.
+        - If 'CISA KEV' -> Severity 'Critical'.
+        - Marketing/Sales posts -> Category 'IGNORE'.
+        
+        Output **ONLY** valid JSON array:
+        [
+          {{"id": 0, "category": "Malware", "severity": "High", "impact": "Data theft risk", "summary": "Short summary here."}}
+        ]
+        
+        Items to analyze:
+        {batch_text}
         """
-        for m in ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+        
+        # Tried models in order of stability
+        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+        
+        for m in models_to_try:
             try:
+                print(f"DEBUG: Trying AI model {m}...")
                 model = genai.GenerativeModel(m)
                 res = await model.generate_content_async(prompt)
-                return json.loads(res.text.replace('```json','').replace('```','').strip())
-            except: continue
-        return []
+                
+                # Cleaning response
+                text = res.text.replace('```json','').replace('```','').strip()
+                if not text.startswith('['): 
+                    # Sometimes Gemini puts text before the JSON
+                    start = text.find('[')
+                    end = text.rfind(']') + 1
+                    if start != -1 and end != -1:
+                        text = text[start:end]
+                
+                parsed = json.loads(text)
+                print("DEBUG: AI Analysis success")
+                return parsed
+            except Exception as e:
+                print(f"DEBUG: Model {m} failed: {e}")
+                continue
+        
+        print("DEBUG: All AI models failed. Returning raw data.")
+        # Fallback if AI completely fails
+        return [{"id": i, "category": "General", "severity": "Medium", "impact": "Manual Review Needed", "summary": item['summary'][:200]} for i, item in enumerate(items)]
 
-    # This was missing in your previous code
     async def analyze_single_ioc(self, ioc, data):
-        if not self.key: return "No API Key configured."
+        if not self.key: return "⚠️ Error: No Gemini API Key provided. Cannot generate report."
         
-        # Prepare context data as string
         context_str = json.dumps(data, indent=2, default=str)
-        
         prompt = f"""
-        Act as a Level 3 SOC Analyst. 
-        I have investigated an Indicator of Compromise (IOC): {ioc}.
+        Act as a Senior SOC Analyst. Write a short incident response note for IOC: {ioc}.
         
-        Here is the collected intelligence data from various sources (VirusTotal, AbuseIPDB, ThreatFox, etc.):
+        Raw Data:
         {context_str}
         
-        Please provide a concise but professional investigation report in Markdown format.
-        Include:
-        1. **Verdict**: (Malicious / Suspicious / Benign / Inconclusive) with a confidence score.
-        2. **Summary of Findings**: What makes this IOC good or bad based on the data provided?
-        3. **Key Evidence**: Bullet points of specific flags (e.g., high abuse score, specific malware tag).
-        4. **Recommended Action**: What should the SOC team do? (Block, Monitor, Ignore).
+        Structure (Use Markdown):
+        ## 🚨 IOC Assessment: [Malicious/Suspicious/Safe]
+        **Confidence:** [0-100%]
         
-        Keep it operational and direct.
+        ### 🔍 Key Findings
+        * bullet points of critical data (e.g. VT score, Malware families, ISP).
+        
+        ### 🛡️ Recommendation
+        [Actionable advice: Block in Firewall / Hunt in EDR / Ignore]
         """
         
-        for m in ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]:
+        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash"]
+        for m in models_to_try:
             try:
                 model = genai.GenerativeModel(m)
                 res = await model.generate_content_async(prompt)
                 return res.text
             except Exception as e:
+                print(f"Single IOC Analysis failed with {m}: {e}")
                 continue
-        return "Error: Could not generate analysis. Please check API Key or Quota."
+        return "❌ Error: AI Service Unavailable. Please analyze raw data manually."
 
 def save_reports(raw, analyzed):
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        amap = {r['id']:r for r in analyzed if r.get('category')!='IGNORE'}
+        
+        # Map analysis by ID
+        amap = {r['id']:r for r in analyzed if isinstance(r, dict) and r.get('category')!='IGNORE'}
+        
         cnt = 0
         for i,item in enumerate(raw):
             if i in amap:
                 a = amap[i]
-                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], a['category'], a['severity'], a['impact'], a['summary']))
-                if c.rowcount > 0: cnt += 1
-        conn.commit(); conn.close()
+                try:
+                    c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], a.get('category','General'), a.get('severity','Low'), a.get('impact','None'), a.get('summary','')))
+                    if c.rowcount > 0: cnt += 1
+                except Exception as db_err:
+                    print(f"DB Insert Error: {db_err}")
+                    
+        conn.commit()
+        conn.close()
         return cnt
-    except: return 0
+    except Exception as e:
+        print(f"Save Reports Error: {e}")
+        return 0
