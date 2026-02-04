@@ -15,6 +15,15 @@ from dateutil import parser as date_parser
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
+# --- HTTP HEADERS (Anti-Bot Bypass) ---
+# נדרש כדי שאתרים כמו BleepingComputer ו-Gov.il לא יחסמו את הבקשה
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9,he;q=0.8',
+    'Referer': 'https://www.google.com/'
+}
+
 # --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
     ioc = ioc.strip()
@@ -196,16 +205,19 @@ class CTICollector:
         {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
-        # INCD: Using specific scrapers
-        {"name": "INCD", "url": "https://www.gov.il/he/collectors/publications?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "gov_il"},
+        # INCD: Using Official RSS now instead of scraper (More reliable)
+        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
         {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
     ]
 
     async def fetch_item(self, session, source):
         items = []
         try:
-            async with session.get(source['url'], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20) as resp:
-                if resp.status != 200: return []
+            # Added HEADERS to avoid 403 Forbidden errors
+            async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
+                if resp.status != 200: 
+                    print(f"Failed to fetch {source['name']}: {resp.status}")
+                    return []
                 content = await resp.text()
                 now = datetime.datetime.now(IL_TZ)
 
@@ -213,10 +225,20 @@ class CTICollector:
                     feed = feedparser.parse(content)
                     for entry in feed.entries[:10]:
                         if _is_url_processed(entry.link): continue
-                        pub_date = now
-                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                            pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
-                        if (now - pub_date).total_seconds() > 172800: continue
+                        
+                        # Date Parsing Logic
+                        pub_date = now # Default
+                        try:
+                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                                pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        except: pass # Keep 'now' if parsing fails, so we don't lose the item
+                        
+                        # Strict 48h filter - BUT if it's INCD, we allow 96h
+                        hours_limit = 96 if source['name'] == 'INCD' else 48
+                        if (now - pub_date).total_seconds() > (hours_limit * 3600): continue
+
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
@@ -231,7 +253,6 @@ class CTICollector:
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
 
                 elif source['type'] == 'telegram':
-                    # Improved Telegram Parsing for Israel_Cyber
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
                     for msg in msgs[-10:]:
@@ -240,22 +261,16 @@ class CTICollector:
                             if not text_div: continue
                             text = text_div.get_text(separator=' ')
                             
-                            # Date parsing
                             pub_date = now
                             time_span = msg.find('time', class_='time')
                             if time_span and 'datetime' in time_span.attrs:
-                                try:
-                                    pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
+                                try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
                                 except: pass
                             
-                            # 4 Days rule for INCD
                             if (now - pub_date).total_seconds() > 345600: continue
                             
-                            # Link extraction
-                            post_link = ""
                             date_link = msg.find('a', class_='tgme_widget_message_date')
-                            if date_link: post_link = date_link['href']
-                            else: post_link = f"https://t.me/s/Israel_Cyber?q={text[:10]}"
+                            post_link = date_link['href'] if date_link else f"https://t.me/s/Israel_Cyber?t={int(now.timestamp())}"
                             
                             if _is_url_processed(post_link): continue
                             
@@ -266,29 +281,10 @@ class CTICollector:
                                 "source": "INCD", 
                                 "summary": text[:800]
                             })
-                        except Exception as e: 
-                            # Continue to next message on error
-                            pass
+                        except: pass
 
-                elif source['type'] == 'gov_il':
-                    # Generic fallback for gov.il
-                    soup = BeautifulSoup(content, 'html.parser')
-                    # Look for news/publications links
-                    links = soup.select('a[href*="/news/"], a[href*="/publications/"]')
-                    for link in links[:5]:
-                        href = link['href']
-                        full_url = "https://www.gov.il" + href if href.startswith("/") else href
-                        if _is_url_processed(full_url): continue
-                        
-                        items.append({
-                            "title": link.get_text(strip=True), 
-                            "url": full_url, 
-                            "date": now.isoformat(), 
-                            "source": "INCD", 
-                            "summary": "Official Publication from Gov.il"
-                        })
-
-        except Exception as e: pass
+        except Exception as e: 
+            print(f"Error {source['name']}: {e}")
         return items
 
     async def get_all_data(self):
