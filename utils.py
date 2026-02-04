@@ -12,6 +12,7 @@ import base64
 from bs4 import BeautifulSoup
 from dateutil import parser
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 
 DB_NAME = "cti_dashboard.db"
 
@@ -53,26 +54,20 @@ def vt_url_id(url):
     return base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
 async def get_working_model(api_key):
-    """Dynamically finds a working model from the user's available list."""
+    """Prioritize stable models with higher quotas."""
     genai.configure(api_key=api_key)
+    # Priority: 1.5 Flash (Best Quota) -> 1.5 Pro -> Legacy Pro
+    preferences = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']
+    
     try:
-        # Get list of available models
         models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        
-        # Priority list
-        preferences = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-1.0-pro', 'models/gemini-pro']
-        
         for pref in preferences:
             for m in models:
-                if pref in m: # Match partial name
-                    return m
-        
-        # If no match from preference, pick the first valid one
+                if pref in m: return m
         if models: return models[0]
-        return 'gemini-pro' # Fallback default
-    except Exception as e:
-        print(f"Error listing models: {e}")
-        return 'gemini-pro'
+    except:
+        pass
+    return 'gemini-1.5-flash' # Default hope
 
 # --- Health Check Manager ---
 class ConnectionManager:
@@ -81,15 +76,16 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             genai.configure(api_key=key)
-            # Find a valid model first
-            models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-            if not models: return False, "No models available for API Key"
-            
-            # Test generation
-            model = genai.GenerativeModel(models[0])
-            response = model.generate_content("test")
-            return True, f"Connected ({models[0]})"
-        except Exception as e: return False, str(e)
+            # Try a very cheap/simple call
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            # Generate 1 token to test auth without eating quota
+            response = model.generate_content("Hi")
+            return True, "Connected"
+        except google_exceptions.ResourceExhausted:
+            return False, "Quota Exceeded (429)"
+        except Exception as e:
+            if "429" in str(e): return False, "Quota Exceeded"
+            return False, str(e)
 
     @staticmethod
     def check_abuseipdb(key):
@@ -106,10 +102,9 @@ class ConnectionManager:
         if not key: return False, "Missing Key"
         try:
             headers = {'API-KEY': key.strip()}
-            # Simple check
             res = requests.post("https://urlhaus-api.abuse.ch/v1/url/", data={'url':'http://google.com'}, headers=headers, timeout=10)
             if res.status_code == 200: return True, "Connected"
-            if res.status_code == 401: return False, "Invalid Key"
+            if res.status_code == 401: return False, "Invalid Key (Check Config)"
             return False, f"HTTP {res.status_code}"
         except Exception as e: return False, str(e)
 
@@ -166,21 +161,19 @@ class ThreatLookup:
         payload = {"query": "search_ioc", "search_term": ioc}
         headers = {}
         if self.abuse_ch_key: headers['API-KEY'] = self.abuse_ch_key
-        
         try:
             res = requests.post(self.tf_url, json=payload, headers=headers, timeout=10)
             data = res.json()
             if data.get("query_status") == "ok": return {"status": "found", "data": data.get("data", [])}
             elif data.get("query_status") == "no_result": return {"status": "not_found"}
             return {"status": "error", "msg": data.get("query_status")}
-        except Exception as e: return {"status": "error", "msg": str(e)}
+        except: return {"status": "error", "msg": "Connection Error"}
 
     def query_urlhaus(self, ioc):
         clean_ioc, _ = sanitize_ioc(ioc)
         ioc_type = get_ioc_type(clean_ioc)
         headers = {}
         if self.abuse_ch_key: headers['API-KEY'] = self.abuse_ch_key
-
         try:
             if ioc_type == "hash":
                 res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, headers=headers, timeout=10)
@@ -188,14 +181,12 @@ class ThreatLookup:
                 res = requests.post(self.uh_url, data={'url': ioc}, headers=headers, timeout=10)
             else:
                 res = requests.post(self.uh_host, data={'host': clean_ioc}, headers=headers, timeout=10)
-            
             if res.status_code == 200:
                 data = res.json()
                 if data.get("query_status") == "ok": return {"status": "found", "data": data}
-                elif "urls" in data and len(data["urls"]) > 0: return {"status": "found", "data": {"tags": ["hosting_malware"], "count": len(data["urls"])}}
                 return {"status": "not_found"}
-            return {"status": "error", "msg": f"HTTP {res.status_code}"}
-        except Exception as e: return {"status": "error", "msg": str(e)}
+            return {"status": "error"}
+        except: return {"status": "error"}
 
     def query_virustotal(self, ioc):
         if not self.vt_key: return {"status": "skipped", "msg": "No Key"}
@@ -218,10 +209,8 @@ class ThreatLookup:
                 stats = data.get("last_analysis_stats", {})
                 return {"status": "found", "stats": stats, "reputation": data.get("reputation", 0)}
             elif res.status_code == 404: return {"status": "not_found"}
-            elif res.status_code == 401: return {"status": "error", "msg": "Invalid VT Key"}
-            elif res.status_code == 429: return {"status": "error", "msg": "Rate Limit Exceeded"}
-            else: return {"status": "error", "msg": f"HTTP {res.status_code}"}
-        except Exception as e: return {"status": "error", "msg": str(e)}
+            return {"status": "error", "msg": f"HTTP {res.status_code}"}
+        except: return {"status": "error"}
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return {"status": "skipped", "msg": "No Key"}
@@ -235,17 +224,10 @@ class ThreatLookup:
                 results = data.get("results", [])
                 if results:
                     latest = results[0]
-                    return {
-                        "status": "found",
-                        "page": latest.get("page", {}),
-                        "task": latest.get("task", {}),
-                        "verdict": latest.get("verdict", {}),
-                        "screenshot": latest.get("screenshot")
-                    }
+                    return {"status": "found", "page": latest.get("page", {}), "verdict": latest.get("verdict", {}), "screenshot": latest.get("screenshot")}
                 return {"status": "not_found"}
-            elif res.status_code == 401: return {"status": "error", "msg": "Invalid URLScan Key"}
-            else: return {"status": "error", "msg": f"HTTP {res.status_code}"}
-        except Exception as e: return {"status": "error", "msg": str(e)}
+            return {"status": "error"}
+        except: return {"status": "error"}
 
     def query_cyscan(self, ioc):
         return {"link": f"https://cyscan.io/search/{ioc}"}
@@ -281,9 +263,9 @@ class AbuseIPDBChecker:
         try:
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': clean_ip, 'maxAgeInDays': 90})
             if res.status_code == 200: return {"success": True, "data": res.json()['data']}
-            elif res.status_code == 422: return {"error": "Skipped: Not a valid IP"}
+            elif res.status_code == 422: return {"error": "Invalid IP"}
             elif res.status_code == 401: return {"error": "Invalid API Key"}
-            else: return {"error": f"API Error: {res.text}"}
+            return {"error": "API Error"}
         except: return {"error": "Connection Failed"}
 
 class CTICollector:
@@ -299,11 +281,8 @@ class CTICollector:
     async def fetch_item(self, session, source):
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
-            print(f"DEBUG: Fetching {source['name']}...")
             async with session.get(source['url'], headers=headers, timeout=15) as resp:
-                if resp.status != 200:
-                    print(f"DEBUG: Error fetching {source['name']} - Status {resp.status}")
-                    return []
+                if resp.status != 200: return []
                 now = datetime.datetime.now(datetime.timezone.utc)
                 if source['type'] == 'rss':
                     text = await resp.text()
@@ -317,17 +296,12 @@ class CTICollector:
                             if dt < now - datetime.timedelta(hours=48): continue
                             final_d = dt.isoformat()
                         except: final_d = now.isoformat()
-                        
-                        desc = i.description.text if i.description else "No description available."
-                        items.append({"title": i.title.text, "url": i.link.text, "date": final_d, "source": source['name'], "summary": desc})
-                    print(f"DEBUG: {source['name']} found {len(items)} items")
+                        items.append({"title": i.title.text, "url": i.link.text, "date": final_d, "source": source['name'], "summary": i.description.text if i.description else ""})
                     return items
                 elif source['type'] == 'json':
                     data = await resp.json()
                     return [{"title": f"KEV: {v['cveID']}", "url": "https://www.cisa.gov/known-exploited-vulnerabilities-catalog", "date": datetime.datetime.now().isoformat(), "source": source['name'], "summary": v['vulnerabilityName']} for v in data.get('vulnerabilities', [])[:3]]
-        except Exception as e:
-            print(f"DEBUG: Exception in {source['name']} - {str(e)}")
-            return []
+        except: return []
     
     async def get_all_data(self):
         ssl_ctx = ssl.create_default_context(); ssl_ctx.check_hostname=False; ssl_ctx.verify_mode=ssl.CERT_NONE
@@ -335,55 +309,38 @@ class CTICollector:
         async with aiohttp.ClientSession(connector=conn) as session:
             tasks = [self.fetch_item(session, src) for src in self.SOURCES]
             results = await asyncio.gather(*tasks)
-            flat_results = [i for sub in results for i in sub]
-            return flat_results
+            return [i for sub in results for i in sub]
 
 # --- AI Processors ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
-        self.model_name = "gemini-pro" # Default safe fallback
         
-    async def _get_model(self):
-        if not self.key: return None
-        # Try to dynamically get a working model name
-        try:
-            return await get_working_model(self.key)
-        except:
-            return "gemini-pro"
-
     async def analyze_batch(self, items):
+        # 1. Fallback immediately if no items
         if not items: return []
-        if not self.key:
-            return [{"id": i, "category": "General", "severity": "Medium", "impact": "Manual Review Needed", "summary": item['summary'][:200]} for i, item in enumerate(items)]
+        
+        # 2. Prepare default fallback data (in case AI fails)
+        fallback_data = [{"id": i, "category": "General", "severity": "Medium", "impact": "See details", "summary": item['summary'][:150]} for i, item in enumerate(items)]
+        
+        if not self.key: return fallback_data
 
-        model_name = await self._get_model()
-        print(f"DEBUG: Using model {model_name} for batch analysis")
-
+        # 3. Try to get a working model
+        model_name = await get_working_model(self.key)
+        
         batch_text = "\n".join([f"ID:{i}|Src:{item['source']}|Title:{item['title']}|Desc:{item['summary'][:100]}" for i,item in enumerate(items)])
         prompt = f"""
-        You are a SOC Analyst. Analyze these threat intel items.
+        Analyze threat intel.
+        Input Format: ID:0|Src:Source|Title:Title|Desc:Description
         
-        Input Format:
-        ID:0|Src:Source|Title:Title|Desc:Description
-        
-        Tasks:
-        1. Categorize: [Phishing, Vulnerability, Research, Israel Focus, Malware, DDoS, General].
-        2. Assign Severity: [Critical, High, Medium, Low].
-        3. Summarize Impact: 5 words max.
-        4. Summary: One sentence summary.
-
-        Rules:
-        - If 'Israel' or 'Iran' or 'Hamas' is mentioned -> 'Israel Focus'.
-        - If 'CISA KEV' -> Severity 'Critical'.
-        - Marketing/Sales posts -> Category 'IGNORE'.
-        
-        Output **ONLY** valid JSON array:
+        Output JSON Array only:
         [
-          {{"id": 0, "category": "Malware", "severity": "High", "impact": "Data theft risk", "summary": "Short summary here."}}
+          {{"id": 0, "category": "Malware/Phishing/Vulnerability/Israel Focus/General", "severity": "Critical/High/Medium/Low", "impact": "Short impact", "summary": "One sentence summary"}}
         ]
         
-        Items to analyze:
+        Rules: 'CISA'=Critical. 'Israel' mention = Israel Focus.
+        
+        Items:
         {batch_text}
         """
         
@@ -392,39 +349,31 @@ class AIBatchProcessor:
             model = genai.GenerativeModel(model_name)
             res = await model.generate_content_async(prompt)
             
+            # Parse JSON
             text = res.text.replace('```json','').replace('```','').strip()
             if not text.startswith('['): 
                 start = text.find('[')
                 end = text.rfind(']') + 1
-                if start != -1 and end != -1:
-                    text = text[start:end]
+                text = text[start:end]
             
             return json.loads(text)
         except Exception as e:
-            print(f"DEBUG: AI Batch failed with {model_name}: {e}")
-            # Fallback
-            return [{"id": i, "category": "General", "severity": "Medium", "impact": "AI Error", "summary": item['summary'][:200]} for i, item in enumerate(items)]
+            print(f"AI Batch Failed ({e}). Using raw data.")
+            return fallback_data
 
     async def analyze_single_ioc(self, ioc, data):
-        if not self.key: return "⚠️ Error: No Gemini API Key provided."
+        if not self.key: return "⚠️ Error: No Gemini API Key."
         
-        model_name = await self._get_model()
+        model_name = await get_working_model(self.key)
         context_str = json.dumps(data, indent=2, default=str)
         prompt = f"""
-        Act as a Senior SOC Analyst. Write a short incident response note for IOC: {ioc}.
+        Act as a SOC Analyst. Incident Note for IOC: {ioc}.
+        Raw Data: {context_str}
         
-        Raw Data:
-        {context_str}
-        
-        Structure (Use Markdown):
-        ## 🚨 IOC Assessment: [Malicious/Suspicious/Safe]
-        **Confidence:** [0-100%]
-        
-        ### 🔍 Key Findings
-        * bullet points of critical data.
-        
-        ### 🛡️ Recommendation
-        [Actionable advice]
+        Provide:
+        1. **Verdict**: (Malicious/Safe)
+        2. **Key Findings**: (Bullet points)
+        3. **Recommendation**: (Block/Monitor/Ignore)
         """
         
         try:
@@ -433,20 +382,33 @@ class AIBatchProcessor:
             res = await model.generate_content_async(prompt)
             return res.text
         except Exception as e:
-            return f"❌ Error: AI Service Unavailable ({e}). Please analyze raw data manually."
+            if "429" in str(e): return "⚠️ AI Quota Exceeded. Please try again later or check raw data below."
+            return f"❌ AI Error: {str(e)}"
 
 def save_reports(raw, analyzed):
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        amap = {r['id']:r for r in analyzed if isinstance(r, dict) and r.get('category')!='IGNORE'}
+        amap = {r['id']:r for r in analyzed if isinstance(r, dict)}
         cnt = 0
         for i,item in enumerate(raw):
+            # If AI failed, use default values
+            cat = "General"
+            sev = "Medium"
+            imp = "Unknown"
+            summ = item['summary']
+            
             if i in amap:
                 a = amap[i]
+                cat = a.get('category', cat)
+                sev = a.get('severity', sev)
+                imp = a.get('impact', imp)
+                summ = a.get('summary', summ)
+                
+            if cat != 'IGNORE':
                 try:
                     c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,impact,summary) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], a.get('category','General'), a.get('severity','Low'), a.get('impact','None'), a.get('summary','')))
+                        (datetime.datetime.now().isoformat(), item['date'], item['source'], item['url'], item['title'], cat, sev, imp, summ))
                     if c.rowcount > 0: cnt += 1
                 except: pass
         conn.commit()
