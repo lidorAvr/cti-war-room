@@ -39,12 +39,6 @@ def init_db():
 
 # --- Helper: Input Sanitizer ---
 def sanitize_ioc(ioc):
-    """
-    Cleans the input to handle IP:Port combinations.
-    Returns a tuple: (clean_ioc, port_if_exists)
-    Example: "1.1.1.1:80" -> ("1.1.1.1", "80")
-             "google.com" -> ("google.com", None)
-    """
     ioc = ioc.strip()
     # Regex for IP:Port
     match = re.match(r'^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)$', ioc)
@@ -66,13 +60,19 @@ class IOCExtractor:
         
         return {"IPs": ips, "Domains": domains, "Hashes": hashes}
 
-# --- SOC Tools: Universal Lookup (SMART & ROBUST VERSION) ---
+# --- SOC Tools: Universal Lookup (Authenticated) ---
 class ThreatLookup:
-    def __init__(self):
+    def __init__(self, api_key=None):
+        self.api_key = api_key
         self.tf_url = "https://threatfox-api.abuse.ch/api/v1/"
         self.uh_url = "https://urlhaus-api.abuse.ch/v1/url/"
         self.uh_host = "https://urlhaus-api.abuse.ch/v1/host/"
         self.uh_payload = "https://urlhaus-api.abuse.ch/v1/payload/"
+        
+        # כותרות קבועות עם המפתח אם קיים
+        self.headers = {}
+        if self.api_key:
+            self.headers['API-KEY'] = self.api_key
 
     def identify_type(self, ioc):
         ioc = ioc.strip()
@@ -82,46 +82,52 @@ class ThreatLookup:
         return "domain"
 
     def query_threatfox(self, ioc):
-        # 1. ניסיון ראשון: חיפוש מדויק (כפי שהוזן)
+        # 1. ניסיון ראשון: חיפוש מדויק
         payload = {"query": "search_ioc", "search_term": ioc}
         try:
-            res = requests.post(self.tf_url, json=payload, timeout=5)
+            res = requests.post(self.tf_url, json=payload, headers=self.headers, timeout=10)
             data = res.json()
             if data.get("query_status") == "ok":
-                return data.get("data", [])
+                return {"status": "found", "data": data.get("data", [])}
+            elif data.get("query_status") != "no_result":
+                # החזרת שגיאה אמיתית מה-API אם יש (למשל Auth Error)
+                return {"status": "error", "msg": data.get("query_status")}
             
-            # 2. ניסיון שני: אם זה IP:Port, ננסה לחפש רק את ה-IP
+            # 2. ניסיון שני: ניקוי פורט
             clean_ip, port = sanitize_ioc(ioc)
-            if port: # אם היה פורט בקלט המקורי
+            if port:
                 payload["search_term"] = clean_ip
-                res = requests.post(self.tf_url, json=payload, timeout=5)
+                res = requests.post(self.tf_url, json=payload, headers=self.headers, timeout=10)
                 data = res.json()
                 if data.get("query_status") == "ok":
-                    return data.get("data", [])
+                    return {"status": "found", "data": data.get("data", [])}
             
-            return []
-        except: return []
+            return {"status": "not_found"}
+        except Exception as e:
+            return {"status": "error", "msg": str(e)}
 
     def query_urlhaus(self, ioc):
-        # ניקוי פורט אם קיים (URLhaus לא אוהב פורטים בחיפוש HOST)
         clean_ioc, _ = sanitize_ioc(ioc)
         ioc_type = self.identify_type(clean_ioc)
         
         try:
             if ioc_type == "hash":
-                res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, timeout=5)
+                res = requests.post(self.uh_payload, data={'md5_hash': clean_ioc} if len(clean_ioc)==32 else {'sha256_hash': clean_ioc}, headers=self.headers, timeout=10)
             elif ioc_type == "url":
-                res = requests.post(self.uh_url, data={'url': ioc}, timeout=5) # URL מלא משאירים כמו שהוא
+                res = requests.post(self.uh_url, data={'url': ioc}, headers=self.headers, timeout=10)
             else:
-                res = requests.post(self.uh_host, data={'host': clean_ioc}, timeout=5)
+                res = requests.post(self.uh_host, data={'host': clean_ioc}, headers=self.headers, timeout=10)
 
             if res.status_code == 200:
                 data = res.json()
-                if data.get("query_status") == "ok": return data
+                if data.get("query_status") == "ok": return {"status": "found", "data": data}
                 elif "urls" in data and len(data["urls"]) > 0:
-                    return {"query_status": "ok", "url_status": "active_host", "tags": ["hosting_malware"], "urls_count": len(data["urls"])}
-            return None
-        except: return None
+                    return {"status": "found", "data": {"url_status": "active_host", "tags": ["hosting_malware"], "urls_count": len(data["urls"])}}
+                elif data.get("query_status") != "no_results":
+                     return {"status": "error", "msg": data.get("query_status")}
+            
+            return {"status": "not_found"}
+        except Exception as e: return {"status": "error", "msg": str(e)}
 
 # --- Existing Collectors ---
 class MitreCollector:
@@ -152,10 +158,7 @@ class AbuseIPDBChecker:
     def __init__(self, key): self.key = key
     def check_ip(self, ip):
         if not self.key: return {"error": "Missing Key"}
-        
-        # Sanitization: AbuseIPDB חייב לקבל IP נקי ללא פורט
         clean_ip, _ = sanitize_ioc(ip)
-        
         try:
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': clean_ip, 'maxAgeInDays': 90})
             return {"success": True, "data": res.json()['data']} if res.status_code==200 else {"error": res.text}
