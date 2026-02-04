@@ -7,7 +7,9 @@ import datetime
 import pytz
 import streamlit.components.v1 as components
 from streamlit_autorefresh import st_autorefresh
-from utils import * from dateutil import parser
+# --- FIXED IMPORT LINES BELOW ---
+from utils import *
+from dateutil import parser
 
 # --- CONFIGURATION ---
 st.set_page_config(
