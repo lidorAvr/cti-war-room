@@ -29,13 +29,24 @@ SEV_MAP = {
     "Low": "נמוך"
 }
 
-# --- UI STYLING (RTL & GRAPHICS) ---
+# --- UI STYLING (FIXED FOR HEBREW UI) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Assistant:wght@300;400;700&display=swap');
     
+    /* Global Font and Direction */
     html, body, [class*="css"] {
         font-family: 'Assistant', sans-serif;
+    }
+    
+    /* Main App Container - Handle RTL for Text Only */
+    .stApp {
+        direction: rtl; /* Sets base direction to RTL */
+        text-align: right;
+    }
+    
+    /* Fix Sidebar Layout issue */
+    section[data-testid="stSidebar"] {
         direction: rtl;
         text-align: right;
     }
@@ -45,12 +56,11 @@ st.markdown("""
         background-color: #ffffff; 
         padding: 15px; 
         border-radius: 10px; 
-        border-right: 5px solid #333; /* Switch to right side for RTL */
+        border-right: 5px solid #333; 
         margin-bottom: 12px; 
         color: #111 !important; 
         box-shadow: 0 2px 5px rgba(0,0,0,0.05);
         text-align: right;
-        direction: rtl;
     }
     
     /* Important for mixed English/Hebrew text */
@@ -71,12 +81,32 @@ st.markdown("""
     a { text-decoration: none; color: #0066cc !important; font-weight: bold; }
     a:hover { text-decoration: underline; }
     
-    /* Override Streamlit Inputs for RTL */
-    .stTextInput input { direction: ltr; text-align: left; } /* IOCs are usually English */
-    .stMarkdown { text-align: right; }
+    /* Fix Input Fields (IOCs are English) */
+    .stTextInput input { 
+        direction: ltr !important; 
+        text-align: left !important; 
+    } 
     
-    /* Sidebar adjustments */
-    section[data-testid="stSidebar"] { direction: rtl; text-align: right; }
+    /* Fix Code Blocks (English) */
+    .stCodeBlock, code {
+        direction: ltr !important;
+        text-align: left !important;
+    }
+
+    /* Fix Radio Buttons (Filters) alignment */
+    div[role="radiogroup"] {
+        direction: rtl;
+        text-align: right;
+        display: flex;
+        flex-direction: row-reverse; /* Ensure they flow correctly */
+        justify-content: flex-end;
+        gap: 15px;
+    }
+    
+    /* Fix specific Streamlit elements that break in RTL */
+    div[data-testid="stMetricValue"] {
+        direction: ltr; /* Metrics often contain numbers */
+    }
     
 </style>
 """, unsafe_allow_html=True)
@@ -120,13 +150,14 @@ with st.sidebar:
     st.info("המערכת מתרעננת אוטומטית כל 15 דקות.")
 
 # --- MAIN TABS ---
+# Tabs names in Hebrew
 tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 עדכונים חיים", "🛠️ חקירות SOC", "🧠 מודיעין אסטרטגי", "🌍 מפת איומים"])
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     
-    # 1. Fetch Logic (INCD + Others)
+    # 1. Fetch Logic
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
     conn.close()
@@ -145,27 +176,21 @@ with tab_feed:
     
     df_final = pd.concat([df_incd_filtered, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
-    # 2. FILTERING SYSTEM (User Request)
+    # 2. FILTERING SYSTEM
     if df_final.empty:
         st.info("אין התראות פעילות ב-48 השעות האחרונות.")
     else:
-        # Create categories count
-        # Map raw english categories to Hebrew for display
+        # Hebrew mapping for filters
         df_final['display_cat'] = df_final['category'].map(CAT_MAP).fillna(df_final['category'])
-        
-        # Calculate counts
         cat_counts = df_final['display_cat'].value_counts()
         
-        # Create options list: "All (X)" + "Cat (Y)"
-        options = ["כל הידיעות"] + list(cat_counts.index)
-        
-        # Format labels for the radio button
         radio_labels = []
-        mapping_back = {} # To know which string maps to which category
+        mapping_back = {} 
         
         total_count = len(df_final)
-        radio_labels.append(f"כל הידיעות ({total_count})")
-        mapping_back[f"כל הידיעות ({total_count})"] = "ALL"
+        label_all = f"כל הידיעות ({total_count})"
+        radio_labels.append(label_all)
+        mapping_back[label_all] = "ALL"
         
         for cat in cat_counts.index:
             count = cat_counts[cat]
@@ -173,12 +198,11 @@ with tab_feed:
             radio_labels.append(label)
             mapping_back[label] = cat
             
-        # Display Filters as "Pills" (using horizontal radio)
         st.write("📂 **סינון לפי נושא:**")
-        selected_label = st.radio("Filters", radio_labels, horizontal=True, label_visibility="collapsed")
+        # Ensure horizontal layout
+        selected_label = st.radio("Select Category", radio_labels, horizontal=True, label_visibility="collapsed")
         
-        # Apply Filter
-        selected_cat_clean = mapping_back[selected_label]
+        selected_cat_clean = mapping_back.get(selected_label, "ALL")
         
         if selected_cat_clean != "ALL":
             df_display = df_final[df_final['display_cat'] == selected_cat_clean]
@@ -191,12 +215,9 @@ with tab_feed:
         for _, row in df_display.iterrows():
             pub_date = row['dt']
             
-            # Styling
             sev_heb = SEV_MAP.get(row['severity'], row['severity'])
             sev_class = "tag-critical" if "Critical" in row['severity'] else ""
             source_tag = "tag-incd" if row['source'] == "INCD" else "tag-time"
-            
-            # Use 'category' (English) to find icon/color if needed, but display 'display_cat' (Hebrew)
             cat_display = row['display_cat']
             
             st.markdown(f"""
@@ -216,7 +237,6 @@ with tab_feed:
 # --- TAB 2: SOC TOOLBOX ---
 with tab_tools:
     st.subheader("🛠️ חדר חקירות - בדיקת מזהים (IOC)")
-    st.info("תומך בכתובות IP, דומיינים ו-Hashes.")
     
     c_input, c_btn = st.columns([4, 1])
     with c_input:
@@ -258,6 +278,7 @@ with tab_tools:
                 if isinstance(results.get('virustotal'), dict):
                     stats = results['virustotal'].get('last_analysis_stats', {})
                     malicious = stats.get('malicious', 0)
+                    # Translate stats key for display if needed or keep english for tech clarity
                     color = "red" if malicious > 0 else "green"
                     st.markdown(f":{color}[**זיהויים זדוניים: {malicious}**]")
                     st.json(stats)
@@ -266,7 +287,10 @@ with tab_tools:
             with c2:
                 st.markdown("### 🌐 URLScan")
                 if ioc_type == 'domain' and isinstance(results.get('urlscan'), dict):
-                    st.write(f"פסיקה: {results['urlscan'].get('verdict', {}).get('overall', 'Unknown')}")
+                    verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
+                    # Simple translation map for UI
+                    v_map = {"malicious": "זדוני", "clean": "נקי", "no_classification": "ללא סיווג"}
+                    st.write(f"פסיקה: {v_map.get(verdict, verdict)}")
                     if results['urlscan'].get('screenshot'): st.image(results['urlscan']['screenshot'])
                 else: st.write("לא רלוונטי")
                 
@@ -275,12 +299,12 @@ with tab_tools:
                 if ioc_type == 'ip' and isinstance(results.get('abuseipdb'), dict):
                     score = results['abuseipdb'].get('abuseConfidenceScore', 0)
                     st.metric("ציון זדוניות", f"{score}%")
-                    st.write(f"ספק: {results['abuseipdb'].get('isp')}")
+                    st.write(f"ספק (ISP): {results['abuseipdb'].get('isp')}")
                 else: st.write("לא רלוונטי")
 
             st.divider()
             st.subheader("🤖 ניתוח אנליסט בכיר (AI Mentor)")
-            with st.spinner("מגבש חוות דעת מקצועית..."):
+            with st.spinner("מגבש חוות דעת מקצועית בעברית..."):
                 proc = AIBatchProcessor(GROQ_KEY)
                 report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results))
                 st.markdown(report)
@@ -302,7 +326,7 @@ with tab_strat:
             with col_acts:
                 if st.button(f"🏹 צור שאילתות ציד ({actor['name']})"):
                     proc = AIBatchProcessor(GROQ_KEY)
-                    with st.spinner("מייצר שאילתות XQL ו-YARA..."):
+                    with st.spinner("מייצר שאילתות XQL ו-YARA (הסברים בעברית)..."):
                         res = asyncio.run(proc.generate_hunting_queries(actor))
                         st.markdown(res)
     
@@ -310,7 +334,6 @@ with tab_strat:
     st.subheader("🔥 מזהים חמים (Trending IOCs)")
     st.info("אינדיקטורים אחרונים שזוהו בקמפיינים נגד ישראל (סימולציה)")
     
-    # Table simulation in Hebrew context
     st.markdown("""
     | אינדיקטור | סוג | שחקן | רמת ביטחון |
     |-----------|------|-------|------------|
