@@ -52,7 +52,7 @@ def get_ioc_type(ioc):
     if "http" in ioc or "/" in ioc: return "url"
     return "domain"
 
-# --- Health Check Manager (New!) ---
+# --- Health Check Manager (IMPROVED DEBUG) ---
 class ConnectionManager:
     @staticmethod
     def check_gemini(key):
@@ -67,29 +67,33 @@ class ConnectionManager:
     def check_abuseipdb(key):
         if not key: return False, "Missing Key"
         try:
+            # בדיקת IP סתמי (Google DNS)
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': key}, params={'ipAddress': '8.8.8.8'}, timeout=5)
             if res.status_code == 200: return True, "Connected"
-            elif res.status_code == 401: return False, "Invalid API Key"
-            else: return False, f"HTTP {res.status_code}"
+            elif res.status_code == 401: return False, "Invalid API Key (Check spaces?)"
+            else: return False, f"HTTP {res.status_code}: {res.text}"
         except Exception as e: return False, str(e)
 
     @staticmethod
     def check_abusech(key):
         if not key: return False, "Missing Key"
         try:
-            # בדיקה מול ThreatFox עם IOC סתמי כדי לראות אם המפתח מתקבל
-            payload = {"query": "search_ioc", "search_term": "google.com"}
+            # בדיקת ThreatFox
+            payload = {"query": "get_recent", "days": 1}
             headers = {'API-KEY': key}
             res = requests.post("https://threatfox-api.abuse.ch/api/v1/", json=payload, headers=headers, timeout=5)
             
             if res.status_code == 200:
                 data = res.json()
-                if data.get("query_status") in ["ok", "no_result"]: return True, "Connected"
-                return False, f"API Error: {data.get('query_status')}"
-            elif res.status_code == 401 or res.status_code == 403:
-                return False, "Invalid Key / Forbidden"
+                if data.get("query_status") == "ok": return True, "Connected"
+                # החזרת הודעת השגיאה המקורית מהשרת לדיבאג
+                return False, f"Server Error: {data.get('data', data.get('query_status'))}"
+            elif res.status_code == 401:
+                return False, "401 Unauthorized (Wrong Key?)"
+            elif res.status_code == 403:
+                return False, "403 Forbidden (Account inactive?)"
             else:
-                return False, f"HTTP {res.status_code}"
+                return False, f"HTTP {res.status_code}: {res.text}"
         except Exception as e: return False, str(e)
 
 # --- SOC Tools: IOC Extractor ---
@@ -119,18 +123,17 @@ class ThreatLookup:
         return {'API-KEY': self.api_key} if self.api_key else {}
 
     def query_threatfox(self, ioc):
+        # ThreatFox תומך רק בחיפוש מדויק. ננסה לנקות רווחים
+        ioc = ioc.strip()
         payload = {"query": "search_ioc", "search_term": ioc}
         try:
             res = requests.post(self.tf_url, json=payload, headers=self._get_headers(), timeout=10)
-            
-            if res.status_code in [401, 403]:
-                return {"status": "error", "msg": "Invalid API Key or Forbidden"}
-            
             data = res.json()
+            
             if data.get("query_status") == "ok":
                 return {"status": "found", "data": data.get("data", [])}
             elif data.get("query_status") == "no_result":
-                # Retry without port
+                # נסיון שני: הסרת פורט אם קיים (למשל 1.1.1.1:80 -> 1.1.1.1)
                 clean_ip, port = sanitize_ioc(ioc)
                 if port:
                     payload["search_term"] = clean_ip
@@ -140,9 +143,8 @@ class ThreatLookup:
                         return {"status": "found", "data": data.get("data", [])}
                 return {"status": "not_found"}
             else:
-                return {"status": "error", "msg": data.get("query_status", "Unknown Error")}
-        except Exception as e:
-            return {"status": "error", "msg": str(e)}
+                return {"status": "error", "msg": data.get("data", data.get("query_status"))}
+        except Exception as e: return {"status": "error", "msg": str(e)}
 
     def query_urlhaus(self, ioc):
         clean_ioc, _ = sanitize_ioc(ioc)
@@ -156,9 +158,6 @@ class ThreatLookup:
             else:
                 res = requests.post(self.uh_host, data={'host': clean_ioc}, headers=self._get_headers(), timeout=10)
 
-            if res.status_code in [401, 403]:
-                return {"status": "error", "msg": "Invalid API Key"}
-
             if res.status_code == 200:
                 data = res.json()
                 if data.get("query_status") == "ok": 
@@ -169,11 +168,10 @@ class ThreatLookup:
                     return {"status": "not_found"}
                 else:
                     return {"status": "error", "msg": data.get("query_status")}
-            
             return {"status": "error", "msg": f"HTTP {res.status_code}"}
         except Exception as e: return {"status": "error", "msg": str(e)}
 
-# --- Collectors ---
+# --- Collectors (Feed, Sheets, MITRE) ---
 class MitreCollector:
     def get_latest_updates(self):
         try:
@@ -207,7 +205,7 @@ class AbuseIPDBChecker:
             res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.key}, params={'ipAddress': clean_ip, 'maxAgeInDays': 90})
             if res.status_code == 200:
                 return {"success": True, "data": res.json()['data']}
-            elif res.status_code == 422: # IP לא תקין
+            elif res.status_code == 422:
                 return {"error": "Skipped: Not a valid IP address"}
             elif res.status_code == 401:
                 return {"error": "Invalid API Key"}
