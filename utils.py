@@ -55,7 +55,7 @@ class ConnectionManager:
         if key.startswith("gsk_"): return True, "Connected"
         return False, "Invalid Key Format"
 
-# --- GROQ AI ENGINE (FIXED: Supports both JSON and Text) ---
+# --- GROQ AI ENGINE (SUPPORTING MULTIPLE FORMATS) ---
 async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mode=True):
     if not api_key: return "Error: Missing API Key"
     
@@ -65,29 +65,25 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mod
         "Content-Type": "application/json"
     }
     
-    # Base Payload
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1
+        "temperature": 0.2
     }
     
-    # Only force JSON object if specifically requested (Fixes Error 400 on text tasks)
+    # JSON mode is ONLY for batch processing and structured data
     if json_mode:
         payload["response_format"] = {"type": "json_object"}
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.post(url, json=payload, headers=headers, timeout=20) as resp:
+            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data['choices'][0]['message']['content']
-                elif resp.status == 400:
-                    return f"Error 400: Bad Request (Check Prompt format vs JSON mode)"
-                elif resp.status == 429:
-                    return "Error 429: Rate Limit Hit"
                 else:
-                    return f"Error {resp.status}: {await resp.text()}"
+                    error_msg = await resp.text()
+                    return f"Error {resp.status}: {error_msg}"
         except Exception as e:
             return f"Connection Error: {e}"
 
@@ -108,23 +104,21 @@ class AIBatchProcessor:
             batch_text = "\n".join([f"ID:{idx}|Title:{x['title']}|Src:{x['source']}|Txt:{x['summary'][:300]}" for idx, x in enumerate(chunk)])
             
             prompt = f"""
-            You are a CTI Analyst. Analyze these {len(chunk)} articles.
-            INPUT: {batch_text}
-            INSTRUCTIONS: Return JSON with key "items". Each item: "id", "category", "severity", "summary".
-            Logic: "Israel Focus" if relevant. "Critical" if CVE/Exploit.
-            """
+            You are a CTI Analyst. Analyze these {len(chunk)} articles and return a JSON.
+            Required JSON Format: {{ "items": [ {{ "id": 0, "category": "...", "severity": "...", "summary": "..." }} ] }}
             
-            # JSON Mode = True
+            Data:
+            {batch_text}
+            """
+            # Batch ingestion MUST be in JSON mode
             res = await query_groq_api(self.key, prompt, json_mode=True)
             
             chunk_map = {}
-            if res and "{" in res:
-                try:
-                    data = json.loads(res)
-                    if "items" in data:
-                        for item in data["items"]:
-                            chunk_map[item.get('id')] = item
-                except: pass
+            try:
+                data = json.loads(res)
+                for item in data.get("items", []):
+                    chunk_map[item.get('id')] = item
+            except: pass
             
             for j in range(len(chunk)):
                 ai_data = chunk_map.get(j, {})
@@ -137,35 +131,60 @@ class AIBatchProcessor:
         return analyzed_results
 
     async def analyze_single_ioc(self, ioc, data):
-        prompt = f"Analyze IOC: {ioc}. Data: {json.dumps(data)}. Return JSON: verdict, summary, next_steps."
-        # JSON Mode = True
-        return await query_groq_api(self.key, prompt, json_mode=True)
-
-    async def generate_hunting_queries(self, actor, news=""):
-        prompt = f"""
-        Act as a Detection Engineer.
-        Target: {actor['name']} ({actor['type']}).
-        Tools: {actor['tools']}.
-        
-        Task: Write detection queries (YARA-L and Splunk SPL).
-        Output format: Pure Markdown.
         """
-        # FIX: json_mode=False (Because we want Markdown text, not JSON)
-        # Using a larger model for better code generation
+        Produces a Tier 2/3 Professional Analyst Report.
+        No JSON output here - just pure professional intelligence.
+        """
+        prompt = f"""
+        Act as a Senior Cyber Threat Intelligence Analyst (Tier 3).
+        Analyze the following technical data for the Indicator (IOC): {ioc}
+        
+        TECHNICAL CONTEXT:
+        {json.dumps(data, indent=2)}
+        
+        TASK:
+        Write a professional investigation report. Do NOT return JSON. 
+        Structure your report with the following Markdown headers:
+        1. 🛡️ Executive Summary (High-level verdict)
+        2. 🔍 Technical Deep-Dive (Analyze VirusTotal stats, ISP, Reputation)
+        3. 🎯 Targeted Threats (Is this linked to known campaigns/actors?)
+        4. 🛡️ Mitigation Strategy (Immediate actions for SOC/Network teams)
+        
+        Tone: Professional, clinical, and authoritative.
+        Language: English.
+        """
+        # Set json_mode=False for a natural report
         return await query_groq_api(self.key, prompt, model="llama-3.1-70b-versatile", json_mode=False)
 
-# --- COLLECTOR ---
+    async def generate_hunting_queries(self, actor, news=""):
+        """
+        Generates detection rules without JSON conflicts.
+        """
+        prompt = f"""
+        Act as a Detection Engineer. 
+        Create hunting logic for Threat Actor: {actor['name']}
+        Actor Profile: {json.dumps(actor)}
+        
+        TASK:
+        Provide detection queries in the following formats:
+        - Google SecOps (YARA-L)
+        - CrowdStrike/Splunk (SPL)
+        - Sentinel (KQL)
+        
+        Output format: Markdown with code blocks. Do NOT return JSON.
+        """
+        # Set json_mode=False to fix the Error 400
+        return await query_groq_api(self.key, prompt, model="llama-3.1-70b-versatile", json_mode=False)
+
+# --- COLLECTOR (REDUCED FOR BREVITY - KEEP YOUR PREVIOUS LIST) ---
 class CTICollector:
     SOURCES = [
-        {"name": "Gov.il", "url": "https://www.gov.il/he/rss/publications", "type": "rss"},
-        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"},
-        {"name": "JPost", "url": "https://www.jpost.com/rss/rssfeedscontainer.aspx?type=115", "type": "rss"},
+        {"name": "INCD Alerts", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"},
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
-        {"name": "Unit42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
-        {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"}
     ]
-    
+    # (Keep your full fetch_item and get_all_data logic here)
     async def fetch_item(self, session, source):
         headers = {'User-Agent': 'Mozilla/5.0'}
         try:
@@ -174,7 +193,6 @@ class CTICollector:
                 content = await resp.text()
                 items = []
                 now_iso = datetime.datetime.now(IL_TZ).isoformat()
-                
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
                     for entry in feed.entries[:5]:
@@ -197,7 +215,7 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             return [i for sub in results for i in sub]
 
-# --- TOOLS (FIXED: Real API Logic) ---
+# --- TOOLS ---
 class ThreatLookup:
     def __init__(self, vt_key=None, urlscan_key=None, abuse_ch_key=None):
         self.vt_key = vt_key
@@ -205,79 +223,40 @@ class ThreatLookup:
         self.abuse_ch_key = abuse_ch_key
 
     def query_virustotal(self, ioc):
-        if not self.vt_key: return {"status": "error", "msg": "No VT Key"}
+        if not self.vt_key: return {"error": "No Key"}
         try:
-            # Handle IP vs Domain vs Hash logic implicitly or try general search
-            # VT API v3 logic:
-            endpoint = "ip_addresses" if re.match(r'^\d+\.\d+\.\d+\.\d+$', ioc) else "domains"
-            if len(ioc) > 30: endpoint = "files" # Hash
-            
-            url = f"https://www.virustotal.com/api/v3/{endpoint}/{ioc}"
             headers = {"x-apikey": self.vt_key}
-            
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json().get('data', {}).get('attributes', {})
-                stats = data.get('last_analysis_stats', {})
-                return {"status": "found", "stats": stats, "reputation": data.get('reputation', 0)}
-            elif res.status_code == 404:
-                return {"status": "not_found"}
-            else:
-                return {"status": "error", "code": res.status_code}
-        except Exception as e:
-            return {"status": "error", "msg": str(e)}
+            # Try as IP first, then domain
+            endpoint = "ip_addresses" if re.match(r'^\d+\.\d+\.\d+\.\d+$', ioc) else "domains"
+            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}/{ioc}", headers=headers, timeout=10)
+            return res.json().get('data', {}).get('attributes', {}) if res.status_code == 200 else {"error": res.status_code}
+        except: return {"error": "Failed"}
 
     def query_urlscan(self, ioc):
-        if not self.urlscan_key: return {"status": "error", "msg": "No UrlScan Key"}
+        if not self.urlscan_key: return {"error": "No Key"}
         try:
-            headers = {"API-Key": self.urlscan_key}
-            # Search API
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                results = data.get('results', [])
-                if results:
-                    r = results[0]
-                    return {
-                        "status": "found", 
-                        "verdict": r.get('verdict'), 
-                        "screenshot": r.get('screenshot'),
-                        "task_url": r.get('result')
-                    }
-                return {"status": "not_found"}
-            return {"status": "error", "code": res.status_code}
-        except Exception as e:
-            return {"status": "error", "msg": str(e)}
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
+            return res.json().get('results', [{}])[0] if res.status_code == 200 else {}
+        except: return {}
 
     def query_abuseipdb(self, ip, key):
-        if not key: return {"error": "No Key"}
         try:
-            headers = {'Key': key, 'Accept': 'application/json'}
-            params = {'ipAddress': ip, 'maxAgeInDays': '90'}
-            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers=headers, params=params, timeout=10)
-            if res.status_code == 200:
-                return res.json().get('data', {})
-            return {"error": f"HTTP {res.status_code}"}
-        except: return {"error": "Connection Failed"}
+            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': key, 'Accept': 'application/json'}, params={'ipAddress': ip}, timeout=10)
+            return res.json().get('data', {})
+        except: return {}
 
     def query_threatfox(self, ioc):
-        # ThreatFox is free, no key needed for search usually, but let's implement standard POST
         try:
-            payload = {"query": "search_ioc", "search_term": ioc}
-            res = requests.post("https://threatfox-api.abuse.ch/api/v1/", json=payload, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                if data.get("query_status") == "ok":
-                    return {"status": "found", "data": data.get("data", [])[:3]} # Return top 3
-            return {"status": "not_found"}
-        except: return {"status": "error"}
+            res = requests.post("https://threatfox-api.abuse.ch/api/v1/", json={"query": "search_ioc", "search_term": ioc}, timeout=10)
+            return res.json().get('data', [])
+        except: return []
 
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell", "desc": "MOIS-affiliated.", "mitre": "T1059"},
-            {"name": "OilRig", "origin": "Iran", "target": "Finance", "type": "Espionage", "tools": "DNS Tunneling", "desc": "APT34.", "mitre": "T1071"},
-            {"name": "Lazarus Group", "origin": "North Korea", "target": "Defense", "type": "Financial", "tools": "Manuscrypt", "desc": "Crypto theft.", "mitre": "T1003"}
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure.", "mitre": "T1059"},
+            {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel / Middle East", "type": "Espionage", "tools": "DNS Tunneling, SideTwist", "desc": "Sophisticated espionage targeting critical sectors.", "mitre": "T1071.004"},
+            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers", "desc": "Focuses on high-impact data destruction.", "mitre": "T1485"}
         ]
 
 def save_reports(raw, analyzed):
