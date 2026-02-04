@@ -46,6 +46,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
+    # Cleanup: Keep INCD for 96h, others for 48h
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     limit_incd = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=96)).isoformat()
     
@@ -68,12 +69,12 @@ def _is_url_processed(url):
 class ConnectionManager:
     @staticmethod
     def check_groq(key):
-        if not key: return False, "חסר מפתח"
-        if key.startswith("gsk_"): return True, "מחובר"
-        return False, "פורמט לא תקין"
+        if not key: return False, "Missing Key"
+        if key.startswith("gsk_"): return True, "Connected"
+        return False, "Invalid Format"
 
 async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mode=True):
-    if not api_key: return "שגיאה: חסר מפתח API"
+    if not api_key: return "Error: Missing API Key"
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
@@ -96,25 +97,18 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
-        # PROMPT ENGINEERED FOR FLUENT HEBREW REWRITING (NOT TRANSLATION)
         system_instruction = """
-        Role: Expert Israeli Cyber Intelligence Analyst.
-        Task: Analyze raw cyber news and rewrite them into a professional Hebrew Intelligence Feed.
-        
-        STRICT RULES:
-        1. DO NOT TRANSLATE. Read the English text, understand it, and write a NEW Hebrew text.
-        2. HEBREW TITLE: Short, punchy, focused (Max 7 words). No clickbait.
-        3. HEBREW SUMMARY: Professional, clear Hebrew. 3-4 sentences. Explain WHAT happened and WHY it matters. Do NOT just repeat the title.
-        4. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
-        5. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
-        
-        Output JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title_he": "...", "summary_he": "..."}]}
+        You are a CTI Analyst. Analyze cyber news.
+        1. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        2. CATEGORY (Choose ONE strictly): 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
+        3. SUMMARY: Concise English summary (max 25 words). Focus on the threat.
+        Return JSON format: {"items": [{"id": 0, "category": "...", "severity": "...", "summary": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
-            batch_text = "\n".join([f"ID:{idx}|Title:{x['title']}|Txt:{x['summary'][:300]}" for idx, x in enumerate(chunk)])
-            prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
+            batch_text = "\n".join([f"ID:{idx}|Title:{x['title']}|Src:{x['source']}|Txt:{x['summary'][:250]}" for idx, x in enumerate(chunk)])
+            prompt = f"{system_instruction}\nData to Analyze:\n{batch_text}"
             
             res = await query_groq_api(self.key, prompt, json_mode=True)
             chunk_map = {}
@@ -125,34 +119,24 @@ class AIBatchProcessor:
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
-                # Save the AI-Generated Hebrew Title/Summary into the standard fields
                 results.append({
                     "category": ai.get('category', 'News'), 
                     "severity": ai.get('severity', 'Medium'), 
-                    "title": ai.get('title_he', chunk[j]['title']), # Use AI Hebrew Title
-                    "summary": ai.get('summary_he', chunk[j]['summary']) # Use AI Hebrew Summary
+                    "summary": ai.get('summary', chunk[j]['summary'][:200])
                 })
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
         prompt = f"""
-        Act as a Senior Israeli SOC Tier 3 Analyst.
-        Task: Analyze {ioc} ({ioc_type}) and write a report in HEBREW.
+        Act as a Tier 3 CTI Analyst.
+        Target: {ioc} ({ioc_type}).
         Raw Data: {json.dumps(data)}
         
-        LANGUAGE RULES:
-        - Write naturally in Hebrew (Do not translate literally).
-        - Use professional terminology:
-          * Malicious -> **זדוני**
-          * Suspicious -> **חשוד**
-          * Clean -> **נקי**
-          * Vulnerability -> **חולשה**
-        
         Output Structure (Markdown):
-        1. **פסיקת מנהלים (Verdict)**: Clear decision.
-        2. **ניתוח טכני (Technical Analysis)**: Deep dive into findings.
-        3. **משמעות (Significance)**: What is this threat?
-        4. **המלצות אופרטיביות (Action Items)**: Block/Monitor/Ignore.
+        1. **Executive Verdict**: Malicious/Suspicious/Clean. Why?
+        2. **Technical Analysis**: Key findings from the data.
+        3. **Enrichment**: What usually does this (e.g., Cobalt Strike, specific APT)?
+        4. **Recommendations**: Block, Hunt, or Ignore.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -162,10 +146,10 @@ class AIBatchProcessor:
         Context: {actor.get('mitre', 'N/A')} | {actor.get('tools', 'N/A')}.
         
         Provide:
-        1. **Google Chronicle (YARA-L)** (Code Block)
-        2. **Cortex XDR (XQL)** (Code Block)
+        1. **Google Chronicle (YARA-L)**
+        2. **Cortex XDR (XQL)**
         
-        Explain the logic of each query in CLEAR, PROFESSIONAL HEBREW.
+        Explain the logic briefly in English.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -199,10 +183,10 @@ class ThreatLookup:
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "איראן", "target": "ישראל", "type": "ריגול", "tools": "PowerShell, ScreenConnect", "desc": "קבוצה הכפופה ל-MOIS. מתמקדת במגזר הממשלתי והתקשורת בישראל.", "mitre": "T1059, T1105"},
-            {"name": "OilRig (APT34)", "origin": "איראן", "target": "ישראל / מזה\"ת", "type": "ריגול", "tools": "DNS Tunneling, SideTwist", "desc": "קבוצה מתוחכמת המתמקדת בתשתיות קריטיות.", "mitre": "T1071.004, T1048"},
-            {"name": "Agonizing Serpens", "origin": "איראן", "target": "ישראל", "type": "הרס (Destructive)", "tools": "Wipers (BiBiWiper)", "desc": "תקיפות הרסניות במסווה של כופרה (Ransomware).", "mitre": "T1485, T1486"},
-            {"name": "Imperial Kitten", "origin": "איראן", "target": "ישראל", "type": "ריגול / השפעה", "tools": "IMAPLoader, Standard Python Backdoors", "desc": "מזוהה עם משמרות המהפכה (IRGC). מתמקדת בלוגיסטיקה ותחבורה.", "mitre": "T1566, T1071"}
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure.", "mitre": "T1059, T1105"},
+            {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel / Middle East", "type": "Espionage", "tools": "DNS Tunneling, SideTwist", "desc": "Sophisticated espionage targeting critical sectors.", "mitre": "T1071.004, T1048"},
+            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers (BiBiWiper)", "desc": "Destructive attacks masquerading as ransomware.", "mitre": "T1485, T1486"},
+            {"name": "Imperial Kitten", "origin": "Iran", "target": "Israel", "type": "Espionage/Cyber-Enabled Influence", "tools": "IMAPLoader, Standard Python Backdoors", "desc": "IRGC affiliated. Focus on transportation and logistics.", "mitre": "T1566, T1071"}
         ]
 
 # --- DATA COLLECTION ---
@@ -212,6 +196,7 @@ class CTICollector:
         {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        # INCD: Using specific scrapers
         {"name": "INCD", "url": "https://www.gov.il/he/collectors/publications?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "gov_il"},
         {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
     ]
@@ -219,7 +204,7 @@ class CTICollector:
     async def fetch_item(self, session, source):
         items = []
         try:
-            async with session.get(source['url'], headers={'User-Agent': 'Mozilla/5.0'}, timeout=15) as resp:
+            async with session.get(source['url'], headers={'User-Agent': 'Mozilla/5.0'}, timeout=20) as resp:
                 if resp.status != 200: return []
                 content = await resp.text()
                 now = datetime.datetime.now(IL_TZ)
@@ -246,32 +231,62 @@ class CTICollector:
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
 
                 elif source['type'] == 'telegram':
+                    # Improved Telegram Parsing for Israel_Cyber
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
                     for msg in msgs[-10:]:
                         try:
                             text_div = msg.find('div', class_='tgme_widget_message_text')
                             if not text_div: continue
-                            text = text_div.get_text()
+                            text = text_div.get_text(separator=' ')
+                            
+                            # Date parsing
+                            pub_date = now
                             time_span = msg.find('time', class_='time')
                             if time_span and 'datetime' in time_span.attrs:
-                                pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
-                            else: pub_date = now
+                                try:
+                                    pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
+                                except: pass
+                            
+                            # 4 Days rule for INCD
                             if (now - pub_date).total_seconds() > 345600: continue
-                            post_link = msg.find('a', class_='tgme_widget_message_date')['href']
+                            
+                            # Link extraction
+                            post_link = ""
+                            date_link = msg.find('a', class_='tgme_widget_message_date')
+                            if date_link: post_link = date_link['href']
+                            else: post_link = f"https://t.me/s/Israel_Cyber?q={text[:10]}"
+                            
                             if _is_url_processed(post_link): continue
-                            items.append({"title": "התראת מערך הסייבר (Telegram)", "url": post_link, "date": pub_date.isoformat(), "source": "INCD", "summary": text[:600]})
-                        except: continue
+                            
+                            items.append({
+                                "title": "INCD Alert (Telegram)", 
+                                "url": post_link, 
+                                "date": pub_date.isoformat(), 
+                                "source": "INCD", 
+                                "summary": text[:800]
+                            })
+                        except Exception as e: 
+                            # Continue to next message on error
+                            pass
 
                 elif source['type'] == 'gov_il':
+                    # Generic fallback for gov.il
                     soup = BeautifulSoup(content, 'html.parser')
-                    links = soup.find_all('a', href=True)
-                    for link in links:
+                    # Look for news/publications links
+                    links = soup.select('a[href*="/news/"], a[href*="/publications/"]')
+                    for link in links[:5]:
                         href = link['href']
-                        if "/news/" in href or "/publications/" in href:
-                            full_url = "https://www.gov.il" + href if href.startswith("/") else href
-                            if _is_url_processed(full_url): continue
-                            items.append({"title": link.get_text(strip=True), "url": full_url, "date": now.isoformat(), "source": "INCD", "summary": "פרסום רשמי באתר הממשלתי"})
+                        full_url = "https://www.gov.il" + href if href.startswith("/") else href
+                        if _is_url_processed(full_url): continue
+                        
+                        items.append({
+                            "title": link.get_text(strip=True), 
+                            "url": full_url, 
+                            "date": now.isoformat(), 
+                            "source": "INCD", 
+                            "summary": "Official Publication from Gov.il"
+                        })
 
         except Exception as e: pass
         return items
