@@ -12,20 +12,24 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- UI STYLING (CYBER DARK MODE) ---
+# --- UI STYLING (HIGH CONTRAST CYBER MODE) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
     
-    /* GLOBAL THEME */
+    /* GLOBAL THEME & HIGH CONTRAST TEXT */
     .stApp {
-        background-color: #0e1117;
-        color: #e0e0e0;
+        background-color: #0d1117;
         font-family: 'Heebo', sans-serif;
     }
     
-    h1, h2, h3 { font-family: 'JetBrains Mono', monospace; color: #00f2ff; }
-    h4, h5, h6 { color: #b3b3b3; }
+    /* Force all main text to be bright off-white */
+    p, .stMarkdown, span, div {
+        color: #e6edf3; 
+    }
+
+    h1, h2, h3 { font-family: 'JetBrains Mono', monospace; color: #00f2ff !important; text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); }
+    h4, h5, h6 { color: #d0d7de !important; font-weight: 700; }
     
     /* CUSTOM SCROLLBAR */
     ::-webkit-scrollbar { width: 10px; }
@@ -37,20 +41,24 @@ st.markdown("""
     div[data-testid="stMetricValue"] {
         color: #00f2ff !important;
         font-family: 'JetBrains Mono', monospace;
+        text-shadow: 0 0 5px rgba(0, 242, 255, 0.5);
+    }
+    div[data-testid="stMetricLabel"] {
+        color: #8b949e !important;
     }
 
     /* REPORT CARDS (General) */
     .report-card { 
         background-color: #161b22; 
-        padding: 15px; 
-        border-radius: 6px; 
+        padding: 18px; 
+        border-radius: 8px; 
         border: 1px solid #30363d;
         margin-bottom: 15px; 
         transition: transform 0.2s, box-shadow 0.2s;
     }
     .report-card:hover {
         border-color: #58a6ff;
-        box-shadow: 0 4px 20px rgba(88, 166, 255, 0.1);
+        box-shadow: 0 4px 20px rgba(88, 166, 255, 0.15);
     }
 
     /* INCD CARDS (Hebrew / RTL) */
@@ -58,9 +66,9 @@ st.markdown("""
         border-right: 4px solid #2f81f7; /* Blue accent */
         direction: rtl;
         text-align: right;
-        background: linear-gradient(90deg, #161b22 0%, #1c2128 100%);
+        background: linear-gradient(90deg, #161b22 0%, #1f242c 100%);
     }
-    .incd-title { color: #a5d6ff; font-weight: bold; font-size: 1.1rem; }
+    .incd-title { color: #a5d6ff !important; font-weight: bold; font-size: 1.15rem; margin-bottom: 5px; }
     
     /* GLOBAL CARDS (English / LTR) */
     .card-global {
@@ -68,17 +76,26 @@ st.markdown("""
         direction: ltr;
         text-align: left;
     }
-    .global-title { color: #7ee787; font-weight: bold; font-size: 1.1rem; }
+    .global-title { color: #7ee787 !important; font-weight: bold; font-size: 1.15rem; margin-bottom: 5px; }
     
+    /* CARD SUMMARY TEXT FIX */
+    .card-summary {
+        color: #ffffff !important;
+        font-size: 1rem;
+        line-height: 1.6;
+        font-weight: 400;
+        opacity: 0.95;
+    }
+
     /* SEVERITY TAGS & ANIMATION */
     .sev-tag {
-        display: inline-block; padding: 2px 8px; border-radius: 4px; 
-        font-size: 0.75rem; font-family: 'JetBrains Mono', monospace; font-weight: bold;
-        margin: 0 5px;
+        display: inline-block; padding: 3px 10px; border-radius: 4px; 
+        font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; font-weight: bold;
+        margin: 0 5px; letter-spacing: 0.5px;
     }
     
     .sev-critical { 
-        background: rgba(255, 0, 0, 0.2); color: #ff7b72; border: 1px solid #ff7b72;
+        background: rgba(255, 123, 114, 0.15); color: #ff7b72 !important; border: 1px solid #ff7b72;
         animation: pulse 2s infinite;
     }
     
@@ -88,37 +105,43 @@ st.markdown("""
         100% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0); }
     }
 
-    .sev-high { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid #d29922; }
-    .sev-med { background: rgba(56, 139, 253, 0.2); color: #58a6ff; border: 1px solid #58a6ff; }
-    .sev-info { background: rgba(139, 148, 158, 0.2); color: #8b949e; border: 1px solid #30363d; }
+    .sev-high { background: rgba(210, 153, 34, 0.15); color: #d29922 !important; border: 1px solid #d29922; }
+    .sev-med { background: rgba(88, 166, 255, 0.15); color: #58a6ff !important; border: 1px solid #58a6ff; }
+    .sev-info { background: rgba(139, 148, 158, 0.15); color: #8b949e !important; border: 1px solid #30363d; }
 
     /* LINKS */
-    a { text-decoration: none; color: #58a6ff; transition: color 0.2s; }
-    a:hover { color: #a5d6ff; text-decoration: underline; }
+    a { text-decoration: none; color: #58a6ff !important; transition: color 0.2s; font-weight: bold; }
+    a:hover { color: #a5d6ff !important; text-decoration: underline; }
 
-    /* RADIO BUTTONS AS TAGS */
+    /* RADIO BUTTONS AS TAGS - IMPROVED VISIBILITY */
     div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
     div[role="radiogroup"] label {
-        background-color: #21262d !important;
+        background-color: #21262d !important; /* Lighter grey for better contrast */
         border: 1px solid #30363d;
-        color: #c9d1d9 !important;
+        color: #ffffff !important; /* Pure white text */
         border-radius: 20px;
-        padding: 5px 15px;
-        font-size: 0.9rem;
+        padding: 6px 16px;
+        font-size: 0.95rem;
+        font-weight: 500;
+        transition: all 0.2s;
     }
     div[role="radiogroup"] label[data-checked="true"] {
         background-color: #1f6feb !important;
         border-color: #1f6feb;
         color: white !important;
-        box-shadow: 0 0 10px rgba(31, 111, 235, 0.5);
+        box-shadow: 0 0 15px rgba(31, 111, 235, 0.6);
+        font-weight: bold;
+    }
+    div[role="radiogroup"] label:hover {
+        border-color: #8b949e;
+        background-color: #30363d !important;
     }
     
-    /* TOOLBOX STYLES */
-    .toolbox-input input {
-        background-color: #0d1117;
-        color: #00f2ff;
-        border: 1px solid #30363d;
-        font-family: 'JetBrains Mono', monospace;
+    /* INPUT FIELDS VISIBILITY */
+    input[type="text"] {
+        background-color: #0d1117 !important;
+        color: #ffffff !important;
+        border: 1px solid #30363d !important;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -163,7 +186,7 @@ else:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=70)
     st.title("CTI WAR ROOM")
-    st.markdown("`v2.0 | CLASSIFIED`")
+    st.markdown("`v2.1 | CLASSIFIED`")
     
     st.markdown("---")
     st.markdown("### 🛰️ System Status")
@@ -183,7 +206,7 @@ with st.sidebar:
             st.rerun()
 
     st.markdown("### 🛡️ Defcon Level")
-    st.progress(70) # Static for visual effect
+    st.progress(70) 
     st.caption("Current Alert Level: ELEVATED")
 
 # --- MAIN LAYOUT ---
@@ -278,7 +301,7 @@ with tab_feed:
                     </div>
                 </div>
                 <div class="{title_class}">{row['title']}</div>
-                <div style="margin-top: 8px; color: #c9d1d9; font-size: 0.95rem; line-height: 1.5;">
+                <div class="card-summary">
                     {row['summary']}
                 </div>
                 <div style="margin-top: 12px; text-align: {'left' if not is_incd else 'right'};">
@@ -305,16 +328,12 @@ with tab_tools:
             st.success(f"TARGET ACQUIRED: {ioc_type.upper()}")
             tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
             
-            # Use columns for layout
             with st.spinner("⚡ Querying Threat Intelligence Engines..."):
                 vt_data = tl.query_virustotal(ioc_input, ioc_type)
                 us_data = tl.query_urlscan(ioc_input) if ioc_type in ["domain", "url", "ip"] else None
                 ab_data = tl.query_abuseipdb(ioc_input) if ioc_type == "ip" else None
                 
-                # Combine for AI
                 results_context = {"virustotal": vt_data, "urlscan": us_data, "abuseipdb": ab_data}
-                
-                # AI Analysis
                 proc = AIBatchProcessor(GROQ_KEY)
                 ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
 
@@ -344,7 +363,7 @@ with tab_tools:
             with c_ai:
                 st.markdown("### 🤖 AI Analyst Verdict")
                 st.markdown(f"""
-                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 8px; font-family: 'Heebo';">
+                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 8px; font-family: 'Heebo'; color: #e6edf3;">
                     {ai_report}
                 </div>
                 """, unsafe_allow_html=True)
@@ -374,22 +393,22 @@ with tab_strat:
         # DOSSIER UI
         st.markdown(f"""
         <div style="border: 1px solid #30363d; border-radius: 8px; padding: 20px; background: #161b22;">
-            <h2 style="margin-top:0; color: #f0f6fc;">{actor['name']}</h2>
+            <h2 style="margin-top:0; color: #f0f6fc !important;">{actor['name']}</h2>
             <div style="display: flex; gap: 10px; margin-bottom: 15px;">
                 <span class="sev-tag sev-med">ORIGIN: {actor['origin']}</span>
                 <span class="sev-tag sev-high">TARGET: {actor['target']}</span>
                 <span class="sev-tag sev-info">TYPE: {actor['type']}</span>
             </div>
-            <p style="color: #c9d1d9;">{actor['desc']}</p>
+            <p style="color: #e6edf3; font-size: 1.1rem; line-height: 1.5;">{actor['desc']}</p>
             <hr style="border-color: #30363d;">
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                 <div>
-                    <h5 style="color: #58a6ff;">🛠️ Toolset</h5>
-                    <code style="background: #0d1117; color: #ff7b72;">{actor['tools']}</code>
+                    <h5 style="color: #58a6ff !important;">🛠️ Toolset</h5>
+                    <code style="background: #0d1117; color: #ff7b72; font-size: 0.9rem;">{actor['tools']}</code>
                 </div>
                 <div>
-                    <h5 style="color: #58a6ff;">📚 MITRE TTPs</h5>
-                    <code style="background: #0d1117; color: #d29922;">{actor['mitre']}</code>
+                    <h5 style="color: #58a6ff !important;">📚 MITRE TTPs</h5>
+                    <code style="background: #0d1117; color: #d29922; font-size: 0.9rem;">{actor['mitre']}</code>
                 </div>
             </div>
         </div>
