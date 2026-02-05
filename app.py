@@ -449,6 +449,7 @@ with tab_feed:
     
     for _, row in df_display.iterrows():
         try:
+            # Safe Parsing of the date (AI ISO format or Fallback)
             dt = date_parser.parse(row['published_at'])
             if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
             else: dt = dt.astimezone(IL_TZ)
@@ -527,7 +528,7 @@ with tab_tools:
                              st.write("**Contacted URLs:**")
                              for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
 
-                # AbuseIPDB (FIXED: Display logic updated)
+                # AbuseIPDB
                 if ab_data: 
                      st.markdown(f"""
                      <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid #3b82f6; border-radius: 8px; padding: 10px; margin-top: 10px;">
@@ -555,7 +556,7 @@ with tab_tools:
                 st.markdown("##### 🤖 AI ANALYST VERDICT")
                 with st.container(): st.markdown(ai_report)
 
-# --- TAB 3: THREAT PROFILER (RESTORED CAMPAIGN RADAR) ---
+# --- TAB 3: THREAT PROFILER ---
 with tab_strat:
     st.markdown("#### 🏴‍☠️ ADVERSARY DOSSIER")
     threats = APTSheetCollector().fetch_threats()
@@ -592,7 +593,7 @@ with tab_strat:
 
     st.markdown("---")
     
-    # --- CAMPAIGN RADAR (RESTORED & IMPROVED) ---
+    # --- CAMPAIGN RADAR ---
     st.markdown("##### 📡 LATEST INTEL FEED (LIVE DB SEARCH)")
     
     # Perform Search in DB for Actor (No time limit, top 5)
@@ -608,12 +609,11 @@ with tab_strat:
         for _, row in df_hits.iterrows():
             try: dt = date_parser.parse(row['published_at']).strftime('%d/%m/%Y')
             except: dt = "?"
-            # Using the existing card style for consistency
             st.markdown(get_feed_card_html(row, dt), unsafe_allow_html=True)
     else:
         st.info(f"No specific mentions of {actor['name']} found in the collected feeds.")
         
-    # --- NEW DEEP WEB SCAN BUTTON ---
+    # --- DEEP WEB SCAN BUTTON ---
     st.markdown("---")
     c_scan_txt, c_scan_btn = st.columns([3, 1])
     with c_scan_txt:
