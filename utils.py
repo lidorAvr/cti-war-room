@@ -116,6 +116,48 @@ class AIBatchProcessor:
         else:
             return data
 
+    def _extract_key_intel(self, raw_data):
+        """Creates a SUPER lean summary for AI to save tokens and prevent 413 Errors"""
+        summary = {}
+        
+        # 1. VirusTotal Optimization
+        if 'virustotal' in raw_data and isinstance(raw_data['virustotal'], dict):
+            vt = raw_data['virustotal']
+            attrs = vt.get('attributes', {})
+            rels = vt.get('relationships', {})
+            
+            summary['virustotal'] = {
+                'reputation': attrs.get('reputation'),
+                'stats': attrs.get('last_analysis_stats'),
+                'tags': attrs.get('tags'),
+                'country': attrs.get('country'),
+                'asn': attrs.get('asn'),
+                'as_owner': attrs.get('as_owner'),
+                # Extract only hostnames from resolutions (Crucial for token saving!)
+                'passive_dns': [r.get('attributes', {}).get('host_name') for r in rels.get('resolutions', {}).get('data', [])[:10]],
+                'contacted_urls': [u.get('context_attributes', {}).get('url') for u in rels.get('contacted_urls', {}).get('data', [])[:5]]
+            }
+            
+        # 2. URLScan Optimization
+        if 'urlscan' in raw_data and isinstance(raw_data['urlscan'], dict):
+            us = raw_data['urlscan']
+            summary['urlscan'] = {
+                'verdict': us.get('verdict', {}).get('overall'),
+                'country': us.get('page', {}).get('country'),
+                'target': us.get('task', {}).get('url')
+            }
+
+        # 3. AbuseIPDB Optimization
+        if 'abuseipdb' in raw_data and isinstance(raw_data['abuseipdb'], dict):
+            ab = raw_data['abuseipdb']
+            summary['abuseipdb'] = {
+                'score': ab.get('abuseConfidenceScore'),
+                'isp': ab.get('isp'),
+                'usage': ab.get('usageType')
+            }
+            
+        return summary
+
     async def analyze_batch(self, items):
         if not items: return []
         chunk_size = 10
@@ -163,15 +205,16 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        # PRUNE DATA BEFORE SENDING TO AI
-        sanitized_data = self._prune_data(data, max_list_items=5)
+        # NEW: Use Smart Extraction instead of Blind Pruning
+        # This reduces token count from ~30k to ~500!
+        lean_data = self._extract_key_intel(data)
         
         prompt = f"""
         Act as a Senior Tier 3 SOC Analyst.
         Your task is to provide an OPERATIONAL analysis for an Enterprise Environment.
         
         Target IOC: {ioc} ({ioc_type})
-        Raw Intelligence Data: {json.dumps(sanitized_data)}
+        Intelligence Summary: {json.dumps(lean_data)}
         
         Output Structure (Markdown, English Only):
         
