@@ -13,7 +13,7 @@ import base64
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from ddgs import DDGS
+from ddgs import DDGS  # FIX: Updated import from renamed package
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
@@ -59,9 +59,9 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Strict cleanup: Delete anything older than 48 hours to keep the feed fresh
-    limit_strict = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
-    c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit_strict,))
+    # Clean old data but keep INCD and DeepWeb scans longer
+    limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
+    c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
     conn.close()
 
@@ -75,55 +75,30 @@ def _is_url_processed(url):
         return result is not None
     except: return False
 
-# --- DEEP WEB SCANNER (UPDATED WITH DATE FILTERING) ---
+# --- DEEP WEB SCANNER ---
 class DeepWebScanner:
-    def scan_actor(self, actor_name, limit=3):
-        """Searches for RECENT mentions only (Last 48 Hours logic applied)"""
+    def scan_actor(self, actor_name, limit=5):
+        """Searches the deep web for recent mentions of the actor"""
         results = []
-        now = datetime.datetime.now(IL_TZ)
-        cutoff = now - datetime.timedelta(hours=48)
-        
         try:
-            query = f'"{actor_name}" cyber threat intelligence malware'
+            # Using specific query to reduce noise
+            query = f'"{actor_name}" cyber threat intelligence malware analysis report'
             with DDGS() as ddgs:
-                # timelimit='w' -> Restrict search to last week to filter out old 2025/2024 data at source
-                ddg_results = list(ddgs.text(query, max_results=limit, timelimit='w'))
+                ddg_results = list(ddgs.text(query, max_results=limit))
                 
                 for res in ddg_results:
                     url = res.get('href')
-                    body = res.get('body', '')
-                    title = res.get('title', '')
-                    
                     if _is_url_processed(url): continue
                     
-                    # 1. Try to extract date from snippet text
-                    pub_date = now 
-                    found_date = False
-                    try:
-                        # Search for patterns like "2 days ago", "Feb 05, 2026", etc. in the body
-                        # This is a heuristic attempt
-                        match = date_parser.parse(body, fuzzy=True, default=now)
-                        if match and match.year == now.year: # Basic sanity check
-                             pub_date = match.astimezone(IL_TZ)
-                             found_date = True
-                    except: pass
-                    
-                    # 2. Strict Filtering: If we found a date and it's old -> SKIP
-                    if found_date and pub_date < cutoff:
-                        continue
-                        
-                    # 3. If no date found, we rely on 'timelimit=w', but explicitly mark it as recent check
-                    # We only add it if we are fairly sure it's new.
-                    
                     results.append({
-                        "title": title,
+                        "title": res.get('title'),
                         "url": url,
-                        "date": pub_date.isoformat(),
+                        "date": datetime.datetime.now(IL_TZ).isoformat(),
                         "source": "DeepWeb",
-                        "summary": body
+                        "summary": res.get('body', 'No summary available.')
                     })
         except Exception as e:
-            print(f"Deep Scan Error for {actor_name}: {e}")
+            print(f"Deep Scan Error: {e}")
         return results
 
 # --- CONNECTION & AI ENGINES ---
@@ -210,11 +185,12 @@ class AIBatchProcessor:
         OUTPUT RULES:
         1. IF Source is 'INCD' (Israel National Cyber Directorate):
            - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-        2. IF Source is 'DeepWeb' or 'Malpedia':
-           - CRITICAL: Verify the content is RECENT (Last 48 Hours). If the text mentions events from 2024 or 2025, prefix title with "[OLD]".
+        2. IF Source is 'Malpedia' OR 'DeepWeb':
+           - SUMMARY: Synthesize the text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets.
            - SEVERITY: If 'APT', 'Ransomware' or 'Zero-Day' -> 'High' or 'Critical'.
         3. GENERAL:
            - TITLE: Short, informative (Max 8 words).
+           - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
            - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
         Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
@@ -245,6 +221,11 @@ class AIBatchProcessor:
                 final_sev = ai.get('severity', 'Medium')
                 final_cat = ai.get('category', 'News')
                 
+                # Fallback Logic
+                txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
+                if 'apt' in txt or 'ransomware' in txt:
+                    final_sev = 'High'
+
                 results.append({
                     "category": final_cat, 
                     "severity": final_sev, 
@@ -431,4 +412,141 @@ class CTICollector:
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
         {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest", "type": "rss"},
         {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
-        {"name
+        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
+    ]
+
+    async def fetch_item(self, session, source):
+        items = []
+        try:
+            async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
+                if resp.status != 200: return []
+                content = await resp.text()
+                now = datetime.datetime.now(IL_TZ)
+                
+                is_incd = source['name'] == 'INCD'
+                
+                if source['type'] == 'rss':
+                    feed = feedparser.parse(content)
+                    entries_to_check = feed.entries[:4] if is_incd else feed.entries[:10]
+                    
+                    for entry in entries_to_check:
+                        pub_date = now
+                        try:
+                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                                pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        except: pass
+                        
+                        if not is_incd:
+                            if (now - pub_date).total_seconds() > (48 * 3600): continue
+
+                        if _is_url_processed(entry.link): continue
+                        
+                        sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
+                        
+                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER ---
+                        if source['name'] == 'Malpedia':
+                            try:
+                                # Hop 1: Malpedia Profile Page
+                                async with session.get(entry.link, headers=HEADERS, timeout=10) as mal_resp:
+                                    if mal_resp.status == 200:
+                                        mal_html = await mal_resp.text()
+                                        mal_soup = BeautifulSoup(mal_html, 'html.parser')
+                                        
+                                        # Hop 2: Find external "Open article" link
+                                        target_link = None
+                                        for a in mal_soup.find_all('a', href=True):
+                                            link_text = a.get_text().lower()
+                                            if "open article" in link_text or "read report" in link_text or "original source" in link_text:
+                                                target_link = a['href']
+                                                break
+                                        
+                                        # Hop 3: Fetch & Scrape REAL Content
+                                        if target_link:
+                                            async with session.get(target_link, headers=HEADERS, timeout=10) as ext_resp:
+                                                if ext_resp.status == 200 and "text/html" in ext_resp.headers.get("Content-Type", ""):
+                                                    ext_html = await ext_resp.text()
+                                                    ext_soup = BeautifulSoup(ext_html, 'html.parser')
+                                                    
+                                                    # Cleanup
+                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "form"]):
+                                                        noise.decompose()
+                                                    
+                                                    # Extract Text (First 3000 chars)
+                                                    paras = ext_soup.find_all('p')
+                                                    scraped_text = ' '.join([p.get_text().strip() for p in paras if len(p.get_text()) > 20])
+                                                    
+                                                    if len(scraped_text) > 100:
+                                                        sum_text = f"[Source Scraped] {scraped_text[:3000]}"
+                            except Exception: pass 
+
+                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
+
+                elif source['type'] == 'json':
+                     data = json.loads(content)
+                     for v in data.get('vulnerabilities', [])[:10]:
+                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
+                         if _is_url_processed(url): continue
+                         try: pub_date = date_parser.parse(v['dateAdded']).replace(tzinfo=IL_TZ)
+                         except: pub_date = now
+                         if (now - pub_date).total_seconds() > 172800: continue
+                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
+
+                elif source['type'] == 'telegram':
+                    soup = BeautifulSoup(content, 'html.parser')
+                    msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
+                    msgs_to_check = msgs[-4:] if is_incd else msgs[-10:]
+                    
+                    for msg in msgs_to_check:
+                        try:
+                            text_div = msg.find('div', class_='tgme_widget_message_text')
+                            if not text_div: continue
+                            text = text_div.get_text(separator=' ')
+                            
+                            pub_date = now
+                            time_span = msg.find('time', class_='time')
+                            if time_span and 'datetime' in time_span.attrs:
+                                try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
+                                except: pass
+                            
+                            if not is_incd:
+                                if (now - pub_date).total_seconds() > 432000: continue
+                            
+                            date_link = msg.find('a', class_='tgme_widget_message_date')
+                            post_link = date_link['href'] if date_link else f"https://t.me/s/Israel_Cyber?t={int(now.timestamp())}"
+                            
+                            if _is_url_processed(post_link): continue
+                            
+                            items.append({
+                                "title": "INCD Alert (Telegram)", 
+                                "url": post_link, 
+                                "date": pub_date.isoformat(), 
+                                "source": "INCD", 
+                                "summary": text[:800]
+                            })
+                        except: pass
+
+        except Exception as e: pass
+        return items
+
+    async def get_all_data(self):
+        async with aiohttp.ClientSession() as session:
+            tasks = [self.fetch_item(session, s) for s in self.SOURCES]
+            results = await asyncio.gather(*tasks)
+            return [i for sub in results for i in sub]
+
+def save_reports(raw, analyzed):
+    conn = sqlite3.connect(DB_NAME)
+    c, cnt = conn.cursor(), 0
+    for i, item in enumerate(raw):
+        if i < len(analyzed):
+            a = analyzed[i]
+            try:
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
+                if c.rowcount > 0: cnt += 1
+            except: pass
+    conn.commit()
+    conn.close()
+    return cnt
