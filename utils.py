@@ -13,11 +13,12 @@ import base64
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
+from duckduckgo_search import DDGS  # NEW: Deep Scan Engine
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
-# --- HTTP HEADERS (Anti-Bot Bypass) ---
+# --- HTTP HEADERS ---
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -58,8 +59,9 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
+    # Clean old data but keep INCD and DeepWeb scans a bit longer
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
-    c.execute("DELETE FROM intel_reports WHERE source != 'INCD' AND published_at < ?", (limit_regular,))
+    c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
     conn.close()
 
@@ -72,6 +74,32 @@ def _is_url_processed(url):
         conn.close()
         return result is not None
     except: return False
+
+# --- DEEP WEB SCANNER (NEW) ---
+class DeepWebScanner:
+    def scan_actor(self, actor_name, limit=5):
+        """Searches the deep web for recent mentions of the actor"""
+        results = []
+        try:
+            query = f'"{actor_name}" cyber threat intelligence malware analysis report'
+            with DDGS() as ddgs:
+                # Searching DuckDuckGo News/Text
+                ddg_results = list(ddgs.text(query, max_results=limit))
+                
+                for res in ddg_results:
+                    url = res.get('href')
+                    if _is_url_processed(url): continue
+                    
+                    results.append({
+                        "title": res.get('title'),
+                        "url": url,
+                        "date": datetime.datetime.now(IL_TZ).isoformat(), # DDG usually doesn't give precise date, assume fresh
+                        "source": "DeepWeb",
+                        "summary": res.get('body', 'No summary available.')
+                    })
+        except Exception as e:
+            print(f"Deep Scan Error: {e}")
+        return results
 
 # --- CONNECTION & AI ENGINES ---
 class ConnectionManager:
@@ -157,10 +185,9 @@ class AIBatchProcessor:
         OUTPUT RULES:
         1. IF Source is 'INCD' (Israel National Cyber Directorate):
            - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-        2. IF Source is 'Malpedia':
-           - INPUT is RAW TEXT scraped from a report.
-           - SUMMARY: Synthesize the raw text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets. Do NOT just copy the text.
-           - SEVERITY: If 'APT' or 'Ransomware' -> 'High' or 'Critical'.
+        2. IF Source is 'Malpedia' OR 'DeepWeb':
+           - SUMMARY: Synthesize the text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets.
+           - SEVERITY: If 'APT', 'Ransomware' or 'Zero-Day' -> 'High' or 'Critical'.
         3. GENERAL:
            - TITLE: Short, informative (Max 8 words).
            - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
@@ -172,12 +199,9 @@ class AIBatchProcessor:
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
             
-            # --- FIX: SMART CONTEXT WINDOW ---
-            # If source is Malpedia, we give the AI much more text (2500 chars) to work with
-            # If it's regular RSS, 400 chars is enough.
             batch_lines = []
             for idx, x in enumerate(chunk):
-                limit = 2500 if x['source'] == 'Malpedia' else 400
+                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 400
                 clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
                 batch_lines.append(f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {clean_sum}")
 
@@ -197,12 +221,10 @@ class AIBatchProcessor:
                 final_sev = ai.get('severity', 'Medium')
                 final_cat = ai.get('category', 'News')
                 
-                if chunk[j]['source'] == 'Malpedia':
-                    # Fallback logic if AI misses severity
-                    txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
-                    if 'apt' in txt or 'ransomware' in txt or 'wiper' in txt:
-                        final_sev = 'High'
-                    final_cat = 'Research'
+                # Fallback Logic
+                txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
+                if 'apt' in txt or 'ransomware' in txt:
+                    final_sev = 'High'
 
                 results.append({
                     "category": final_cat, 
@@ -528,4 +550,3 @@ def save_reports(raw, analyzed):
     conn.commit()
     conn.close()
     return cnt
-    
