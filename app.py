@@ -150,7 +150,7 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ IN
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     # FILTER: Exclude DeepWeb from Live Feed
-    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 15", conn)
+    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
@@ -233,7 +233,7 @@ with tab_tools:
                 results_context = {"virustotal": vt_data, "urlscan": us_data, "abuseipdb": ab_data}
                 proc = AIBatchProcessor(GROQ_KEY)
                 
-                # Safety Block for AI Rate Limits
+                # Safety Block for AI (Rate Limits)
                 try:
                     ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
                     if "Error" in str(ai_report) and "429" in str(ai_report):
