@@ -31,6 +31,57 @@ def get_status_html(ok, msg):
     </div>
     """
 
+# --- NEW: MERGED CARD FOR LIVE FEED ---
+def get_merged_feed_card_html(item, date_str):
+    sources_count = len(item['sources'])
+    # בניית שורת המקורות
+    sources_html = ""
+    for src, url in zip(item['sources'], item['urls']):
+        icon = "🇮🇱" if src == "INCD" else "📡"
+        sources_html += f"""
+            <a href="{url}" target="_blank" style="display: inline-flex; align-items: center; gap: 5px; color: #38bdf8; text-decoration: none; font-size: 0.75rem; font-weight: 600; padding: 4px 8px; background: rgba(56, 189, 248, 0.1); border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.2); margin-right: 5px;">
+                {icon} {src} 🔗
+            </a>
+        """
+
+    sev = item['severity'].lower()
+    badge_bg = "rgba(100, 116, 139, 0.2)"
+    badge_color = "#cbd5e1"
+    border_color = "rgba(100, 116, 139, 0.3)"
+    
+    if "critical" in sev or "high" in sev:
+        badge_bg = "rgba(220, 38, 38, 0.2)"
+        badge_color = "#fca5a5"
+        border_color = "#ef4444"
+    elif "medium" in sev:
+        badge_bg = "rgba(59, 130, 246, 0.2)"
+        badge_color = "#93c5fd"
+        border_color = "#3b82f6"
+
+    # Clean summary to prevent HTML breakage
+    clean_summary = clean_html(item['summary'])
+    
+    return f"""
+    <div class="report-card" style="border-left: 4px solid {border_color};">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div class="card-meta">
+                {date_str} • <span style="color: #cbd5e1; opacity: 0.8;">{sources_count} SOURCES</span>
+            </div>
+            <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold; letter-spacing: 0.5px;">
+                {item['severity'].upper()}
+            </div>
+        </div>
+        <div class="card-title">{item['title']}</div>
+        <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 15px; line-height: 1.6; opacity: 0.9; max-height: 100px; overflow: hidden; text-overflow: ellipsis;">
+            {clean_summary}
+        </div>
+        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+            {sources_html}
+        </div>
+    </div>
+    """
+
+# --- LEGACY CARD (Used in Campaign Radar) ---
 def get_feed_card_html(row, date_str):
     is_incd = row['source'] == "INCD"
     card_class = "card-incd" if is_incd else "card-global"
@@ -419,14 +470,14 @@ st.markdown("---")
 # --- TABS ---
 tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ INVESTIGATION LAB", "🧠 THREAT PROFILER", "🌍 HEATMAP"])
 
-# --- TAB 1: LIVE FEED ---
+# --- TAB 1: LIVE FEED (IMPROVED GROUPING LOGIC) ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
-    df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
+    df_all = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False)
     
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -436,26 +487,63 @@ with tab_feed:
         st.caption("SEVERITY FILTER")
         filter_sev = st.radio("S2", ["All Levels", "🔥 Critical/High", "⚠️ Medium", "ℹ️ Info/Low"], horizontal=True, label_visibility="collapsed", key="f_sev")
 
-    df_display = df_final.copy()
-    if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
-    elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
-    
-    if "Critical" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
-    elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
-    elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
+    # --- GROUPING ALGORITHM ---
+    grouped = []
+    seen_titles = {} # map: normalized_title -> index in grouped
+
+    for _, row in df_all.iterrows():
+        # Simple normalization to catch variations
+        norm_title = re.sub(r'\W+', '', row['title'].lower())
+        
+        if norm_title in seen_titles:
+            idx = seen_titles[norm_title]
+            # Add source if not present
+            if row['source'] not in grouped[idx]['sources']:
+                grouped[idx]['sources'].append(row['source'])
+                grouped[idx]['urls'].append(row['url'])
+                # Update summary if new one is longer/better
+                if len(row['summary']) > len(grouped[idx]['summary']):
+                    grouped[idx]['summary'] = row['summary']
+        else:
+            seen_titles[norm_title] = len(grouped)
+            grouped.append({
+                'title': row['title'],
+                'severity': row['severity'],
+                'summary': row['summary'],
+                'published_at': row['published_at'],
+                'sources': [row['source']],
+                'urls': [row['url']]
+            })
+
+    # --- FILTERING ---
+    filtered_items = []
+    for item in grouped:
+        # Source Filter
+        has_incd = "INCD" in item['sources']
+        if "INCD Only" in filter_source and not has_incd: continue
+        if "Global Only" in filter_source and has_incd and len(item['sources']) == 1: continue
+
+        # Severity Filter
+        sev = item['severity']
+        if "Critical" in filter_sev and not any(x in sev for x in ['Critical', 'High']): continue
+        if "Medium" in filter_sev and "Medium" not in sev: continue
+        if "Info" in filter_sev and not any(x in sev for x in ['Low', 'Info', 'News']): continue
+        
+        filtered_items.append(item)
 
     st.write("") 
-    if df_display.empty: st.info("NO THREATS DETECTED MATCHING CRITERIA.")
+    if not filtered_items: st.info("NO THREATS DETECTED MATCHING CRITERIA.")
     
-    for _, row in df_display.iterrows():
+    for item in filtered_items:
         try:
-            # Safe Parsing of the date (AI ISO format or Fallback)
-            dt = date_parser.parse(row['published_at'])
+            dt = date_parser.parse(item['published_at'])
             if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
             else: dt = dt.astimezone(IL_TZ)
             date_str = dt.strftime('%H:%M | %d/%m')
         except: date_str = "--:--"
-        st.markdown(get_feed_card_html(row, date_str), unsafe_allow_html=True)
+        
+        # Use the NEW Merged Card function
+        st.markdown(get_merged_feed_card_html(item, date_str), unsafe_allow_html=True)
 
 # --- TAB 2: FORENSIC LAB ---
 with tab_tools:
