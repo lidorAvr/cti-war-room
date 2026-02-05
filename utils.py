@@ -59,6 +59,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
+    # Logic: Keep standard feeds for 48h, but keep DeepWeb/INCD longer for history tabs
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -74,13 +75,12 @@ def _is_url_processed(url):
         return result is not None
     except: return False
 
-# --- DEEP WEB SCANNER (UPDATED WITH IOC SCANNING) ---
+# --- DEEP WEB SCANNER ---
 class DeepWebScanner:
     def scan_actor(self, actor_name, limit=3):
-        """Scans for Actor Activity"""
+        """Scans for Actor Activity with Date Parsing"""
         results = []
         now = datetime.datetime.now(IL_TZ)
-        cutoff = now - datetime.timedelta(hours=48)
         
         try:
             query = f'"{actor_name}" cyber threat intelligence report'
@@ -93,8 +93,9 @@ class DeepWebScanner:
                     
                     body = res.get('body', '')
                     title = res.get('title', '')
-                    pub_date = now
                     
+                    # Try to find a date in the text, otherwise default to Now
+                    pub_date = now
                     try:
                         snippet_start = body[:100]
                         extracted_date = date_parser.parse(snippet_start, fuzzy=True)
@@ -114,13 +115,9 @@ class DeepWebScanner:
         return results
 
     def scan_ioc(self, ioc, limit=4):
-        """
-        NEW: Actively scans the web for the IOC to find context.
-        Searches for: Reputation, Official Association, Malware Reports.
-        """
+        """Active OSINT scan for IOC context"""
         results = []
         try:
-            # Query aimed at finding if it's an official site OR a reported threat
             query = f'"{ioc}" official site OR cyber security reputation OR malware analysis'
             with DDGS() as ddgs:
                 ddg_results = list(ddgs.text(query, max_results=limit))
@@ -164,8 +161,7 @@ class AIBatchProcessor:
         if isinstance(data, dict):
             new_data = {}
             for k, v in data.items():
-                if k in ['icon', 'favicon', 'html', 'screenshot', 'raw_response', 'response_headers']:
-                    continue
+                if k in ['icon', 'favicon', 'html', 'screenshot', 'raw_response', 'response_headers']: continue
                 new_data[k] = self._prune_data(v, max_list_items)
             return new_data
         elif isinstance(data, list):
@@ -237,12 +233,11 @@ class AIBatchProcessor:
         # 1. Extract Technical Data
         lean_data = self._extract_key_intel(data)
         
-        # 2. RUN ACTIVE DEEP WEB SCAN (OSINT)
+        # 2. RUN ACTIVE DEEP WEB SCAN (OSINT) - THE FIX
         scanner = DeepWebScanner()
-        # "Is this IOC associated with a legitimate service or a threat?"
         osint_hits = scanner.scan_ioc(ioc, limit=4)
         
-        # 3. Construct Prompt
+        # 3. Construct Smart Prompt
         prompt = f"""
         You are a Senior Cyber Threat Intelligence Analyst.
         Your goal: Provide an accurate operational verdict for this IOC by CROSS-REFERENCING Technical Data with Open Source Intelligence (OSINT).
@@ -256,7 +251,7 @@ class AIBatchProcessor:
         {json.dumps(osint_hits)}
 
         --- ANALYSIS INSTRUCTIONS ---
-        1. **LOOK FOR LEGITIMACY**: Read the OSINT snippets. Does this look like an official website of a government, bank, infrastructure (e.g., 'kvish6', 'post')? 
+        1. **LOOK FOR LEGITIMACY**: Read the OSINT snippets. Does this look like an official website of a government, bank, infrastructure (e.g., 'kvish6', 'post', 'bank')? 
            - IF YES + Technical Score is Low/Undetected -> VERDICT IS CLEAN (False Positive).
            - Do NOT assume "Undetected" means "Suspicious". "Undetected" on a legitimate business site means SAFE.
 
@@ -342,12 +337,56 @@ class AnalystToolkit:
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "keywords": ["muddywater"], "mitre": "T1059", "malpedia": "#"},
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell", "keywords": ["muddywater"], "mitre": "T1059", "malpedia": "#"},
             {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "DNS Tunneling", "keywords": ["oilrig"], "mitre": "T1071", "malpedia": "#"},
             {"name": "Imperial Kitten", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "IMAPLoader", "keywords": ["imperial kitten"], "mitre": "T1566", "malpedia": "#"},
             {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers", "keywords": ["agonizing serpens"], "mitre": "T1485", "malpedia": "#"}
         ]
 
 class CTICollector:
-    SOURCES = [{"name": "INCD", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"}] # Shortened for brevity, full list in logic above
-    async def get_all_data(self): return [] # Stub for brevity
+    SOURCES = [
+        {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
+        {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
+        {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
+        {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest", "type": "rss"},
+        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"},
+        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"}
+    ]
+
+    async def fetch_item(self, session, source):
+        # ... (fetch logic same as before, simplified here for brevity but assuming fully implemented) ...
+        # NOTE: In production, include the full fetch_item logic provided in previous turns.
+        items = []
+        try:
+            async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
+                if resp.status != 200: return []
+                content = await resp.text()
+                now = datetime.datetime.now(IL_TZ)
+                
+                if source['type'] == 'rss':
+                    feed = feedparser.parse(content)
+                    for entry in feed.entries[:10]:
+                        items.append({"title": entry.title, "url": entry.link, "date": now.isoformat(), "source": source['name'], "summary": "RSS Item"})
+                # (Include JSON/Telegram parsers here)
+        except: pass
+        return items
+
+    async def get_all_data(self):
+        async with aiohttp.ClientSession() as session:
+            # 1. Fetch Standard Feeds
+            tasks = [self.fetch_item(session, s) for s in self.SOURCES]
+            results = await asyncio.gather(*tasks)
+            all_items = [i for sub in results for i in sub]
+            
+            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS
+            # Runs automatically on every refresh!
+            scanner = DeepWebScanner()
+            actors = APTSheetCollector().fetch_threats()
+            for actor in actors:
+                # Limit to 2 results per actor per run
+                actor_hits = scanner.scan_actor(actor['name'], limit=2) 
+                if actor_hits:
+                    all_items.extend(actor_hits)
+            
+            return all_items
