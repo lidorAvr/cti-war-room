@@ -6,18 +6,100 @@ import datetime
 import pytz
 import time
 import textwrap
-import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- CYBER BOOT SEQUENCE (LOADING BAR) ---
+# --- HTML GENERATORS (FIXED: PREVENTS INDENTATION BUGS) ---
+def get_status_html(ok, msg):
+    color = "#4ade80" if ok else "#f87171"
+    status = "ONLINE" if ok else "OFFLINE"
+    return f"""
+    <div style="display: flex; align-items: center; justify-content: space-between; background: #1e293b; padding: 10px; border-radius: 8px; margin-bottom: 10px; border: 1px solid #334155;">
+        <span style="font-size: 0.9rem; color: #cbd5e1; font-family: 'Inter', sans-serif;">AI Engine</span>
+        <span style="font-size: 0.8rem; color: {color}; font-weight: bold; font-family: 'JetBrains Mono', monospace; letter-spacing: 1px;">● {status}</span>
+    </div>
+    """
+
+def get_feed_card_html(row, date_str):
+    is_incd = row['source'] == "INCD"
+    card_class = "card-incd" if is_incd else "card-global"
+    
+    # Severity Badge Logic
+    sev = row['severity'].lower()
+    badge_bg = "rgba(100, 116, 139, 0.2)"
+    badge_color = "#cbd5e1"
+    border_color = "rgba(100, 116, 139, 0.3)"
+    
+    if "critical" in sev or "high" in sev:
+        badge_bg = "rgba(220, 38, 38, 0.2)"
+        badge_color = "#fca5a5"
+        border_color = "#ef4444"
+    elif "medium" in sev:
+        badge_bg = "rgba(59, 130, 246, 0.2)"
+        badge_color = "#93c5fd"
+        border_color = "#3b82f6"
+        
+    source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
+    align = 'right' if is_incd else 'left'
+    dir = 'rtl' if is_incd else 'ltr'
+    
+    return f"""
+    <div class="report-card {card_class}" style="direction: {dir};">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+            <div class="card-meta">
+                {date_str} • <b style="color: #e2e8f0;">{source_display}</b>
+            </div>
+            <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold; letter-spacing: 0.5px;">
+                {row['severity'].upper()}
+            </div>
+        </div>
+        <div class="card-title">{row['title']}</div>
+        <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 15px; line-height: 1.6; opacity: 0.9;">
+            {row['summary']}
+        </div>
+        <div style="text-align: {align};">
+            <a href="{row['url']}" target="_blank" style="display: inline-flex; align-items: center; gap: 5px; color: #38bdf8; text-decoration: none; font-size: 0.85rem; font-weight: 600; padding: 5px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px; transition: all 0.2s;">
+                OPEN REPORT 🔗
+            </a>
+        </div>
+    </div>
+    """
+
+def get_dossier_html(actor):
+    return f"""
+    <div class="report-card" style="border-left: 4px solid #f59e0b; background: linear-gradient(180deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%);">
+        <h2 style="margin-top:0; color: #ffffff; font-size: 2rem; letter-spacing: -1px;">{actor['name']}</h2>
+        <div style="margin-bottom: 25px; display: flex; gap: 10px; flex-wrap: wrap;">
+            <span class="badge b-med">ORIGIN: {actor['origin']}</span>
+            <span class="badge b-high">TARGET: {actor['target']}</span>
+            <span class="badge b-low">TYPE: {actor['type']}</span>
+        </div>
+        <p style="font-size: 1.1rem; color: #e2e8f0; margin-bottom: 30px; line-height: 1.7; border-bottom: 1px solid #334155; padding-bottom: 20px;">
+            {actor['desc']}
+        </p>
+        
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px; border: 1px solid #334155;">
+                <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px;">🛠️ Known Tools</h5>
+                <code style="color: #fca5a5; background: transparent; font-size: 0.95rem;">{actor['tools']}</code>
+            </div>
+            <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px; border: 1px solid #334155;">
+                <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px;">📚 MITRE TTPs</h5>
+                <code style="color: #fcd34d; background: transparent; font-size: 0.95rem;">{actor['mitre']}</code>
+            </div>
+        </div>
+    </div>
+    """
+
+# --- CYBER BOOT SEQUENCE (LOADING SCREEN) ---
 if 'booted' not in st.session_state:
     st.markdown("""
     <style>
-        .stApp { background-color: #0b0f19; }
+        .stApp { background-color: #000000; }
+        .boot-text { font-family: 'JetBrains Mono', monospace; color: #00f2ff; font-size: 1rem; }
     </style>
     """, unsafe_allow_html=True)
     
@@ -27,38 +109,38 @@ if 'booted' not in st.session_state:
         st.write("")
         st.write("")
         st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=100)
-        st.markdown("<h3 style='text-align: center; color: #00f2ff; font-family: monospace;'>INITIALIZING CTI WAR ROOM...</h3>", unsafe_allow_html=True)
+        st.markdown("<h3 style='text-align: center; color: #ffffff; font-family: monospace; letter-spacing: 2px;'>SYSTEM INITIALIZATION</h3>", unsafe_allow_html=True)
         
-        my_bar = st.progress(0)
+        progress_bar = st.progress(0)
         status_text = st.empty()
         
         steps = [
-            "Encrypting Connection...",
-            "Loading Threat Intelligence Feeds...",
-            "Syncing with Israel National Cyber Directorate...",
-            "Calibrating AI Analyst Models...",
-            "Establishing Secure Uplink..."
+            "Encrypting Uplink...",
+            "Connecting to Threat Feeds...",
+            "Syncing INCD Database...",
+            "Loading AI Models (Llama-3)...",
+            "Access Granted."
         ]
         
         for i, step in enumerate(steps):
-            status_text.markdown(f"<p style='text-align: center; color: #64748b; font-family: monospace;'>{step}</p>", unsafe_allow_html=True)
+            status_text.markdown(f"<div class='boot-text' style='text-align: center;'>{step}</div>", unsafe_allow_html=True)
             for p in range(20):
                 time.sleep(0.01)
-                my_bar.progress((i * 20) + p)
+                progress_bar.progress(min((i * 20) + p, 100))
         
-        my_bar.progress(100)
-        time.sleep(0.5)
+        progress_bar.progress(100)
+        time.sleep(0.8)
         st.session_state['booted'] = True
         st.rerun()
 
-# --- UI STYLING (THE "GLASS & STEEL" DESIGN SYSTEM) ---
+# --- UI STYLING (GLOBAL CSS) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
     
-    /* --- 1. RESET & BASE THEME --- */
+    /* RESET & BASE THEME */
     .stApp {
-        background-color: #0b0f19; /* Deep Navy/Black */
+        background-color: #0b0f19;
         background-image: radial-gradient(circle at 50% 0%, #1c2541 0%, #0b0f19 50%);
         font-family: 'Heebo', sans-serif;
     }
@@ -75,40 +157,25 @@ st.markdown("""
         line-height: 1.6;
     }
 
-    /* --- 2. GLASSMORPHISM CARDS --- */
+    /* GLASSMORPHISM CARDS */
     .report-card {
         background: rgba(30, 41, 59, 0.4);
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1);
-        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         border-radius: 12px;
         padding: 24px;
         margin-bottom: 20px;
-        transition: all 0.2s ease-in-out;
+        transition: transform 0.2s;
     }
-    
     .report-card:hover {
         border-color: rgba(56, 189, 248, 0.3);
         transform: translateY(-2px);
-        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
     }
+    .card-incd { border-right: 4px solid #3b82f6; }
+    .card-global { border-left: 4px solid #10b981; }
 
-    /* INCD Specifics */
-    .card-incd {
-        border-right: 4px solid #3b82f6; /* Vivid Blue */
-        direction: rtl; 
-        text-align: right;
-    }
-    
-    /* Global Specifics */
-    .card-global {
-        border-left: 4px solid #10b981; /* Emerald Green */
-        direction: ltr; 
-        text-align: left;
-    }
-
-    /* --- 3. TYPOGRAPHY HIERARCHY --- */
     .card-title {
         font-size: 1.25rem;
         font-weight: 700;
@@ -122,168 +189,129 @@ st.markdown("""
         color: #94a3b8;
         text-transform: uppercase;
         letter-spacing: 0.5px;
-        margin-bottom: 8px;
     }
 
-    /* --- 4. BADGES & PILLS --- */
+    /* BADGES */
     .badge {
         display: inline-flex;
         align-items: center;
         padding: 4px 12px;
-        border-radius: 9999px;
+        border-radius: 99px;
         font-size: 0.75rem;
         font-weight: 600;
         font-family: 'Inter', sans-serif;
         letter-spacing: 0.5px;
-        margin-left: 5px; margin-right: 5px;
+        margin-right: 8px;
+        border: 1px solid transparent;
     }
-    
-    .badge-dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        margin-right: 6px;
-        display: inline-block;
-    }
-    
-    .b-crit { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.2); }
-    .dot-crit { background-color: #ef4444; box-shadow: 0 0 8px #ef4444; }
-    
-    .b-high { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.2); }
-    .dot-high { background-color: #f59e0b; }
-    
-    .b-med { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.2); }
-    .dot-med { background-color: #3b82f6; }
-    
-    .b-low { background: rgba(100, 116, 139, 0.15); color: #cbd5e1; border: 1px solid rgba(100, 116, 139, 0.2); }
-    .dot-low { background-color: #94a3b8; }
+    .b-crit { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border-color: rgba(239, 68, 68, 0.3); }
+    .b-high { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border-color: rgba(245, 158, 11, 0.3); }
+    .b-med { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border-color: rgba(59, 130, 246, 0.3); }
+    .b-low { background: rgba(100, 116, 139, 0.15); color: #cbd5e1; border-color: rgba(100, 116, 139, 0.3); }
 
-    /* --- 5. MODERN INPUT FIELDS --- */
+    /* INPUT FIELDS - HIGH CONTRAST */
     input[type="text"] {
         background-color: #0f172a !important;
         border: 1px solid #334155 !important;
-        color: #e2e8f0 !important;
+        color: #ffffff !important; /* Pure White Text */
+        font-weight: 500;
         border-radius: 8px;
         padding: 12px 16px;
         font-family: 'JetBrains Mono', monospace;
         font-size: 1rem;
-        transition: all 0.2s;
     }
     input[type="text"]:focus {
         border-color: #38bdf8 !important;
         box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
-        outline: none;
     }
     ::placeholder { color: #64748b !important; opacity: 1; }
 
-    /* --- 6. BUTTONS --- */
+    /* BUTTONS */
     div.stButton > button {
         background-color: rgba(30, 41, 59, 0.5) !important;
         color: #e2e8f0 !important;
         border: 1px solid #475569 !important;
         border-radius: 8px;
         font-weight: 500;
-        padding: 0.5rem 1.5rem;
+        padding: 0.6rem 1.5rem;
     }
     div.stButton > button:hover {
-        background-color: #1e293b !important;
         border-color: #94a3b8 !important;
         color: #ffffff !important;
+        background-color: #1e293b !important;
     }
     div.stButton > button[kind="primary"] {
         background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%) !important;
         border: none !important;
         color: white !important;
-        box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.3);
     }
-    div.stButton > button[kind="primary"]:hover {
-        box-shadow: 0 10px 15px -3px rgba(2, 132, 199, 0.5);
-        transform: translateY(-1px);
-    }
-    
-    /* TOOLBOX BUTTONS */
+
+    /* TOOLKIT LINKS */
     .tool-link {
         display: block;
-        padding: 10px 14px;
-        background: rgba(30, 41, 59, 0.6);
-        border: 1px solid rgba(148, 163, 184, 0.1);
-        border-radius: 6px;
+        padding: 12px;
+        background: rgba(30, 41, 59, 0.4);
+        border: 1px solid rgba(51, 65, 85, 0.5);
+        border-radius: 8px;
         color: #cbd5e1 !important;
         text-decoration: none;
         font-size: 0.9rem;
-        font-weight: 600;
         text-align: center;
         transition: all 0.2s;
-        margin: 5px;
     }
     .tool-link:hover {
         background: rgba(56, 189, 248, 0.1);
-        color: #38bdf8 !important;
         border-color: #38bdf8;
+        color: #38bdf8 !important;
         transform: translateY(-2px);
     }
 
-    /* --- 7. RADIO BUTTONS --- */
-    div[role="radiogroup"] {
-        background-color: #0f172a;
-        padding: 4px;
-        border-radius: 8px;
-        border: 1px solid #1e293b;
-        display: inline-flex;
-        gap: 0;
-    }
-    div[role="radiogroup"] label {
-        background-color: transparent !important;
-        border: none !important;
-        color: #94a3b8 !important;
-        padding: 8px 16px !important;
-        margin: 0 !important;
-        border-radius: 6px;
-        font-size: 0.9rem !important;
-    }
-    div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #1e293b !important;
-        color: #38bdf8 !important;
-        font-weight: 600;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-    }
-
-    /* --- 8. FOOTER --- */
+    /* FOOTER */
     .footer {
         position: fixed; left: 0; bottom: 0; width: 100%;
-        background: rgba(15, 23, 42, 0.9);
-        backdrop-filter: blur(5px);
+        background: rgba(15, 23, 42, 0.95);
         border-top: 1px solid #1e293b;
         color: #64748b;
         text-align: center;
-        padding: 12px;
+        padding: 10px;
         font-size: 0.75rem;
-        font-family: 'Inter', sans-serif;
-        letter-spacing: 1px;
-        z-index: 100;
+        font-family: 'JetBrains Mono', monospace;
+        z-index: 999;
     }
-    .footer a { color: #94a3b8 !important; text-decoration: none; font-weight: 600; transition: color 0.2s; }
-    .footer a:hover { color: #38bdf8 !important; }
+    .footer a { color: #38bdf8 !important; text-decoration: none; font-weight: bold; }
     
     .header-credit {
         text-align: center;
         font-family: 'JetBrains Mono', monospace;
-        color: #484f58;
-        font-size: 0.75rem;
-        margin-top: -15px;
-        margin-bottom: 20px;
+        color: #64748b;
+        font-size: 0.8rem;
+        margin-top: -20px;
+        margin-bottom: 25px;
         letter-spacing: 2px;
         text-transform: uppercase;
+    }
+    
+    /* RADIO GROUPS */
+    div[role="radiogroup"] label {
+        background: #1e293b !important;
+        border: 1px solid #334155;
+        padding: 8px 16px !important;
+        border-radius: 6px;
+        color: #94a3b8 !important;
+    }
+    div[role="radiogroup"] label[data-checked="true"] {
+        background: #0f172a !important;
+        border-color: #38bdf8 !important;
+        color: #38bdf8 !important;
+        font-weight: bold;
     }
 
     /* METRICS */
     div[data-testid="stMetricValue"] {
-        font-family: 'Inter', sans-serif;
-        font-weight: 700;
         color: #f8fafc !important;
+        font-family: 'Inter', sans-serif;
     }
     div[data-testid="stMetricLabel"] { color: #64748b !important; }
-
 </style>
 """, unsafe_allow_html=True)
 
@@ -291,8 +319,6 @@ st.markdown("""
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 REFRESH_MINUTES = 10
-# REMOVED AUTO REFRESH COMPONENT TO PREVENT ERRORS
-# We will use manual refresh or implicit page reloads
 
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
@@ -315,7 +341,6 @@ if "last_run" not in st.session_state:
 else:
     now = datetime.datetime.now(IL_TZ)
     last_run = st.session_state["last_run"]
-    # Manual check for time-based refresh instead of using the broken component
     if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
         asyncio.run(perform_update())
         st.session_state["last_run"] = now
@@ -328,16 +353,9 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # System Status
     st.markdown("##### SYSTEM STATUS")
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
-    
-    st.markdown(textwrap.dedent(f"""
-    <div style="display: flex; align-items: center; justify-content: space-between; background: #1e293b; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
-        <span style="font-size: 0.9rem; color: #cbd5e1;">AI Engine</span>
-        <span style="font-size: 0.8rem; color: {'#4ade80' if ok else '#f87171'}; font-weight: bold;">{'ONLINE' if ok else 'OFFLINE'}</span>
-    </div>
-    """), unsafe_allow_html=True)
+    st.markdown(get_status_html(ok, msg), unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -416,63 +434,25 @@ with tab_feed:
             else: dt = dt.astimezone(IL_TZ)
             date_str = dt.strftime('%H:%M | %d/%m')
         except: date_str = "--:--"
-
-        is_incd = row['source'] == "INCD"
-        card_class = "card-incd" if is_incd else "card-global"
         
-        # Severity Styling
-        sev = row['severity'].lower()
-        badge_class = "b-low"; dot_class = "dot-low"
-        if "critical" in sev or "high" in sev: badge_class = "b-crit"; dot_class = "dot-crit"
-        elif "medium" in sev: badge_class = "b-med"; dot_class = "dot-med"
-
-        source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
-        align = 'right' if is_incd else 'left'
-        
-        # CARD RENDER (USING TEXTWRAP TO FIX HTML BUG)
-        st.markdown(textwrap.dedent(f"""
-        <div class="report-card {card_class}">
-            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
-                <div class="card-meta">
-                    {date_str} • <b>{source_display}</b>
-                </div>
-                <div class="badge {badge_class}">
-                    <span class="badge-dot {dot_class}"></span>
-                    {row['severity'].upper()}
-                </div>
-            </div>
-            <div class="card-title">{row['title']}</div>
-            <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 20px; line-height: 1.6;">
-                {row['summary']}
-            </div>
-            <div style="text-align: {align};">
-                <a href="{row['url']}" target="_blank" style="font-size: 0.85rem; font-weight: 600; color: #38bdf8; text-decoration: none;">
-                    OPEN SOURCE REPORT &rarr;
-                </a>
-            </div>
-        </div>
-        """), unsafe_allow_html=True)
+        # USE HELPER FUNCTION TO GENERATE CLEAN HTML
+        st.markdown(get_feed_card_html(row, date_str), unsafe_allow_html=True)
 
 # --- TAB 2: FORENSIC LAB ---
 with tab_tools:
     st.markdown("#### 🔬 IOC FORENSICS & TOOLKIT")
     
-    # --- RESTORED ANALYST TOOLKIT ---
+    # TOOLKIT
     with st.expander("🧰 ANALYST QUICK ACCESS TOOLKIT", expanded=True):
         toolkit = AnalystToolkit.get_tools()
         cols = st.columns(3)
-        # Flatten the toolkit dictionary
-        all_tools = []
-        for cat, tools in toolkit.items():
-            for tool in tools:
-                all_tools.append(tool)
+        all_tools = [t for sublist in toolkit.values() for t in sublist]
         
-        # Display tools in grid
         for idx, tool in enumerate(all_tools):
             with cols[idx % 3]:
                 st.markdown(f"""
                 <a href="{tool['url']}" target="_blank" class="tool-link">
-                    {tool['name']} <span style="font-size: 0.8em; opacity: 0.7;">| {tool['desc']}</span>
+                    <b>{tool['name']}</b><br><span style="font-size:0.8em; opacity:0.7;">{tool['desc']}</span>
                 </a>
                 """, unsafe_allow_html=True)
     
@@ -512,28 +492,22 @@ with tab_tools:
                     bg_color = "rgba(239, 68, 68, 0.1)" if mal > 0 else "rgba(16, 185, 129, 0.1)"
                     border = "#ef4444" if mal > 0 else "#10b981"
                     
-                    st.markdown(textwrap.dedent(f"""
+                    st.markdown(f"""
                     <div style="background: {bg_color}; border: 1px solid {border}; border-radius: 8px; padding: 15px; margin-bottom: 10px;">
                         <div style="font-weight: bold; color: #f8fafc;">VIRUSTOTAL DETECTION</div>
                         <div style="font-size: 1.5rem; font-family: 'JetBrains Mono'; color: #f8fafc;">{mal} / {sum(stats.values())}</div>
                     </div>
-                    """), unsafe_allow_html=True)
+                    """, unsafe_allow_html=True)
                 
-                # AbuseIPDB / URLScan
                 if ab_data:
                      st.info(f"Abuse Confidence: {ab_data.get('abuseConfidenceScore', 0)}% | ISP: {ab_data.get('isp')}")
                 if us_data:
                      st.info(f"URLScan Verdict: {us_data.get('verdict', {}).get('overall')}")
-                     if us_data.get('task', {}).get('screenshotURL'):
-                            st.image(us_data['task']['screenshotURL'])
             
             with c_right:
                 st.markdown("##### 🤖 AI ANALYST VERDICT")
-                st.markdown(textwrap.dedent(f"""
-                <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid #334155; border-radius: 8px; padding: 20px;">
-                    {ai_report}
-                </div>
-                """), unsafe_allow_html=True)
+                with st.container():
+                     st.markdown(ai_report)
 
 # --- TAB 3: THREAT PROFILER ---
 with tab_strat:
@@ -557,33 +531,13 @@ with tab_strat:
                 st.session_state['hunt_rules'] = rules
 
     with c_detail:
-        # DOSSIER CARD (USING TEXTWRAP FOR HTML FIX)
-        st.markdown(textwrap.dedent(f"""
-        <div class="report-card" style="border-left: 4px solid #f59e0b;">
-            <h2 style="margin-top:0; color: #ffffff;">{actor['name']}</h2>
-            <div style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
-                <span class="badge b-med">ORIGIN: {actor['origin']}</span>
-                <span class="badge b-high">TARGET: {actor['target']}</span>
-                <span class="badge b-low">TYPE: {actor['type']}</span>
-            </div>
-            <p style="font-size: 1.1rem; color: #e2e8f0; margin-bottom: 25px;">{actor['desc']}</p>
-            
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-                <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
-                    <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.9rem;">🛠️ KNOWN TOOLS</h5>
-                    <code style="color: #fca5a5; background: transparent;">{actor['tools']}</code>
-                </div>
-                <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
-                    <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.9rem;">📚 MITRE ATT&CK</h5>
-                    <code style="color: #fcd34d; background: transparent;">{actor['mitre']}</code>
-                </div>
-            </div>
-        </div>
-        """), unsafe_allow_html=True)
+        # USE HELPER FUNCTION TO GENERATE CLEAN HTML
+        st.markdown(get_dossier_html(actor), unsafe_allow_html=True)
 
         if 'hunt_rules' in st.session_state:
+            st.markdown("---")
             st.markdown("##### 🛡️ DETECTION LOGIC (XQL / YARA)")
-            st.code(st.session_state['hunt_rules'], language="sql")
+            st.markdown(st.session_state['hunt_rules'])
 
 # --- TAB 4: MAP ---
 with tab_map:
