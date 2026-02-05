@@ -170,7 +170,7 @@ class AIBatchProcessor:
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
-            # Increase summary context limit for deep-fetched articles
+            # Use a slightly larger context window for the scraped content
             batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:800]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
@@ -412,21 +412,44 @@ class CTICollector:
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
                         
-                        # --- DEEP FETCH FOR MALPEDIA ---
+                        # --- 🚨 MALPEDIA "DOUBLE HOP" LOGIC ---
                         if source['name'] == 'Malpedia':
-                            # Try to scrape the actual page for better context
                             try:
-                                async with session.get(entry.link, headers=HEADERS, timeout=10) as art_resp:
-                                    if art_resp.status == 200:
-                                        art_html = await art_resp.text()
-                                        art_soup = BeautifulSoup(art_html, 'html.parser')
-                                        # Generic scraper for p tags (captures description well on Malpedia)
-                                        paras = art_soup.find_all('p')
-                                        scraped_text = ' '.join([p.get_text() for p in paras])
-                                        if len(scraped_text) > 100:
-                                            # Found real content, use it!
-                                            sum_text = "Content Scraped: " + scraped_text[:1500]
-                            except: pass # Fallback to RSS summary if scraping fails
+                                # Hop 1: Get the Malpedia 'wrapper' page
+                                async with session.get(entry.link, headers=HEADERS, timeout=10) as mal_resp:
+                                    if mal_resp.status == 200:
+                                        mal_html = await mal_resp.text()
+                                        mal_soup = BeautifulSoup(mal_html, 'html.parser')
+                                        
+                                        # Hop 2: Find the real external link (usually "Open article" or similar)
+                                        target_link = None
+                                        # Look for links containing keywords
+                                        for a in mal_soup.find_all('a', href=True):
+                                            link_text = a.get_text().lower()
+                                            if "open article" in link_text or "read report" in link_text or "original source" in link_text:
+                                                target_link = a['href']
+                                                break
+                                        
+                                        # Hop 3: Fetch the REAL content
+                                        if target_link:
+                                            async with session.get(target_link, headers=HEADERS, timeout=10) as ext_resp:
+                                                # Ensure it's HTML (skip PDFs to avoid crash)
+                                                if ext_resp.status == 200 and "text/html" in ext_resp.headers.get("Content-Type", ""):
+                                                    ext_html = await ext_resp.text()
+                                                    ext_soup = BeautifulSoup(ext_html, 'html.parser')
+                                                    
+                                                    # Clean typical garbage
+                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
+                                                        noise.decompose()
+                                                    
+                                                    # Grab paragraphs
+                                                    paras = ext_soup.find_all('p')
+                                                    # Take first ~2000 chars which usually contain the executive summary
+                                                    scraped_text = ' '.join([p.get_text().strip() for p in paras if len(p.get_text()) > 20])
+                                                    
+                                                    if len(scraped_text) > 100:
+                                                        sum_text = f"[Source Scraped] {scraped_text[:1500]}"
+                            except Exception: pass # If deep fetch fails, fallback to original summary
 
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
