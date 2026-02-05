@@ -53,7 +53,6 @@ def init_db():
         summary TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
-    # Keep INCD data longer, flush generic news after 3 days
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=3)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source != 'INCD' AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -89,7 +88,7 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mod
             async with session.post(url, json=payload, headers=headers, timeout=60) as resp:
                 data = await resp.json()
                 if resp.status == 200: return data['choices'][0]['message']['content']
-                return f"Error {resp.status}"
+                return f"Error {resp.status}: {data.get('error', {}).get('message', 'Unknown Error')}"
         except Exception as e: return f"Connection Error: {e}"
 
 # --- THE BRAIN: AI PROCESSING & LOGIC ---
@@ -97,7 +96,6 @@ class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
 
-    # Advanced Severity Logic Matrix
     SEVERITY_KEYWORDS = {
         "Critical": ["active exploitation", "exploited in the wild", "cisa kev", "zero-day", "critical infrastructure", "nation-state", "hospital", "electric grid", "תשתיות קריטיות", "מתקפת סייבר רחבה", "cvss 9.8", "cvss 10"],
         "High": ["ransomware", "data leak", "data breach", "rce", "remote code execution", "poc available", "proof of concept", "cobalt strike", "כופרה", "דלף מידע", "cvss 8"],
@@ -106,16 +104,13 @@ class AIBatchProcessor:
     }
 
     def _calculate_deterministic_severity(self, item):
-        """Overrides AI severity based on keyword matching + Israel Context."""
         txt = (item.get('title', '') + " " + item.get('raw_text', '')).lower()
         source = item.get('source', '')
         ai_severity = item.get('severity', 'Low')
 
-        # 1. Absolute Rules
         if source == 'CISA KEV': return "Critical"
         if source == 'INCD' and ('התרעה' in txt or 'דחוף' in txt): return "Critical"
 
-        # 2. Keyword Search (Priority Order)
         detected_level = None
         for level in ["Critical", "High", "Medium"]:
             for kw in self.SEVERITY_KEYWORDS[level]:
@@ -124,12 +119,10 @@ class AIBatchProcessor:
                     break
             if detected_level: break
         
-        # 3. Israel Context Boost
         if ("israel" in txt or "ישראל" in txt) and ("attack" in txt or "breach" in txt or "תקיפה" in txt or "נפרץ" in txt):
             if detected_level == "Medium" or not detected_level: detected_level = "High"
             elif detected_level == "High": detected_level = "Critical"
 
-        # 4. Compare with AI result - take the stricter one
         sev_map = {"Critical": 4, "High": 3, "Medium": 2, "Low": 1, "Info": 0}
         if sev_map.get(detected_level, 0) >= sev_map.get(ai_severity, 0):
             return detected_level if detected_level else ai_severity
@@ -137,7 +130,8 @@ class AIBatchProcessor:
 
     async def analyze_batch(self, items):
         if not items: return []
-        chunk_size = 5 # Small chunks for enriched content
+        # FIX 1: Reduced Chunk Size to prevent Rate Limits
+        chunk_size = 3 
         results = []
         
         system_instruction = """
@@ -152,8 +146,8 @@ class AIBatchProcessor:
         4. **Severity**: Critical (Active Exploit), High (Ransomware/Breach), Medium (Patches), Low (Info).
         5. **corrected_date**: 
            - Compare 'suspected_date' with the text.
-           - IF the text explicitly says "Published: YYYY-MM-DD" or "Yesterday" and it differs, output the corrected ISO date.
-           - OTHERWISE, omit this field.
+           - IF text says "Published: YYYY-MM-DD" or "Yesterday" and differs, output ISO date.
+           - OTHERWISE, omit field.
         
         JSON Structure: {"items": [{"id": 0, "title": "...", "summary": "...", "category": "...", "severity": "...", "corrected_date": "OPTIONAL"}]}
         """
@@ -162,26 +156,28 @@ class AIBatchProcessor:
             chunk = items[i:i+chunk_size]
             batch_text = ""
             for idx, x in enumerate(chunk):
-                # Limit text to 1500 chars to save tokens but keep context
-                clean_text = x['raw_text'][:1500].replace("\n", " ") 
+                # FIX 2: Limit text per item to save tokens
+                clean_text = x['raw_text'][:1200].replace("\n", " ") 
                 batch_text += f"\n[ID: {idx}] | Source: {x['source']} | Suspected Date: {x['date']} | Content: {clean_text}"
             
             prompt = f"{system_instruction}\n\nRAW DATA:{batch_text}"
-            res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
+            
+            # FIX 3: Switched to 'llama-3.1-8b-instant' (Faster, higher limits)
+            res = await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=True)
             
             chunk_map = {}
             try:
                 data = json.loads(res)
                 for item in data.get("items", []): chunk_map[item.get('id')] = item
-            except: pass
+            except Exception as e:
+                # FIX 4: Explicit Error Logging
+                print(f"⚠️ AI ANALYSIS FAILED for Batch {i}. Reason: {res}")
+                print(f"DEBUG: Exception: {e}")
             
             for j in range(len(chunk)):
                 ai_res = chunk_map.get(j, {})
-                
-                # Logic Step 1: Date Correction
                 final_date = ai_res.get('corrected_date') if ai_res.get('corrected_date') else chunk[j]['date']
                 
-                # Logic Step 2: Severity Calculation
                 temp_item = {
                     "title": ai_res.get('title', chunk[j].get('title', '')),
                     "raw_text": chunk[j]['raw_text'],
@@ -190,9 +186,12 @@ class AIBatchProcessor:
                 }
                 final_severity = self._calculate_deterministic_severity(temp_item)
                 
+                # If analysis failed, show it clearly in summary but keep original data
+                summary_text = ai_res.get('summary', 'Analysis Failed - See Logs')
+                
                 results.append({
                     "title": temp_item['title'],
-                    "summary": ai_res.get('summary', 'Analysis Failed'),
+                    "summary": summary_text,
                     "category": ai_res.get('category', 'General'),
                     "severity": final_severity,
                     "url": chunk[j]['url'],
@@ -201,7 +200,6 @@ class AIBatchProcessor:
                 })
         return results
 
-    # Keeps existing IOC analysis logic
     async def analyze_single_ioc(self, ioc, ioc_type, data):
         lean_data = self._extract_key_intel(data)
         prompt = f"Analyze IOC: {ioc} ({ioc_type}). Data: {json.dumps(lean_data)}. Output MarkDown."
@@ -242,37 +240,25 @@ class CTICollector:
                 elif s['type'] == 'telegram': tasks.append(self._parse_telegram(session, s))
                 elif s['type'] == 'json_cisa': tasks.append(self._parse_cisa(session, s))
             
-            # Flatten results
             results = await asyncio.gather(*tasks)
             return [item for sublist in results for item in sublist]
 
-    # --- ENRICHMENT CORE ---
     async def _enrich_url_content(self, session, url):
-        """Scrapes the URL to find the full article body."""
         try:
             async with session.get(url, headers=HEADERS, timeout=10) as resp:
                 if resp.status != 200: return None
                 soup = BeautifulSoup(await resp.text(), "html.parser")
+                for script in soup(["script", "style", "nav", "footer", "header", "aside", "iframe"]): script.extract()
                 
-                # Cleanup
-                for script in soup(["script", "style", "nav", "footer", "header", "aside", "iframe"]):
-                    script.extract()
-                
-                # Extraction Heuristics
                 content = ""
-                if soup.find('article'):
-                    content = soup.find('article').get_text(separator=' ')
-                elif soup.find(class_=re.compile(r'post|article|content|story|body')):
-                    content = soup.find(class_=re.compile(r'post|article|content|story|body')).get_text(separator=' ')
-                else:
-                    content = ' '.join([p.get_text() for p in soup.find_all('p')])
+                if soup.find('article'): content = soup.find('article').get_text(separator=' ')
+                elif soup.find(class_=re.compile(r'post|article|content|story|body')): content = soup.find(class_=re.compile(r'post|article|content|story|body')).get_text(separator=' ')
+                else: content = ' '.join([p.get_text() for p in soup.find_all('p')])
                 
                 clean = re.sub(r'\s+', ' ', content).strip()
                 return clean if len(clean) > 100 else None
         except: return None
 
-    # --- SPECIFIC PARSERS ---
-    
     async def _parse_rss_tech(self, session, source):
         items = []
         try:
@@ -280,30 +266,19 @@ class CTICollector:
                 if resp.status != 200: return []
                 feed = feedparser.parse(await resp.text())
                 
-                # Only check top 4 to allow enrichment time
                 for entry in feed.entries[:4]:
                     if _is_url_processed(entry.link): continue
-                    
                     try: dt = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
                     except: dt = datetime.datetime.now(IL_TZ)
-                    
                     if (datetime.datetime.now(IL_TZ) - dt).days > 3: continue
 
-                    # ENRICHMENT
                     enriched_text = await self._enrich_url_content(session, entry.link)
                     if not enriched_text:
-                         # Fallback
                          raw_text = entry.title
                          if hasattr(entry, 'summary'): raw_text += "\n" + entry.summary
                          enriched_text = BeautifulSoup(raw_text, "html.parser").get_text(separator=' ')
                     
-                    items.append({
-                        "source": source['name'],
-                        "url": entry.link,
-                        "date": dt.isoformat(),
-                        "raw_text": enriched_text,
-                        "title": entry.title
-                    })
+                    items.append({"source": source['name'], "url": entry.link, "date": dt.isoformat(), "raw_text": enriched_text, "title": entry.title})
         except: pass
         return items
 
@@ -316,15 +291,7 @@ class CTICollector:
                     if _is_url_processed(entry.link): continue
                     try: dt = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
                     except: dt = datetime.datetime.now(IL_TZ)
-                    
-                    # INCD usually has good summaries, enrichment less critical here but possible
-                    items.append({
-                        "source": "INCD",
-                        "url": entry.link,
-                        "date": dt.isoformat(),
-                        "raw_text": f"{entry.title}\n{entry.summary}",
-                        "title": entry.title
-                    })
+                    items.append({"source": "INCD", "url": entry.link, "date": dt.isoformat(), "raw_text": f"{entry.title}\n{entry.summary}", "title": entry.title})
         except: pass
         return items
 
@@ -345,20 +312,13 @@ class CTICollector:
                     
                     if _is_url_processed(post_url): continue
                     
-                    # Specific Telegram Time Parsing
                     time_tag = msg.find('time')
                     if time_tag and 'datetime' in time_tag.attrs:
                         try: dt = date_parser.parse(time_tag['datetime']).astimezone(IL_TZ)
                         except: dt = datetime.datetime.now(IL_TZ)
                     else: dt = datetime.datetime.now(IL_TZ)
 
-                    items.append({
-                        "source": "INCD", 
-                        "url": post_url,
-                        "date": dt.isoformat(),
-                        "raw_text": f"TELEGRAM ALERT: {raw_text}",
-                        "title": "Telegram Alert"
-                    })
+                    items.append({"source": "INCD", "url": post_url, "date": dt.isoformat(), "raw_text": f"TELEGRAM ALERT: {raw_text}", "title": "Telegram Alert"})
         except: pass
         return items
 
@@ -370,18 +330,10 @@ class CTICollector:
                 for v in data.get('vulnerabilities', [])[:8]:
                     cve_url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
                     if _is_url_processed(cve_url): continue
-                    
-                    items.append({
-                        "source": "CISA",
-                        "url": cve_url,
-                        "date": datetime.datetime.now(IL_TZ).isoformat(),
-                        "raw_text": f"KEV Alert: {v['cveID']} - {v['vulnerabilityName']}. Description: {v['shortDescription']}",
-                        "title": v['cveID']
-                    })
+                    items.append({"source": "CISA", "url": cve_url, "date": datetime.datetime.now(IL_TZ).isoformat(), "raw_text": f"KEV Alert: {v['cveID']} - {v['vulnerabilityName']}. Description: {v['shortDescription']}", "title": v['cveID']})
         except: pass
         return items
 
-# --- TOOLS & STATIC DATA (Existing) ---
 class ThreatLookup:
     def __init__(self, vt_key=None, urlscan_key=None, abuse_key=None):
         self.vt_key, self.urlscan_key, self.abuse_key = vt_key, urlscan_key, abuse_key
@@ -389,10 +341,7 @@ class ThreatLookup:
     def query_virustotal(self, ioc, ioc_type):
         if not self.vt_key: return None
         try:
-            endpoint = f"urls/{base64.urlsafe_b64encode(ioc.encode()).decode().strip('=')}" if ioc_type == "url" else \
-                       f"ip_addresses/{ioc}" if ioc_type == "ip" else \
-                       f"domains/{ioc}" if ioc_type == "domain" else f"files/{ioc}"
-            
+            endpoint = f"urls/{base64.urlsafe_b64encode(ioc.encode()).decode().strip('=')}" if ioc_type == "url" else f"ip_addresses/{ioc}" if ioc_type == "ip" else f"domains/{ioc}" if ioc_type == "domain" else f"files/{ioc}"
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=10)
             return res.json().get('data', {}) if res.status_code == 200 else None
         except: return None
@@ -425,21 +374,13 @@ class APTSheetCollector:
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
-    # analyzed matches raw 1:1 thanks to new logic, but safe loop just in case
     for item in analyzed:
         try:
             if _is_url_processed(item['url']): continue
             c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
-                (datetime.datetime.now(IL_TZ).isoformat(), 
-                 item['date'], # Using corrected date
-                 item['source'], 
-                 item['url'], 
-                 item['title'], 
-                 item['category'], 
-                 item['severity'], 
-                 item['summary']))
+                (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], item['title'], item['category'], item['severity'], item['summary']))
             if c.rowcount > 0: cnt += 1
-        except Exception as e: pass
+        except: pass
     conn.commit()
     conn.close()
     return cnt
