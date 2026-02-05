@@ -136,15 +136,34 @@ with tab_feed:
         # --- FILTERS SECTION ---
         st.write("##### 🕵️ Filter Intelligence")
         
+        # Calculate Counts
+        cnt_all = len(df_final)
+        cnt_incd = len(df_final[df_final['source'] == 'INCD'])
+        cnt_global = len(df_final[df_final['source'] != 'INCD'])
+        
+        cnt_crit = len(df_final[df_final['severity'].str.contains('Critical|High', case=False, na=False)])
+        cnt_med = len(df_final[df_final['severity'].str.contains('Medium', case=False, na=False)])
+        cnt_info = len(df_final[df_final['severity'].str.contains('Low|Info|News', case=False, na=False)])
+
         c_src, c_sev = st.columns([1, 2])
         
         with c_src:
             st.caption("Source")
-            filter_source = st.radio("Source Filter", ["All", "INCD (מערך הסייבר)", "Global"], horizontal=True, label_visibility="collapsed")
+            filter_source = st.radio(
+                "Source Filter", 
+                [f"All ({cnt_all})", f"INCD ({cnt_incd})", f"Global ({cnt_global})"], 
+                horizontal=True, 
+                label_visibility="collapsed"
+            )
         
         with c_sev:
             st.caption("Severity")
-            filter_sev = st.radio("Severity Filter", ["All", "Critical", "Medium", "Info (Low)"], horizontal=True, label_visibility="collapsed")
+            filter_sev = st.radio(
+                "Severity Filter", 
+                [f"All", f"Critical ({cnt_crit})", f"Medium ({cnt_med})", f"Info ({cnt_info})"], 
+                horizontal=True, 
+                label_visibility="collapsed"
+            )
 
         # Apply Filters
         df_display = df_final.copy()
@@ -152,13 +171,13 @@ with tab_feed:
         # 1. Source Filter
         if "INCD" in filter_source:
             df_display = df_display[df_display['source'] == 'INCD']
-        elif filter_source == "Global":
+        elif "Global" in filter_source:
             df_display = df_display[df_display['source'] != 'INCD']
             
         # 2. Severity Filter
-        if filter_sev == "Critical":
+        if "Critical" in filter_sev:
             df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
-        elif filter_sev == "Medium":
+        elif "Medium" in filter_sev:
             df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
         elif "Info" in filter_sev:
              df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
@@ -180,7 +199,7 @@ with tab_feed:
             if row['source'] == "INCD":
                 source_display = "מערך הסייבר"
                 source_tag_class = "tag-incd"
-                rtl_class = "rtl-content" # Apply RTL only for INCD
+                rtl_class = "rtl-content"
             else:
                 source_display = row['source']
                 source_tag_class = "tag-time"
@@ -188,7 +207,8 @@ with tab_feed:
             
             st.markdown(f"""
             <div class="report-card">
-                <div style="margin-bottom: 8px; direction: ltr;"> <span class="tag {source_tag_class}">{source_display}</span>
+                <div style="margin-bottom: 8px; direction: ltr;">
+                    <span class="tag {source_tag_class}">{source_display}</span>
                     <span class="tag tag-time">{date_str}</span>
                     <span class="tag {sev_class}">{row['severity']}</span>
                     <span class="tag tag-time">{row['category']}</span>
@@ -207,7 +227,7 @@ with tab_tools:
     
     c_input, c_btn = st.columns([4, 1])
     with c_input:
-        ioc_input = st.text_input("Enter Indicator", placeholder="e.g., 1.2.3.4, evil.com").strip()
+        ioc_input = st.text_input("Enter Indicator", placeholder="e.g., 1.2.3.4, evil.com, http://bad-site.com/login").strip()
     with c_btn:
         st.write("") 
         st.write("") 
@@ -217,7 +237,7 @@ with tab_tools:
         ioc_type = identify_ioc_type(ioc_input)
         
         if not ioc_type:
-            st.error("❌ Invalid Input! Please enter a valid IP, Domain, or Hash.")
+            st.error("❌ Invalid Input! Please enter a valid IP, Domain, Hash or URL.")
         else:
             st.success(f"Identified Type: {ioc_type.upper()}")
             tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
@@ -228,7 +248,7 @@ with tab_tools:
                 vt = tl.query_virustotal(ioc_input, ioc_type)
                 results['virustotal'] = vt if vt else "No Data"
                 
-                if ioc_type == "domain":
+                if ioc_type in ["domain", "url", "ip"]:
                     st.write("Querying URLScan.io...")
                     us = tl.query_urlscan(ioc_input)
                     results['urlscan'] = us if us else "No Data"
@@ -246,12 +266,16 @@ with tab_tools:
                     malicious = stats.get('malicious', 0)
                     color = "red" if malicious > 0 else "green"
                     st.markdown(f":{color}[**Detections: {malicious}**]")
-                    st.json(stats)
+                    if 'last_analysis_stats' in results['virustotal']:
+                         st.json(results['virustotal']['last_analysis_stats'])
+                    else:
+                         # For URL we might get different structure or just analysis ID if not scanned before
+                         st.write("Analysis Data Retrieved")
                 else: st.write("N/A")
                 
             with c2:
                 st.markdown("### 🌐 URLScan")
-                if ioc_type == 'domain' and isinstance(results.get('urlscan'), dict):
+                if isinstance(results.get('urlscan'), dict):
                     verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
                     st.write(f"Verdict: **{verdict}**")
                     if results['urlscan'].get('screenshot'): st.image(results['urlscan']['screenshot'])
@@ -267,7 +291,7 @@ with tab_tools:
 
             st.divider()
             st.subheader("🤖 AI Analyst Assessment (Tier 3)")
-            with st.spinner("Generating Report..."):
+            with st.spinner("Generating Enterprise Defense Playbook..."):
                 proc = AIBatchProcessor(GROQ_KEY)
                 report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results))
                 st.markdown(report)
