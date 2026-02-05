@@ -527,15 +527,17 @@ with tab_tools:
                              st.write("**Contacted URLs:**")
                              for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
 
-                # AbuseIPDB
+                # AbuseIPDB (FIXED: Display logic updated)
                 if ab_data: 
-                     st.info(f"""
-                     **AbuseIPDB Profile**
-                     - Score: {ab_data.get('abuseConfidenceScore', 0)}%
-                     - ISP: {ab_data.get('isp', 'N/A')}
-                     - Usage: {ab_data.get('usageType', 'Unknown')}
-                     - Domain: {ab_data.get('domain', 'N/A')}
-                     """)
+                     st.markdown(f"""
+                     <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid #3b82f6; border-radius: 8px; padding: 10px; margin-top: 10px;">
+                        <div style="font-weight: bold; color: #93c5fd; margin-bottom: 5px;">ABUSEIPDB PROFILE</div>
+                        <div><b>Score:</b> {ab_data.get('abuseConfidenceScore', 0)}%</div>
+                        <div><b>ISP:</b> {ab_data.get('isp', 'N/A')}</div>
+                        <div><b>Usage:</b> {ab_data.get('usageType', 'Unknown')}</div>
+                        <div><b>Domain:</b> {ab_data.get('domain', 'N/A')}</div>
+                     </div>
+                     """, unsafe_allow_html=True)
 
                 # URLScan
                 if us_data:
@@ -590,28 +592,26 @@ with tab_strat:
 
     st.markdown("---")
     
-    # --- CAMPAIGN RADAR (RESTORED) ---
-    st.markdown("##### 📡 LIVE INTELLIGENCE FEED (CAMPAIGN RADAR)")
+    # --- CAMPAIGN RADAR (RESTORED & IMPROVED) ---
+    st.markdown("##### 📡 LATEST INTEL FEED (LIVE DB SEARCH)")
     
-    # Perform Search in DB for Actor
+    # Perform Search in DB for Actor (No time limit, top 5)
     conn = sqlite3.connect(DB_NAME)
     keywords = actor.get('keywords', []) + [actor['name']]
     query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
-    full_query = f"SELECT * FROM intel_reports WHERE { ' OR '.join(query_parts) } ORDER BY published_at DESC LIMIT 10"
+    full_query = f"SELECT * FROM intel_reports WHERE { ' OR '.join(query_parts) } ORDER BY published_at DESC LIMIT 5"
     df_hits = pd.read_sql_query(full_query, conn)
     conn.close()
 
     if not df_hits.empty:
-        st.success(f"Found {len(df_hits)} recent intelligence reports linked to {actor['name']}!")
+        st.success(f"Tracked {len(df_hits)} recent intelligence reports linked to {actor['name']}")
         for _, row in df_hits.iterrows():
             try: dt = date_parser.parse(row['published_at']).strftime('%d/%m/%Y')
             except: dt = "?"
-            with st.expander(f"{dt} | {row['title']}"):
-                st.markdown(f"**Source:** {row['source']}")
-                st.markdown(row['summary'])
-                st.markdown(f"[Read Full Report]({row['url']})")
+            # Using the existing card style for consistency
+            st.markdown(get_feed_card_html(row, dt), unsafe_allow_html=True)
     else:
-        st.info(f"No direct mentions of {actor['name']} found in the last 48h feeds.")
+        st.info(f"No specific mentions of {actor['name']} found in the collected feeds.")
 
 # --- TAB 4: MAP ---
 with tab_map:
