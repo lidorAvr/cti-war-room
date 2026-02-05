@@ -13,7 +13,7 @@ import base64
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from duckduckgo_search import DDGS  # NEW: Deep Scan Engine
+from ddgs import DDGS  # FIX: Updated import from renamed package
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
@@ -59,7 +59,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Clean old data but keep INCD and DeepWeb scans a bit longer
+    # Clean old data but keep INCD and DeepWeb scans longer
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -75,15 +75,15 @@ def _is_url_processed(url):
         return result is not None
     except: return False
 
-# --- DEEP WEB SCANNER (NEW) ---
+# --- DEEP WEB SCANNER ---
 class DeepWebScanner:
     def scan_actor(self, actor_name, limit=5):
         """Searches the deep web for recent mentions of the actor"""
         results = []
         try:
+            # Using specific query to reduce noise
             query = f'"{actor_name}" cyber threat intelligence malware analysis report'
             with DDGS() as ddgs:
-                # Searching DuckDuckGo News/Text
                 ddg_results = list(ddgs.text(query, max_results=limit))
                 
                 for res in ddg_results:
@@ -93,7 +93,7 @@ class DeepWebScanner:
                     results.append({
                         "title": res.get('title'),
                         "url": url,
-                        "date": datetime.datetime.now(IL_TZ).isoformat(), # DDG usually doesn't give precise date, assume fresh
+                        "date": datetime.datetime.now(IL_TZ).isoformat(),
                         "source": "DeepWeb",
                         "summary": res.get('body', 'No summary available.')
                     })
