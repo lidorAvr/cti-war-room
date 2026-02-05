@@ -58,6 +58,7 @@ def init_db():
         summary TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_title ON intel_reports(title)")
     
     # Clean old data but keep INCD and DeepWeb scans longer
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
@@ -177,23 +178,14 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
-        # --- ENHANCED PROMPT: FORCE DATE EXTRACTION & CLEANUP ---
         system_instruction = """
         You are a Senior CTI Analyst.
         Task: Process raw intelligence items.
         
-        CRITICAL RULES FOR 'MALPEDIA' & 'DEEPWEB' ITEMS:
-        1. **DATE**: The 'RawDate' provided is the scan time and is WRONG. You MUST find the original publication date in the 'Content'. 
-           - If you see "Published on: 2024-05-01", use that.
-           - If text has no date, use the 'RawDate' only as a last resort.
-           - Return ISO 8601 format (YYYY-MM-DDTHH:MM:SS).
-        2. **CLEANUP**: The content might contain "Menu", "Search", "Login". IGNORE garbage. Focus only on the article body.
+        CRITICAL RULES:
+        1. **DATE**: Return ISO 8601 format (YYYY-MM-DDTHH:MM:SS) based on the content.
+        2. **CLEANUP**: Ignore "Menu", "Search", "Login", "Open article". Focus on the threat.
         3. **SUMMARY**: Write a professional 3-sentence summary (Attribution, TTPs, Impact).
-        
-        GENERAL RULES:
-        - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
-        - SEVERITY: 'Critical', 'High', 'Medium', 'Low'. (Ransomware/APT = High/Critical).
-        - TITLE: Create a concise, technical title if the original is messy.
         
         Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "...", "published_at": "ISO_DATE"}]}
         """
@@ -203,10 +195,10 @@ class AIBatchProcessor:
             
             batch_lines = []
             for idx, x in enumerate(chunk):
-                # Allow more context for Malpedia scraped content
+                # Clean specific noise before sending to AI
+                clean_sum = x['summary'].replace('Open article on Malpedia', '').replace('\n', ' ').strip()
                 limit = 4500 if x['source'] in ['Malpedia', 'DeepWeb'] else 500
-                clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
-                batch_lines.append(f"ID:{idx}|Src:{x['source']}|RawDate:{x['date']}|Content:{x['title']} - {clean_sum}")
+                batch_lines.append(f"ID:{idx}|Src:{x['source']}|RawDate:{x['date']}|Content:{x['title']} - {clean_sum[:limit]}")
 
             batch_text = "\n".join(batch_lines)
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
@@ -224,7 +216,6 @@ class AIBatchProcessor:
                 final_sev = ai.get('severity', 'Medium')
                 final_cat = ai.get('category', 'News')
                 
-                # Fallback Logic
                 txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
                 if 'apt' in txt or 'ransomware' in txt:
                     final_sev = 'High'
@@ -330,7 +321,7 @@ class CTICollector:
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
                         final_url = entry.link
 
-                        # --- 🚨 MALPEDIA "DOUBLE HOP" & CLEANUP ---
+                        # --- MALPEDIA CLEANUP ---
                         if source['name'] == 'Malpedia':
                             try:
                                 # Hop 1: Malpedia Profile
@@ -340,13 +331,12 @@ class CTICollector:
                                         mal_soup = BeautifulSoup(mal_html, 'html.parser')
                                         
                                         target_link = None
-                                        # Strategy A: "Open article"
+                                        # Strategy A
                                         for a in mal_soup.find_all('a', href=True):
                                             if any(x in a.get_text().lower() for x in ["open article", "read report", "direct link"]):
                                                 target_link = a['href']
                                                 break
                                         
-                                        # Strategy B: First external link in content
                                         if not target_link:
                                             main_area = mal_soup.find('div', class_='content') or mal_soup.body
                                             for a in main_area.find_all('a', href=True):
@@ -354,7 +344,6 @@ class CTICollector:
                                                     target_link = a['href']
                                                     break
 
-                                        # Hop 2: The Real Report
                                         if target_link:
                                             final_url = target_link
                                             async with session.get(target_link, headers=HEADERS, timeout=15) as ext_resp:
@@ -362,7 +351,7 @@ class CTICollector:
                                                     ext_html = await ext_resp.text()
                                                     ext_soup = BeautifulSoup(ext_html, 'html.parser')
                                                     
-                                                    # --- SMART DATE EXTRACTION (JSON-LD) ---
+                                                    # Extract Date
                                                     extracted_date = None
                                                     scripts = ext_soup.find_all('script', type='application/ld+json')
                                                     for script in scripts:
@@ -377,7 +366,6 @@ class CTICollector:
                                                             if extracted_date: break
                                                         except: pass
                                                     
-                                                    # Fallback to Meta Tags
                                                     if not extracted_date:
                                                         for m in ext_soup.find_all('meta'):
                                                             if m.get('name') in ['article:published_time', 'date', 'pubdate']:
@@ -391,35 +379,30 @@ class CTICollector:
                                                             pub_date = dt.astimezone(IL_TZ)
                                                         except: pass
 
-                                                    # --- NOISE REMOVAL ---
-                                                    # Remove Headers, Footers, Navs, Sidebars
+                                                    # CLEANUP
                                                     for bad in ext_soup(["header", "footer", "nav", "aside", "script", "style", "form", "iframe", "noscript"]):
                                                         bad.decompose()
                                                     
-                                                    # Remove generic classes
                                                     for bad_cls in ["menu", "navigation", "sidebar", "cookie", "banner", "search"]:
                                                         for tag in ext_soup.find_all(class_=re.compile(bad_cls, re.I)):
                                                             tag.decompose()
 
-                                                    # Extract Text from likely content areas
                                                     texts = []
-                                                    # Try to find <article> or <main>
                                                     content_root = ext_soup.find('article') or ext_soup.find('main') or ext_soup.body
-                                                    
-                                                    # Get Header
                                                     h1 = ext_soup.find('h1')
                                                     if h1: texts.append(f"TITLE: {h1.get_text().strip()}")
-
-                                                    # Get Paragraphs
                                                     for p in content_root.find_all(['p', 'h2', 'h3', 'li']):
                                                         t = p.get_text().strip()
-                                                        if len(t) > 50: texts.append(t)
+                                                        if len(t) > 50 and "Open article" not in t: texts.append(t)
                                                     
                                                     scraped_text = ' '.join(texts)
                                                     if len(scraped_text) > 200:
                                                         sum_text = f"[SCRAPED_CONTENT] {scraped_text[:4000]}"
 
                             except Exception: pass 
+                        
+                        # Extra cleanup of "Open article" artifacts from any summary
+                        sum_text = sum_text.replace("Open article on Malpedia", "").strip()
 
                         items.append({"title": entry.title, "url": final_url, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
@@ -448,11 +431,10 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            # --- מניעת כפילויות מתקדמת ---
-            # בדיקה אם קיימת כבר ידיעה עם כותרת זהה מאותו מקור ב-24 השעות האחרונות
+            # De-duplication check using Title + Source
             c.execute("SELECT id FROM intel_reports WHERE title = ? AND source = ? AND published_at > datetime('now', '-1 day')", (a['title'], item['source']))
             if c.fetchone(): continue
-
+            
             final_date = a.get('published_at', item['date'])
             try:
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
