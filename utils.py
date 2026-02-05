@@ -178,7 +178,6 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
-        # --- FIX: Updated Prompt to request 'published_at' extraction ---
         system_instruction = """
         You are an expert CTI Analyst.
         Task: Analyze cyber news items and extract key metadata.
@@ -191,7 +190,7 @@ class AIBatchProcessor:
         3. DATE EXTRACTION (CRITICAL):
            - Identify the **original publication time** from the text (e.g., "Published: 2 hours ago", "Date: 2024-02-01").
            - Return it in 'published_at' field in ISO 8601 format (YYYY-MM-DDTHH:MM:SS). 
-           - If no specific date is found in text, omit the field (system will use default).
+           - If no specific date is found in text, omit the field.
         4. GENERAL:
            - TITLE: Short, informative (Max 8 words).
            - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
@@ -205,9 +204,9 @@ class AIBatchProcessor:
             
             batch_lines = []
             for idx, x in enumerate(chunk):
-                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 400
+                # Larger limit for Malpedia to include more context
+                limit = 4000 if x['source'] in ['Malpedia', 'DeepWeb'] else 500
                 clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
-                # Sending the raw date as context
                 batch_lines.append(f"ID:{idx}|Src:{x['source']}|RawDate:{x['date']}|Content:{x['title']} - {clean_sum}")
 
             batch_text = "\n".join(batch_lines)
@@ -236,7 +235,7 @@ class AIBatchProcessor:
                     "severity": final_sev, 
                     "title": ai.get('title', chunk[j]['title']),
                     "summary": ai.get('summary', chunk[j]['summary'][:350]),
-                    # Use AI extracted date if available, otherwise use scanner date
+                    # Prefer AI date, fallback to scraper date (which might be updated by Malpedia scraper)
                     "published_at": ai.get('published_at', chunk[j]['date'])
                 })
         return results
@@ -452,7 +451,7 @@ class CTICollector:
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
                         
-                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER ---
+                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER & DATE FIX ---
                         if source['name'] == 'Malpedia':
                             try:
                                 # Hop 1: Malpedia Profile Page
@@ -469,23 +468,55 @@ class CTICollector:
                                                 target_link = a['href']
                                                 break
                                         
-                                        # Hop 3: Fetch & Scrape REAL Content
+                                        # Hop 3: Fetch & Scrape REAL Content & DATE
                                         if target_link:
-                                            async with session.get(target_link, headers=HEADERS, timeout=10) as ext_resp:
-                                                if ext_resp.status == 200 and "text/html" in ext_resp.headers.get("Content-Type", ""):
+                                            async with session.get(target_link, headers=HEADERS, timeout=15) as ext_resp:
+                                                if ext_resp.status == 200:
                                                     ext_html = await ext_resp.text()
                                                     ext_soup = BeautifulSoup(ext_html, 'html.parser')
                                                     
+                                                    # --- A. DATE HUNTING ---
+                                                    found_date = None
+                                                    # Try Meta Tags
+                                                    date_metas = ['article:published_time', 'og:article:published_time', 'date', 'pubdate', 'citation_date']
+                                                    for m in ext_soup.find_all('meta'):
+                                                        m_name = m.get('name', '') or m.get('property', '')
+                                                        if any(dm in m_name.lower() for dm in date_metas):
+                                                            found_date = m.get('content')
+                                                            break
+                                                    
+                                                    # Try Time Tag
+                                                    if not found_date:
+                                                        t_tag = ext_soup.find('time')
+                                                        if t_tag: found_date = t_tag.get('datetime') or t_tag.get_text()
+
+                                                    # If Found, Update pub_date
+                                                    if found_date:
+                                                        try:
+                                                            parsed_dt = date_parser.parse(found_date)
+                                                            if not parsed_dt.tzinfo: parsed_dt = pytz.utc.localize(parsed_dt)
+                                                            pub_date = parsed_dt.astimezone(IL_TZ)
+                                                        except: pass
+
+                                                    # --- B. CONTENT EXTRACTION ---
                                                     # Cleanup
-                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "form"]):
+                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "form", "iframe", "ads"]):
                                                         noise.decompose()
                                                     
-                                                    # Extract Text (First 3000 chars)
-                                                    paras = ext_soup.find_all('p')
-                                                    scraped_text = ' '.join([p.get_text().strip() for p in paras if len(p.get_text()) > 20])
+                                                    # Extract Header (Context) and Body
+                                                    texts = []
+                                                    h1 = ext_soup.find('h1')
+                                                    if h1: texts.append(f"TITLE: {h1.get_text().strip()}")
+                                                    
+                                                    # Get significant paragraphs/divs
+                                                    for p in ext_soup.find_all(['p', 'div', 'h2']):
+                                                        txt = p.get_text().strip()
+                                                        if len(txt) > 50: texts.append(txt)
+                                                    
+                                                    scraped_text = ' '.join(texts)
                                                     
                                                     if len(scraped_text) > 100:
-                                                        sum_text = f"[Source Scraped] {scraped_text[:3000]}"
+                                                        sum_text = f"[Source Scraped] {scraped_text[:3500]}"
                             except Exception: pass 
 
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
@@ -549,7 +580,7 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            # --- FIX: USE AI EXTRACTED DATE IF AVAILABLE ---
+            # Use AI extracted date if valid, otherwise scraper date (which might be updated by Malpedia scrape)
             final_date = a.get('published_at', item['date'])
             try:
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
