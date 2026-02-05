@@ -60,8 +60,6 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
     # CLEANUP LOGIC:
-    # 1. Delete regular RSS feeds older than 48h to keep Tab 1 fresh.
-    # 2. KEEP 'DeepWeb' and 'INCD' data longer for Tab 3 (Dossier history).
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -80,13 +78,10 @@ def _is_url_processed(url):
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
     def scan_actor(self, actor_name, limit=3):
-        """Searches deep web. SMART DATE PARSING applied."""
         results = []
         try:
-            # We explicitly ask for "news" or "report" context
             query = f'"{actor_name}" cyber threat intelligence report'
             with DDGS() as ddgs:
-                # We fetch results without strict time limit first, to allow historical data for Tab 3
                 ddg_results = list(ddgs.text(query, max_results=limit))
                 
                 for res in ddg_results:
@@ -96,28 +91,15 @@ class DeepWebScanner:
                     body = res.get('body', '')
                     title = res.get('title', '')
                     
-                    # --- CRITICAL: DATE EXTRACTION LOGIC ---
-                    # Default to NOW (so it appears at top of list if no date found)
+                    # Initial date guess (will be refined by AI)
                     pub_date = datetime.datetime.now(IL_TZ)
-                    
-                    # Try to find a date string in the body snippet (e.g., "Sep 23, 2025")
-                    try:
-                        # Extract first 50 chars which usually contain the date in search snippets
-                        snippet_start = body[:100]
-                        extracted_date = date_parser.parse(snippet_start, fuzzy=True)
-                        
-                        # Sanity check: Date must be valid and not in the future
-                        if 2020 < extracted_date.year <= pub_date.year + 1:
-                            pub_date = extracted_date.astimezone(IL_TZ)
-                    except:
-                        pass # Keep default 'now' if parsing fails, but AI will analyze text later
                     
                     results.append({
                         "title": title,
                         "url": url,
-                        "date": pub_date.isoformat(), # This date determines if it shows in Tab 1
+                        "date": pub_date.isoformat(),
                         "source": "DeepWeb",
-                        "summary": body # AI will read this later to verify context
+                        "summary": body
                     })
         except Exception as e:
             print(f"Deep Scan Error: {e}")
@@ -200,22 +182,25 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
+        # UPDATED PROMPT TO HANDLE DATES AND SPECIFIC CATEGORIES
         system_instruction = """
         You are an expert CTI Analyst.
         Task: Analyze cyber news items.
         
         OUTPUT RULES:
-        1. IF Source is 'INCD' (Israel National Cyber Directorate):
-           - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-        2. IF Source is 'DeepWeb' or 'Malpedia':
-           - IMPORTANT: Check the summary text for Dates (e.g., "September 2025"). 
-           - TITLE: If the event is OLD (older than 30 days), prefix Title with "[ARCHIVE]".
-           - SEVERITY: If 'APT', 'Ransomware' or 'Zero-Day' -> 'High' or 'Critical'.
-        3. GENERAL:
-           - TITLE: Short, informative (Max 8 words).
-           - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        1. **Categories**: Choose EXACTLY ONE from: [Phishing, Malware, News, Research, Vulnerabilities, General].
+           - Use "General" only if nothing else fits.
+        2. **Severity**: [Critical, High, Medium, Info].
+        3. **Date Extraction**: Extract the **original publication date/time** from the text content (e.g., from lines like "2026-02-03 • Kaspersky"). 
+           - Format: "YYYY-MM-DD HH:MM:SS" (ISO).
+           - If NO date is found in text, return null.
+        4. **Summary**: Write 3-4 clear lines explaining the threat. Do NOT repeat the title word-for-word.
+        5. **Title**: Short and informative (Max 8 words).
+        6. **Language**:
+           - IF Source is 'INCD' -> Hebrew.
+           - ELSE -> English.
         
-        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
+        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "...", "published_date": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
@@ -223,7 +208,7 @@ class AIBatchProcessor:
             
             batch_lines = []
             for idx, x in enumerate(chunk):
-                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 400
+                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 500
                 clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
                 batch_lines.append(f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {clean_sum}")
 
@@ -243,11 +228,26 @@ class AIBatchProcessor:
                 final_sev = ai.get('severity', 'Medium')
                 final_cat = ai.get('category', 'News')
                 
+                # DATE CORRECTION LOGIC
+                extracted_date = ai.get('published_date')
+                final_date = chunk[j]['date'] # Default to scan time/RSS time
+                
+                if extracted_date:
+                    try:
+                        # Try to parse what AI found
+                        dt = date_parser.parse(extracted_date)
+                        if not dt.tzinfo:
+                            dt = dt.replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        final_date = dt.isoformat()
+                    except:
+                        pass # If AI returned garbage, keep original
+                
                 results.append({
                     "category": final_cat, 
                     "severity": final_sev, 
                     "title": ai.get('title', chunk[j]['title']),
-                    "summary": ai.get('summary', chunk[j]['summary'][:350])
+                    "summary": ai.get('summary', chunk[j]['summary'][:350]),
+                    "date": final_date # This will now hold the AI-extracted date if found
                 })
         return results
 
@@ -512,17 +512,13 @@ class CTICollector:
 
     async def get_all_data(self):
         async with aiohttp.ClientSession() as session:
-            # 1. Fetch Standard Feeds
             tasks = [self.fetch_item(session, s) for s in self.SOURCES]
             results = await asyncio.gather(*tasks)
             all_items = [i for sub in results for i in sub]
             
-            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS
-            # We add this here so it runs automatically with every refresh
             scanner = DeepWebScanner()
             actors = APTSheetCollector().fetch_threats()
             for actor in actors:
-                # Limit to 2 results per actor per run to avoid rate limits/spam
                 actor_hits = scanner.scan_actor(actor['name'], limit=2) 
                 if actor_hits:
                     all_items.extend(actor_hits)
@@ -536,8 +532,11 @@ def save_reports(raw, analyzed):
         if i < len(analyzed):
             a = analyzed[i]
             try:
+                # Use the AI-refined date if available (stored in a['date']), else fallback to raw item['date']
+                final_date = a.get('date', item['date'])
+                
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
+                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
                 if c.rowcount > 0: cnt += 1
             except: pass
     conn.commit()
