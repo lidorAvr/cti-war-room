@@ -13,7 +13,7 @@ import base64
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
@@ -26,14 +26,7 @@ HEADERS = {
     'Referer': 'https://www.google.com/'
 }
 
-# --- HELPER FUNCTIONS ---
-def clean_html(raw_html):
-    """Cleans HTML tags from text safely."""
-    if not raw_html: return ""
-    cleanr = re.compile('<.*?>')
-    cleantext = re.sub(cleanr, '', str(raw_html))
-    return cleantext.replace('"', '&quot;').strip()
-
+# --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
     ioc = ioc.strip()
     if re.match(r'^https?://', ioc) or re.match(r'^www\.', ioc):
@@ -65,9 +58,10 @@ def init_db():
         summary TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_pub ON intel_reports(published_at)")
     
-    # ניקוי: מוחקים RSS רגיל ישן, אך משאירים DeepWeb ו-INCD להיסטוריה
+    # CLEANUP LOGIC:
+    # 1. Delete regular RSS feeds older than 48h to keep Tab 1 fresh.
+    # 2. KEEP 'DeepWeb' and 'INCD' data longer for Tab 3 (Dossier history).
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -83,38 +77,16 @@ def _is_url_processed(url):
         return result is not None
     except: return False
 
-def save_reports(raw, analyzed):
-    conn = sqlite3.connect(DB_NAME)
-    c, cnt = conn.cursor(), 0
-    now_ts = datetime.datetime.now(IL_TZ).isoformat()
-    
-    for i, item in enumerate(raw):
-        if i < len(analyzed):
-            a = analyzed[i]
-            try:
-                # שימוש בתאריך המקורי שנמצא (published_at) ולא בזמן הסריקה הנוכחי
-                c.execute("""INSERT OR IGNORE INTO intel_reports 
-                             (timestamp, published_at, source, url, title, category, severity, summary) 
-                             VALUES (?,?,?,?,?,?,?,?)""",
-                    (now_ts, item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
-                if c.rowcount > 0: cnt += 1
-            except Exception as e: 
-                pass
-    conn.commit()
-    conn.close()
-    return cnt
-
-# --- DEEP WEB SCANNER (SMART & AUTOMATED) ---
+# --- DEEP WEB SCANNER ---
 class DeepWebScanner:
     def scan_actor(self, actor_name, limit=3):
-        """Scans for Actor Activity - Runs Automatically via Collector"""
+        """Searches deep web. SMART DATE PARSING applied."""
         results = []
-        now = datetime.datetime.now(IL_TZ)
-        
         try:
-            # שימוש ב-DDGS העדכני
+            # We explicitly ask for "news" or "report" context
             query = f'"{actor_name}" cyber threat intelligence report'
             with DDGS() as ddgs:
+                # We fetch results without strict time limit first, to allow historical data for Tab 3
                 ddg_results = list(ddgs.text(query, max_results=limit))
                 
                 for res in ddg_results:
@@ -124,51 +96,31 @@ class DeepWebScanner:
                     body = res.get('body', '')
                     title = res.get('title', '')
                     
-                    # --- חילוץ תאריכים חכם ---
-                    # המטרה: למנוע הצפת ה-Live Feed במידע ישן.
-                    # מנסים למצוא תאריך בגוף הטקסט. אם נמצא, משתמשים בו. אם לא, משתמשים בעכשיו.
-                    pub_date = now
+                    # --- CRITICAL: DATE EXTRACTION LOGIC ---
+                    # Default to NOW (so it appears at top of list if no date found)
+                    pub_date = datetime.datetime.now(IL_TZ)
+                    
+                    # Try to find a date string in the body snippet (e.g., "Sep 23, 2025")
                     try:
-                        # מחפשים תבניות תאריך ב-150 התווים הראשונים
-                        snippet_start = body[:200]
-                        # dateutil יודע להתמודד עם פורמטים כמו "Jan 5, 2024" או "2023-10-10"
+                        # Extract first 50 chars which usually contain the date in search snippets
+                        snippet_start = body[:100]
                         extracted_date = date_parser.parse(snippet_start, fuzzy=True)
                         
-                        # וולידציה: שהתאריך הגיוני (בין 2020 לעוד שנה מהיום)
-                        if 2020 <= extracted_date.year <= now.year + 1:
-                            # אם התאריך לא מכיל אזור זמן, מוסיפים אותו
-                            if extracted_date.tzinfo is None:
-                                pub_date = pytz.utc.localize(extracted_date).astimezone(IL_TZ)
-                            else:
-                                pub_date = extracted_date.astimezone(IL_TZ)
-                    except: 
-                        pass # אם נכשל, נשארים עם 'now'
+                        # Sanity check: Date must be valid and not in the future
+                        if 2020 < extracted_date.year <= pub_date.year + 1:
+                            pub_date = extracted_date.astimezone(IL_TZ)
+                    except:
+                        pass # Keep default 'now' if parsing fails, but AI will analyze text later
                     
                     results.append({
                         "title": title,
                         "url": url,
-                        "date": pub_date.isoformat(),
+                        "date": pub_date.isoformat(), # This date determines if it shows in Tab 1
                         "source": "DeepWeb",
-                        "summary": body
+                        "summary": body # AI will read this later to verify context
                     })
         except Exception as e:
-            print(f"Deep Scan Error for {actor_name}: {e}")
-        return results
-
-    def scan_ioc(self, ioc, limit=5):
-        """ACTIVE OSINT SCAN FOR IOC (Smart AI Feature)"""
-        results = []
-        try:
-            query = f'"{ioc}" official site OR cyber security reputation OR malware analysis'
-            with DDGS() as ddgs:
-                ddg_results = list(ddgs.text(query, max_results=limit))
-                for res in ddg_results:
-                    results.append({
-                        "title": res.get('title'),
-                        "snippet": res.get('body'),
-                        "source": "Web Search"
-                    })
-        except: pass
+            print(f"Deep Scan Error: {e}")
         return results
 
 # --- CONNECTION & AI ENGINES ---
@@ -189,8 +141,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mod
     async with aiohttp.ClientSession() as session:
         try:
             async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
-                if resp.status == 429:
-                    return "Error: Rate Limit (429). Please wait."
                 data = await resp.json()
                 if resp.status == 200: return data['choices'][0]['message']['content']
                 return f"Error {resp.status}: {data.get('error', {}).get('message', 'Unknown error')}"
@@ -200,6 +150,19 @@ class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
         
+    def _prune_data(self, data, max_list_items=5):
+        if isinstance(data, dict):
+            new_data = {}
+            for k, v in data.items():
+                if k in ['icon', 'favicon', 'html', 'screenshot', 'raw_response', 'response_headers']:
+                    continue
+                new_data[k] = self._prune_data(v, max_list_items)
+            return new_data
+        elif isinstance(data, list):
+            return [self._prune_data(i, max_list_items) for i in data[:max_list_items]]
+        else:
+            return data
+
     def _extract_key_intel(self, raw_data):
         summary = {}
         if 'virustotal' in raw_data and isinstance(raw_data['virustotal'], dict):
@@ -207,16 +170,28 @@ class AIBatchProcessor:
             attrs = vt.get('attributes', {})
             rels = vt.get('relationships', {})
             summary['virustotal'] = {
+                'reputation': attrs.get('reputation'),
                 'stats': attrs.get('last_analysis_stats'),
                 'tags': attrs.get('tags'),
+                'country': attrs.get('country'),
+                'asn': attrs.get('asn'),
                 'as_owner': attrs.get('as_owner'),
-                'passive_dns': [r.get('attributes', {}).get('host_name') for r in rels.get('resolutions', {}).get('data', [])[:5]]
+                'passive_dns': [r.get('attributes', {}).get('host_name') for r in rels.get('resolutions', {}).get('data', [])[:10]],
+                'contacted_urls': [u.get('context_attributes', {}).get('url') for u in rels.get('contacted_urls', {}).get('data', [])[:5]]
             }
         if 'urlscan' in raw_data and isinstance(raw_data['urlscan'], dict):
             us = raw_data['urlscan']
             summary['urlscan'] = {
                 'verdict': us.get('verdict', {}).get('overall'),
+                'country': us.get('page', {}).get('country'),
                 'target': us.get('task', {}).get('url')
+            }
+        if 'abuseipdb' in raw_data and isinstance(raw_data['abuseipdb'], dict):
+            ab = raw_data['abuseipdb']
+            summary['abuseipdb'] = {
+                'score': ab.get('abuseConfidenceScore'),
+                'isp': ab.get('isp'),
+                'usage': ab.get('usageType')
             }
         return summary
 
@@ -228,92 +203,82 @@ class AIBatchProcessor:
         system_instruction = """
         You are an expert CTI Analyst.
         Task: Analyze cyber news items.
+        
         OUTPUT RULES:
-        1. IF Source is 'INCD' -> Hebrew.
-        2. IF Source is 'DeepWeb' -> Check Title/Summary for dates. If date is older than 6 months, prefix Title with [ARCHIVE].
-        3. GENERAL -> JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
+        1. IF Source is 'INCD' (Israel National Cyber Directorate):
+           - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
+        2. IF Source is 'DeepWeb' or 'Malpedia':
+           - IMPORTANT: Check the summary text for Dates (e.g., "September 2025"). 
+           - TITLE: If the event is OLD (older than 30 days), prefix Title with "[ARCHIVE]".
+           - SEVERITY: If 'APT', 'Ransomware' or 'Zero-Day' -> 'High' or 'Critical'.
+        3. GENERAL:
+           - TITLE: Short, informative (Max 8 words).
+           - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        
+        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
+            
             batch_lines = []
             for idx, x in enumerate(chunk):
-                batch_lines.append(f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:400]}")
+                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 400
+                clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
+                batch_lines.append(f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {clean_sum}")
 
-            prompt = f"{system_instruction}\nRaw Data:\n{'\n'.join(batch_lines)}"
+            batch_text = "\n".join(batch_lines)
+            prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
+            res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
+            chunk_map = {}
             try:
-                res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
-                if "Error" in res: # Fallback if heavy model fails
-                     res = await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=True)
-                
-                chunk_map = {}
                 data = json.loads(res)
                 for item in data.get("items", []): chunk_map[item.get('id')] = item
-            except: 
-                chunk_map = {} # Fail gracefully
+            except: pass
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
+                
+                final_sev = ai.get('severity', 'Medium')
+                final_cat = ai.get('category', 'News')
+                
                 results.append({
-                    "category": ai.get('category', 'News'), 
-                    "severity": ai.get('severity', 'Medium'), 
+                    "category": final_cat, 
+                    "severity": final_sev, 
                     "title": ai.get('title', chunk[j]['title']),
-                    "summary": ai.get('summary', chunk[j]['summary'])
+                    "summary": ai.get('summary', chunk[j]['summary'][:350])
                 })
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        # 1. Extract Technical Data
         lean_data = self._extract_key_intel(data)
         
-        # 2. RUN ACTIVE DEEP WEB SCAN (OSINT) - This makes the AI "Smart"
-        scanner = DeepWebScanner()
-        osint_hits = scanner.scan_ioc(ioc, limit=4)
-        
-        # 3. Construct Smart Prompt
         prompt = f"""
-        You are a Senior Tier 3 CTI Analyst.
-        Your goal: Provide an operational verdict for this IOC by CROSS-REFERENCING Technical Data with Open Source Intelligence (OSINT).
-
-        TARGET: {ioc} ({ioc_type})
-
-        --- DATA SOURCE 1: TECHNICAL TELEMETRY (VT, URLScan) ---
-        {json.dumps(lean_data)}
-
-        --- DATA SOURCE 2: REAL-TIME WEB SEARCH (OSINT) ---
-        {json.dumps(osint_hits)}
-
-        --- ANALYSIS INSTRUCTIONS (CRITICAL) ---
-        1. **FALSE POSITIVE CHECK**: Read the OSINT snippets carefully. 
-           - Does this look like an official website of a legitimate organization (Government, Bank, Public Infrastructure, Known Brand)?
-           - Example: 'kvish6', 'post.il', 'bankhapoalim'.
-           - IF YES (Official Site) AND VirusTotal Detections < 2 -> **VERDICT MUST BE CLEAN**.
-           - Do NOT assume "Undetected" means "Suspicious". "Undetected" on a legitimate business site means SAFE.
-
-        2. **THREAT CHECK**: Do the OSINT results mention "malware", "phishing", "C2", or "breach" linked to this specific domain?
-           - IF YES -> VERDICT IS MALICIOUS.
-
-        3. **VERDICT OPTIONS**:
-           - Clean: Official business/gov site with no malware indications.
-           - Malicious: Clear evidence of hostility.
-           - Suspicious: Ambiguous data (e.g., new domain, no content, no OSINT context).
-
-        Output Format (Markdown):
+        Act as a Senior Tier 3 SOC Analyst.
+        Your task is to provide an OPERATIONAL analysis for an Enterprise Environment.
+        
+        Target IOC: {ioc} ({ioc_type})
+        Intelligence Summary: {json.dumps(lean_data)}
+        
+        Output Structure (Markdown, English Only):
+        
         ### 🛡️ Operational Verdict
         * **Verdict**: [Malicious / Suspicious / Clean]
         * **Confidence**: [High / Medium / Low]
-        * **Reasoning**: <Explain using the OSINT findings. E.g., "Identified as official site of X via web search, confirmed by 0 VT detections.">
-
-        ### 🏢 Enterprise Defense Playbook
-        * **Action**: <Block / Monitor / Whitelist>
-        * **Network**: <Specific rule>
-        * **Endpoint**: <Specific instruction>
-
-        ### 🔬 Intelligence Context
-        * Summarize the Web Search findings.
-        """
+        * **Reasoning**: Briefly explain why based on the engines/data.
         
+        ### 🏢 Enterprise Defense Playbook (Action Items)
+        * **Network (Firewall/Proxy)**: specific rule to apply (e.g., Block Domain, Drop Traffic).
+        * **Endpoint (EDR)**: What to hunt for? (e.g., "Search for process spawning cmd.exe connecting to this IP").
+        * **SIEM / Log Analysis**: Provide a specific search concept (e.g., "Look for HTTP GET requests to...").
+        * **Containment**: Immediate steps if traffic is seen.
+
+        ### 🔬 Technical Context
+        * Analyze the available attributes and relations.
+        * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
+        * If clean, confirm it's a False Positive risk.
+        """
         res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
         if "Error" in res:
             return await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=False)
@@ -348,40 +313,112 @@ class ThreatLookup:
             
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=15)
             if res.status_code == 200: return res.json().get('data', {})
+            if res.status_code in [400, 403, 500, 504]:
+                res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
+                if res.status_code == 200: return res.json().get('data', {})
             return None
         except: return None
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=15)
+            search_query = ioc
+            try:
+                if "://" in ioc:
+                    parsed = urlparse(ioc)
+                    if parsed.netloc: search_query = f"domain:{parsed.netloc}"
+            except: pass
+            
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=15)
             data = res.json()
             if data.get('results'):
-                return requests.get(f"https://urlscan.io/api/v1/result/{data['results'][0]['_id']}/", headers={"API-Key": self.urlscan_key}, timeout=15).json()
+                first_hit = data['results'][0]
+                scan_uuid = first_hit.get('_id')
+                if scan_uuid:
+                    full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_uuid}/", headers={"API-Key": self.urlscan_key}, timeout=15)
+                    if full_res.status_code == 200: return full_res.json()
             return None
         except: return None
 
     def query_abuseipdb(self, ip):
         if not self.abuse_key: return None
         try:
-            return requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.abuse_key, 'Accept': 'application/json'}, params={'ipAddress': ip}, timeout=10).json().get('data', {})
+            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.abuse_key, 'Accept': 'application/json'}, params={'ipAddress': ip}, timeout=10)
+            return res.json().get('data', {})
         except: return None
 
+# --- STRATEGIC INTEL & TOOLS ---
 class AnalystToolkit:
     @staticmethod
     def get_tools():
         return {
-            "Analysis": [{"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "Decoding tool"}],
-            "Lookup": [{"name": "VirusTotal", "url": "https://www.virustotal.com/", "desc": "File/URL Analysis"}]
+            "Analysis & Sandboxing": [
+                {"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "The Swiss Army Knife of data decoding."},
+                {"name": "Any.Run", "url": "https://app.any.run/", "desc": "Interactive Malware Sandbox."},
+                {"name": "UnpacMe", "url": "https://www.unpac.me/", "desc": "Automated Malware Unpacking."},
+                {"name": "Hybrid Analysis", "url": "https://www.hybrid-analysis.com/", "desc": "Free malware analysis service."}
+            ],
+            "Lookup & Reputation": [
+                {"name": "VirusTotal", "url": "https://www.virustotal.com/", "desc": "Analyze suspicious files/URLs."},
+                {"name": "AbuseIPDB", "url": "https://www.abuseipdb.com/", "desc": "Check IP reputation."},
+                {"name": "URLScan.io", "url": "https://urlscan.io/", "desc": "Website scanner for suspicious URLs."},
+                {"name": "Talos Reputation", "url": "https://talosintelligence.com/reputation_center", "desc": "Cisco Talos IP/Domain check."}
+            ],
+            "Intelligence & Frameworks": [
+                {"name": "MITRE ATT&CK", "url": "https://attack.mitre.org/", "desc": "Knowledge base of adversary tactics."},
+                {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/", "desc": "Resource for rapid identification of malware."},
+                {"name": "LOLBAS", "url": "https://lolbas-project.github.io/", "desc": "Living Off The Land Binaries and Scripts."},
+                {"name": "AlienVault OTX", "url": "https://otx.alienvault.com/", "desc": "Open Threat Exchange community."}
+            ]
         }
 
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "keywords": ["muddywater", "static_kitten"], "mitre": "T1059", "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/muddywater", "desc": "MOIS-affiliated group. Known for social engineering."},
-            {"name": "OilRig", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "DNS Tunneling", "keywords": ["oilrig", "apt34"], "mitre": "T1071", "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/oilrig", "desc": "Targets critical infrastructure."},
-            {"name": "Imperial Kitten", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "IMAPLoader", "keywords": ["imperial kitten", "tortoiseshell"], "mitre": "T1566", "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/imperial_kitten", "desc": "IRGC affiliated. Focus on shipping/logistics."},
-            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "BiBiWiper", "keywords": ["agonizing serpens", "agrius"], "mitre": "T1485", "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/agonizing_serpens", "desc": "Destructive attacks masquerading as ransomware."}
+            {
+                "name": "MuddyWater", 
+                "origin": "Iran", 
+                "target": "Israel", 
+                "type": "Espionage", 
+                "tools": "PowerShell, ScreenConnect, Ligolo", 
+                "keywords": ["muddywater", "static_kitten", "mercury", "ligolo", "screenconnect"],
+                "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure. Known for social engineering.", 
+                "mitre": "T1059, T1105, T1566",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/muddywater"
+            },
+            {
+                "name": "OilRig (APT34)", 
+                "origin": "Iran", 
+                "target": "Israel / Middle East", 
+                "type": "Espionage", 
+                "tools": "DNS Tunneling, SideTwist, Karkoff", 
+                "keywords": ["oilrig", "apt34", "helix_kitten", "cobalt_gypsy", "sidetwist", "karkoff"],
+                "desc": "Sophisticated espionage targeting critical sectors (Finance, Energy, Gov).", 
+                "mitre": "T1071.004, T1048, T1132",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/oilrig"
+            },
+            {
+                "name": "Agonizing Serpens", 
+                "origin": "Iran", 
+                "target": "Israel", 
+                "type": "Destructive", 
+                "tools": "Wipers (BiBiWiper), SQL Injection", 
+                "keywords": ["agonizing serpens", "agrius", "bibiwiper", "bibi-linux", "moneybird"],
+                "desc": "Destructive attacks masquerading as ransomware. Targeted Israeli education and tech sectors.", 
+                "mitre": "T1485, T1486, T1190",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/agonizing_serpens"
+            },
+            {
+                "name": "Imperial Kitten", 
+                "origin": "Iran", 
+                "target": "Israel", 
+                "type": "Espionage/Cyber-Enabled Influence", 
+                "tools": "IMAPLoader, Standard Python Backdoors", 
+                "keywords": ["imperial kitten", "tortoise shell", "imaploader", "yellow liderc"],
+                "desc": "IRGC affiliated. Focus on transportation, logistics, and maritime.", 
+                "mitre": "T1566, T1071, T1021",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/imperial_kitten"
+            }
         ]
 
 class CTICollector:
@@ -389,8 +426,10 @@ class CTICollector:
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
-        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list", "type": "rss"},
-        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"}
+        {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest", "type": "rss"},
+        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
+        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
     ]
 
     async def fetch_item(self, session, source):
@@ -405,34 +444,70 @@ class CTICollector:
                 
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    entries = feed.entries[:4] if is_incd else feed.entries[:10]
-                    for entry in entries:
+                    entries_to_check = feed.entries[:4] if is_incd else feed.entries[:10]
+                    
+                    for entry in entries_to_check:
                         pub_date = now
-                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                            pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        try:
+                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                                pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        except: pass
                         
-                        # חוק ה-48 שעות למקורות חיצוניים
-                        if not is_incd and (now - pub_date).total_seconds() > (48 * 3600): continue
+                        if not is_incd:
+                            if (now - pub_date).total_seconds() > (48 * 3600): continue
+
                         if _is_url_processed(entry.link): continue
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
-                
+
+                elif source['type'] == 'json':
+                     data = json.loads(content)
+                     for v in data.get('vulnerabilities', [])[:10]:
+                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
+                         if _is_url_processed(url): continue
+                         try: pub_date = date_parser.parse(v['dateAdded']).replace(tzinfo=IL_TZ)
+                         except: pub_date = now
+                         if (now - pub_date).total_seconds() > 172800: continue
+                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
+
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    for msg in msgs[-5:]:
-                         text_div = msg.find('div', class_='tgme_widget_message_text')
-                         if not text_div: continue
-                         text = text_div.get_text(separator=' ')[:800]
-                         
-                         date_link = msg.find('a', class_='tgme_widget_message_date')
-                         post_link = date_link['href'] if date_link else f"t.me/{int(now.timestamp())}"
-                         if _is_url_processed(post_link): continue
+                    msgs_to_check = msgs[-4:] if is_incd else msgs[-10:]
+                    
+                    for msg in msgs_to_check:
+                        try:
+                            text_div = msg.find('div', class_='tgme_widget_message_text')
+                            if not text_div: continue
+                            text = text_div.get_text(separator=' ')
+                            
+                            pub_date = now
+                            time_span = msg.find('time', class_='time')
+                            if time_span and 'datetime' in time_span.attrs:
+                                try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
+                                except: pass
+                            
+                            if not is_incd:
+                                if (now - pub_date).total_seconds() > 432000: continue
+                            
+                            date_link = msg.find('a', class_='tgme_widget_message_date')
+                            post_link = date_link['href'] if date_link else f"https://t.me/s/Israel_Cyber?t={int(now.timestamp())}"
+                            
+                            if _is_url_processed(post_link): continue
+                            
+                            items.append({
+                                "title": "INCD Alert (Telegram)", 
+                                "url": post_link, 
+                                "date": pub_date.isoformat(), 
+                                "source": "INCD", 
+                                "summary": text[:800]
+                            })
+                        except: pass
 
-                         items.append({"title": "INCD Alert", "url": post_link, "date": now.isoformat(), "source": "INCD", "summary": text})
-
-        except: pass
+        except Exception as e: pass
         return items
 
     async def get_all_data(self):
@@ -442,13 +517,29 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             all_items = [i for sub in results for i in sub]
             
-            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS (Background Job)
-            # זה רץ ברקע ומכניס מידע ל-DB, שיוצג ב-Threat Profiler בלבד
+            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS
+            # We add this here so it runs automatically with every refresh
             scanner = DeepWebScanner()
             actors = APTSheetCollector().fetch_threats()
             for actor in actors:
-                # סריקה מוגבלת ל-2 תוצאות לכל שחקן בכל ריצה כדי לא להעמיס
-                hits = scanner.scan_actor(actor['name'], limit=2) 
-                if hits: all_items.extend(hits)
+                # Limit to 2 results per actor per run to avoid rate limits/spam
+                actor_hits = scanner.scan_actor(actor['name'], limit=2) 
+                if actor_hits:
+                    all_items.extend(actor_hits)
             
             return all_items
+
+def save_reports(raw, analyzed):
+    conn = sqlite3.connect(DB_NAME)
+    c, cnt = conn.cursor(), 0
+    for i, item in enumerate(raw):
+        if i < len(analyzed):
+            a = analyzed[i]
+            try:
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
+                if c.rowcount > 0: cnt += 1
+            except: pass
+    conn.commit()
+    conn.close()
+    return cnt
