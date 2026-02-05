@@ -14,12 +14,13 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- HTML GENERATORS ---
+# --- HELPER: CLEAN HTML FROM TEXT ---
 def clean_html(raw_html):
     cleanr = re.compile('<.*?>')
     cleantext = re.sub(cleanr, '', str(raw_html))
     return cleantext.replace('"', '&quot;').strip()
 
+# --- HTML GENERATORS (DARK MODE STYLE) ---
 def get_status_html(ok, msg):
     color = "#4ade80" if ok else "#f87171"
     status = "ONLINE" if ok else "OFFLINE"
@@ -53,6 +54,7 @@ def get_feed_card_html(row, date_str):
     align = 'right' if is_incd else 'left'
     dir = 'rtl' if is_incd else 'ltr'
     
+    # Clean summary to prevent HTML breakage
     clean_summary = clean_html(row['summary'])
     
     return f"""
@@ -421,8 +423,7 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ IN
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
-    # FILTER: Exclude DeepWeb from Live Feed
-    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
+    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
     df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
@@ -594,7 +595,7 @@ with tab_strat:
     # --- CAMPAIGN RADAR (RESTORED & IMPROVED) ---
     st.markdown("##### 📡 LATEST INTEL FEED (LIVE DB SEARCH)")
     
-    # Perform Search in DB for Actor (All history, top 5)
+    # Perform Search in DB for Actor (No time limit, top 5)
     conn = sqlite3.connect(DB_NAME)
     keywords = actor.get('keywords', []) + [actor['name']]
     query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
@@ -612,7 +613,31 @@ with tab_strat:
     else:
         st.info(f"No specific mentions of {actor['name']} found in the collected feeds.")
         
-    st.caption(f"This feed automatically scans open sources for '{actor['name']}' every 15 minutes.")
+    # --- NEW DEEP WEB SCAN BUTTON (Manual as requested) ---
+    st.markdown("---")
+    c_scan_txt, c_scan_btn = st.columns([3, 1])
+    with c_scan_txt:
+        st.caption("Missing critical intel? Initiate a Deep Web Scan to hunt for recent mentions of this actor across the open web.")
+    with c_scan_btn:
+        if st.button("⚡ DEEP SCAN & IMPORT", use_container_width=True):
+            scanner = DeepWebScanner()
+            proc = AIBatchProcessor(GROQ_KEY)
+            with st.status(f"Hunting for {actor['name']} artifacts...", expanded=True) as status:
+                status.write("🔍 Scanning Deep Web sources...")
+                raw_hits = scanner.scan_actor(actor['name'])
+                
+                if raw_hits:
+                    status.write(f"🧠 Analyzing {len(raw_hits)} findings with AI...")
+                    analyzed_hits = asyncio.run(proc.analyze_batch(raw_hits))
+                    
+                    status.write("💾 Saving intelligence to database...")
+                    count = save_reports(raw_hits, analyzed_hits)
+                    
+                    status.update(label=f"Scan Complete! Imported {count} new items.", state="complete", expanded=False)
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    status.update(label="No new intelligence found.", state="error", expanded=False)
 
 # --- TAB 4: MAP ---
 with tab_map:
