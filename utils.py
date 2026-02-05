@@ -13,7 +13,7 @@ import base64
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from ddgs import DDGS  # FIX: Updated import from renamed package
+from ddgs import DDGS
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
@@ -59,7 +59,9 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Clean old data but keep INCD and DeepWeb scans longer
+    # CLEANUP LOGIC:
+    # 1. Delete regular RSS feeds older than 48h to keep Tab 1 fresh.
+    # 2. KEEP 'DeepWeb' and 'INCD' data longer for Tab 3 (Dossier history).
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -77,25 +79,45 @@ def _is_url_processed(url):
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
-    def scan_actor(self, actor_name, limit=5):
-        """Searches the deep web for recent mentions of the actor"""
+    def scan_actor(self, actor_name, limit=3):
+        """Searches deep web. SMART DATE PARSING applied."""
         results = []
         try:
-            # Using specific query to reduce noise
-            query = f'"{actor_name}" cyber threat intelligence malware analysis report'
+            # We explicitly ask for "news" or "report" context
+            query = f'"{actor_name}" cyber threat intelligence report'
             with DDGS() as ddgs:
+                # We fetch results without strict time limit first, to allow historical data for Tab 3
                 ddg_results = list(ddgs.text(query, max_results=limit))
                 
                 for res in ddg_results:
                     url = res.get('href')
                     if _is_url_processed(url): continue
                     
+                    body = res.get('body', '')
+                    title = res.get('title', '')
+                    
+                    # --- CRITICAL: DATE EXTRACTION LOGIC ---
+                    # Default to NOW (so it appears at top of list if no date found)
+                    pub_date = datetime.datetime.now(IL_TZ)
+                    
+                    # Try to find a date string in the body snippet (e.g., "Sep 23, 2025")
+                    try:
+                        # Extract first 50 chars which usually contain the date in search snippets
+                        snippet_start = body[:100]
+                        extracted_date = date_parser.parse(snippet_start, fuzzy=True)
+                        
+                        # Sanity check: Date must be valid and not in the future
+                        if 2020 < extracted_date.year <= pub_date.year + 1:
+                            pub_date = extracted_date.astimezone(IL_TZ)
+                    except:
+                        pass # Keep default 'now' if parsing fails, but AI will analyze text later
+                    
                     results.append({
-                        "title": res.get('title'),
+                        "title": title,
                         "url": url,
-                        "date": datetime.datetime.now(IL_TZ).isoformat(),
+                        "date": pub_date.isoformat(), # This date determines if it shows in Tab 1
                         "source": "DeepWeb",
-                        "summary": res.get('body', 'No summary available.')
+                        "summary": body # AI will read this later to verify context
                     })
         except Exception as e:
             print(f"Deep Scan Error: {e}")
@@ -185,12 +207,12 @@ class AIBatchProcessor:
         OUTPUT RULES:
         1. IF Source is 'INCD' (Israel National Cyber Directorate):
            - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-        2. IF Source is 'Malpedia' OR 'DeepWeb':
-           - SUMMARY: Synthesize the text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets.
+        2. IF Source is 'DeepWeb' or 'Malpedia':
+           - IMPORTANT: Check the summary text for Dates (e.g., "September 2025"). 
+           - TITLE: If the event is OLD (older than 30 days), prefix Title with "[ARCHIVE]".
            - SEVERITY: If 'APT', 'Ransomware' or 'Zero-Day' -> 'High' or 'Critical'.
         3. GENERAL:
            - TITLE: Short, informative (Max 8 words).
-           - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
            - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
         Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
@@ -221,11 +243,6 @@ class AIBatchProcessor:
                 final_sev = ai.get('severity', 'Medium')
                 final_cat = ai.get('category', 'News')
                 
-                # Fallback Logic
-                txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
-                if 'apt' in txt or 'ransomware' in txt:
-                    final_sev = 'High'
-
                 results.append({
                     "category": final_cat, 
                     "severity": final_sev, 
@@ -444,43 +461,6 @@ class CTICollector:
                         if _is_url_processed(entry.link): continue
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
-                        
-                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER ---
-                        if source['name'] == 'Malpedia':
-                            try:
-                                # Hop 1: Malpedia Profile Page
-                                async with session.get(entry.link, headers=HEADERS, timeout=10) as mal_resp:
-                                    if mal_resp.status == 200:
-                                        mal_html = await mal_resp.text()
-                                        mal_soup = BeautifulSoup(mal_html, 'html.parser')
-                                        
-                                        # Hop 2: Find external "Open article" link
-                                        target_link = None
-                                        for a in mal_soup.find_all('a', href=True):
-                                            link_text = a.get_text().lower()
-                                            if "open article" in link_text or "read report" in link_text or "original source" in link_text:
-                                                target_link = a['href']
-                                                break
-                                        
-                                        # Hop 3: Fetch & Scrape REAL Content
-                                        if target_link:
-                                            async with session.get(target_link, headers=HEADERS, timeout=10) as ext_resp:
-                                                if ext_resp.status == 200 and "text/html" in ext_resp.headers.get("Content-Type", ""):
-                                                    ext_html = await ext_resp.text()
-                                                    ext_soup = BeautifulSoup(ext_html, 'html.parser')
-                                                    
-                                                    # Cleanup
-                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "form"]):
-                                                        noise.decompose()
-                                                    
-                                                    # Extract Text (First 3000 chars)
-                                                    paras = ext_soup.find_all('p')
-                                                    scraped_text = ' '.join([p.get_text().strip() for p in paras if len(p.get_text()) > 20])
-                                                    
-                                                    if len(scraped_text) > 100:
-                                                        sum_text = f"[Source Scraped] {scraped_text[:3000]}"
-                            except Exception: pass 
-
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
                 elif source['type'] == 'json':
@@ -532,9 +512,22 @@ class CTICollector:
 
     async def get_all_data(self):
         async with aiohttp.ClientSession() as session:
+            # 1. Fetch Standard Feeds
             tasks = [self.fetch_item(session, s) for s in self.SOURCES]
             results = await asyncio.gather(*tasks)
-            return [i for sub in results for i in sub]
+            all_items = [i for sub in results for i in sub]
+            
+            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS
+            # We add this here so it runs automatically with every refresh
+            scanner = DeepWebScanner()
+            actors = APTSheetCollector().fetch_threats()
+            for actor in actors:
+                # Limit to 2 results per actor per run to avoid rate limits/spam
+                actor_hits = scanner.scan_actor(actor['name'], limit=2) 
+                if actor_hits:
+                    all_items.extend(actor_hits)
+            
+            return all_items
 
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
