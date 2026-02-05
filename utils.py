@@ -10,6 +10,7 @@ import ipaddress
 import pytz
 import feedparser
 import base64
+from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
@@ -129,7 +130,6 @@ class AIBatchProcessor:
             batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:300]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
-            # Using 70B model for quality Hebrew
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             chunk_map = {}
             try:
@@ -191,7 +191,6 @@ class ThreatLookup:
     def query_virustotal(self, ioc, ioc_type):
         if not self.vt_key: return None
         try:
-            # Prepare VT Endpoint
             if ioc_type == "url":
                 url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
                 endpoint = f"urls/{url_id}"
@@ -199,34 +198,41 @@ class ThreatLookup:
                 endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
                 endpoint = f"{endpoint}/{ioc}"
             
-            # Enrich with Relationships (Behavior, Contacted Hosts)
+            # Request Relationships to get "Contacted Hosts", "Referrers", etc.
             params = {}
-            if ioc_type in ['file', 'domain', 'ip']:
+            if ioc_type in ['file', 'domain', 'ip', 'url']:
                 params['relationships'] = 'contacted_urls,contacted_ips,contacted_domains'
                 
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=20)
             
-            # Return the FULL 'data' object (attributes + relationships)
-            # This gives the AI the full context including behavior
             return res.json().get('data', {}) if res.status_code == 200 else None
         except: return None
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # Step 1: Search for the IOC
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=15)
+            # FIX: Robust Search Logic
+            search_query = ioc
+            
+            # If URL, pivot to domain search to ensure we find *something*
+            try:
+                if "://" in ioc:
+                    parsed = urlparse(ioc)
+                    if parsed.netloc:
+                         search_query = f"domain:{parsed.netloc}"
+            except: pass
+            
+            # Step 1: Search
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=15)
             data = res.json()
             
             if data.get('results'):
-                # Step 2: Extract UUID from the first result
-                # Note: Search results are summaries. We need the FULL result.
+                # Step 2: Extract UUID from the first result (Latest scan)
                 first_hit = data['results'][0]
-                scan_uuid = first_hit.get('_id') # usually _id or task.uuid
+                scan_uuid = first_hit.get('_id')
                 
                 if scan_uuid:
-                    # Step 3: Fetch the FULL result using the UUID
-                    # This endpoint returns the deep analysis (DOM, Requests, Verdict)
+                    # Step 3: Fetch FULL result
                     full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_uuid}/", headers={"API-Key": self.urlscan_key}, timeout=15)
                     if full_res.status_code == 200:
                         return full_res.json()
