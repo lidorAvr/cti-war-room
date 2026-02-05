@@ -4,6 +4,7 @@ import pandas as pd
 import sqlite3
 import datetime
 import pytz
+import textwrap # FIXED: Added to handle HTML indentation
 import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
@@ -32,14 +33,14 @@ st.markdown("""
     }
     
     p, div, span {
-        color: #cbd5e1; /* Soft Grey-Blue for better readability than pure white */
+        color: #cbd5e1;
         line-height: 1.6;
     }
 
     /* --- 2. GLASSMORPHISM CARDS --- */
     .report-card {
-        background: rgba(30, 41, 59, 0.4); /* Semi-transparent */
-        backdrop-filter: blur(12px); /* The Glass Effect */
+        background: rgba(30, 41, 59, 0.4);
+        backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1);
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
@@ -50,7 +51,7 @@ st.markdown("""
     }
     
     .report-card:hover {
-        border-color: rgba(56, 189, 248, 0.3); /* Light Blue Glow */
+        border-color: rgba(56, 189, 248, 0.3);
         transform: translateY(-2px);
         box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
     }
@@ -91,11 +92,12 @@ st.markdown("""
         display: inline-flex;
         align-items: center;
         padding: 4px 12px;
-        border-radius: 9999px; /* Pill shape */
+        border-radius: 9999px;
         font-size: 0.75rem;
         font-weight: 600;
         font-family: 'Inter', sans-serif;
         letter-spacing: 0.5px;
+        margin-left: 5px; margin-right: 5px;
     }
     
     .badge-dot {
@@ -134,7 +136,6 @@ st.markdown("""
         box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
         outline: none;
     }
-    /* Placeholder Styling */
     ::placeholder { color: #64748b !important; opacity: 1; }
 
     /* --- 6. BUTTONS --- */
@@ -151,7 +152,6 @@ st.markdown("""
         border-color: #94a3b8 !important;
         color: #ffffff !important;
     }
-    /* Primary Button (Action) */
     div.stButton > button[kind="primary"] {
         background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%) !important;
         border: none !important;
@@ -162,8 +162,28 @@ st.markdown("""
         box-shadow: 0 10px 15px -3px rgba(2, 132, 199, 0.5);
         transform: translateY(-1px);
     }
+    
+    /* TOOLBOX BUTTONS */
+    .tool-link {
+        display: block;
+        padding: 8px 12px;
+        background: rgba(30, 41, 59, 0.6);
+        border: 1px solid rgba(148, 163, 184, 0.1);
+        border-radius: 6px;
+        color: #94a3b8 !important;
+        text-decoration: none;
+        font-size: 0.85rem;
+        font-weight: 600;
+        text-align: center;
+        transition: all 0.2s;
+    }
+    .tool-link:hover {
+        background: rgba(56, 189, 248, 0.1);
+        color: #38bdf8 !important;
+        border-color: #38bdf8;
+    }
 
-    /* --- 7. RADIO BUTTONS AS SEGMENTED CONTROLS --- */
+    /* --- 7. RADIO BUTTONS --- */
     div[role="radiogroup"] {
         background-color: #0f172a;
         padding: 4px;
@@ -183,7 +203,7 @@ st.markdown("""
     }
     div[role="radiogroup"] label[data-checked="true"] {
         background-color: #1e293b !important;
-        color: #38bdf8 !important; /* Sky Blue */
+        color: #38bdf8 !important;
         font-weight: 600;
         box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
@@ -255,11 +275,10 @@ with st.sidebar:
     
     st.markdown("---")
     
-    # System Status with clean indicators
+    # System Status
     st.markdown("##### SYSTEM STATUS")
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
     
-    # Custom status row
     st.markdown(f"""
     <div style="display: flex; align-items: center; justify-content: space-between; background: #1e293b; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
         <span style="font-size: 0.9rem; color: #cbd5e1;">AI Engine</span>
@@ -292,7 +311,6 @@ c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' A
 count_crit = c.fetchone()[0]
 conn.close()
 
-# Modern Metrics
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("INTEL REPORTS (24H)", count_24h)
 m2.metric("CRITICAL THREATS", count_crit, delta=count_crit, delta_color="inverse")
@@ -313,7 +331,7 @@ with tab_feed:
     
     df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
-    # Filters Row
+    # Filters
     c1, c2 = st.columns([1, 1])
     with c1:
         st.caption("DATA SOURCE")
@@ -331,7 +349,7 @@ with tab_feed:
     elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
     elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
 
-    st.write("") # Spacer
+    st.write("") 
 
     if df_display.empty:
         st.info("NO THREATS DETECTED MATCHING CRITERIA.")
@@ -349,20 +367,15 @@ with tab_feed:
         
         # Severity Styling
         sev = row['severity'].lower()
-        if "critical" in sev or "high" in sev: 
-            badge_class = "b-crit"
-            dot_class = "dot-crit"
-        elif "medium" in sev: 
-            badge_class = "b-med"
-            dot_class = "dot-med"
-        else: 
-            badge_class = "b-low"
-            dot_class = "dot-low"
+        badge_class = "b-low"; dot_class = "dot-low"
+        if "critical" in sev or "high" in sev: badge_class = "b-crit"; dot_class = "dot-crit"
+        elif "medium" in sev: badge_class = "b-med"; dot_class = "dot-med"
 
         source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
+        align = 'right' if is_incd else 'left'
         
-        # CARD RENDER
-        st.markdown(f"""
+        # CARD RENDER (FIXED HTML INDENTATION)
+        st.markdown(textwrap.dedent(f"""
         <div class="report-card {card_class}">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
                 <div class="card-meta">
@@ -373,21 +386,38 @@ with tab_feed:
                     {row['severity'].upper()}
                 </div>
             </div>
-            <div class="card-title" style="margin-bottom: 10px;">{row['title']}</div>
-            <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 20px;">
+            <div class="card-title">{row['title']}</div>
+            <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 20px; line-height: 1.6;">
                 {row['summary']}
             </div>
-            <div style="text-align: {'left' if not is_incd else 'right'};">
+            <div style="text-align: {align};">
                 <a href="{row['url']}" target="_blank" style="font-size: 0.85rem; font-weight: 600; color: #38bdf8; text-decoration: none;">
                     OPEN SOURCE REPORT &rarr;
                 </a>
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """), unsafe_allow_html=True)
 
 # --- TAB 2: FORENSIC LAB ---
 with tab_tools:
-    st.markdown("#### 🔬 IOC INVESTIGATION")
+    st.markdown("#### 🔬 IOC FORENSICS & TOOLKIT")
+    
+    # --- RESTORED ANALYST TOOLKIT ---
+    with st.expander("🧰 ANALYST QUICK ACCESS TOOLKIT", expanded=True):
+        toolkit = AnalystToolkit.get_tools()
+        cols = st.columns(4)
+        idx = 0
+        for category, tools in toolkit.items():
+            for tool in tools:
+                with cols[idx % 4]:
+                    st.markdown(f"""
+                    <a href="{tool['url']}" target="_blank" class="tool-link">
+                        {tool['name']}
+                    </a>
+                    """, unsafe_allow_html=True)
+                idx += 1
+    
+    st.markdown("---")
     st.caption("Enter an Indicator of Compromise (IP, Domain, URL, Hash) to initiate analysis.")
     
     c_in, c_btn = st.columns([4, 1])
@@ -423,12 +453,12 @@ with tab_tools:
                     bg_color = "rgba(239, 68, 68, 0.1)" if mal > 0 else "rgba(16, 185, 129, 0.1)"
                     border = "#ef4444" if mal > 0 else "#10b981"
                     
-                    st.markdown(f"""
+                    st.markdown(textwrap.dedent(f"""
                     <div style="background: {bg_color}; border: 1px solid {border}; border-radius: 8px; padding: 15px; margin-bottom: 10px;">
                         <div style="font-weight: bold; color: #f8fafc;">VIRUSTOTAL DETECTION</div>
                         <div style="font-size: 1.5rem; font-family: 'JetBrains Mono'; color: #f8fafc;">{mal} / {sum(stats.values())}</div>
                     </div>
-                    """, unsafe_allow_html=True)
+                    """), unsafe_allow_html=True)
                 
                 # AbuseIPDB / URLScan
                 if ab_data:
@@ -440,11 +470,11 @@ with tab_tools:
             
             with c_right:
                 st.markdown("##### 🤖 AI ANALYST VERDICT")
-                st.markdown(f"""
-                <div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 20px;">
+                st.markdown(textwrap.dedent(f"""
+                <div style="background: rgba(30, 41, 59, 0.4); border: 1px solid #334155; border-radius: 8px; padding: 20px;">
                     {ai_report}
                 </div>
-                """, unsafe_allow_html=True)
+                """), unsafe_allow_html=True)
 
 # --- TAB 3: THREAT PROFILER ---
 with tab_strat:
@@ -468,29 +498,29 @@ with tab_strat:
                 st.session_state['hunt_rules'] = rules
 
     with c_detail:
-        # DOSSIER CARD
-        st.markdown(f"""
+        # DOSSIER CARD (FIXED HTML INDENTATION)
+        st.markdown(textwrap.dedent(f"""
         <div class="report-card" style="border-left: 4px solid #f59e0b;">
             <h2 style="margin-top:0; color: #ffffff;">{actor['name']}</h2>
-            <div style="margin-bottom: 20px; display: flex; gap: 10px;">
+            <div style="margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap;">
                 <span class="badge b-med">ORIGIN: {actor['origin']}</span>
                 <span class="badge b-high">TARGET: {actor['target']}</span>
                 <span class="badge b-low">TYPE: {actor['type']}</span>
             </div>
-            <p style="font-size: 1.1rem; color: #e2e8f0;">{actor['desc']}</p>
+            <p style="font-size: 1.1rem; color: #e2e8f0; margin-bottom: 25px;">{actor['desc']}</p>
             
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 30px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                 <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
-                    <h5 style="color: #94a3b8; margin-top: 0;">🛠️ KNOWN TOOLS</h5>
-                    <code style="color: #fca5a5;">{actor['tools']}</code>
+                    <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.9rem;">🛠️ KNOWN TOOLS</h5>
+                    <code style="color: #fca5a5; background: transparent;">{actor['tools']}</code>
                 </div>
                 <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
-                    <h5 style="color: #94a3b8; margin-top: 0;">📚 MITRE ATT&CK</h5>
-                    <code style="color: #fcd34d;">{actor['mitre']}</code>
+                    <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.9rem;">📚 MITRE ATT&CK</h5>
+                    <code style="color: #fcd34d; background: transparent;">{actor['mitre']}</code>
                 </div>
             </div>
         </div>
-        """, unsafe_allow_html=True)
+        """), unsafe_allow_html=True)
 
         if 'hunt_rules' in st.session_state:
             st.markdown("##### 🛡️ DETECTION LOGIC (XQL / YARA)")
