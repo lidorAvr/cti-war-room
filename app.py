@@ -262,31 +262,59 @@ with tab_tools:
             with c1:
                 st.markdown("### 🦠 VirusTotal")
                 if isinstance(results.get('virustotal'), dict):
-                    # NOTE: VT Data now includes 'attributes' and 'relationships' keys at root
-                    # We need to access 'attributes' for the stats
+                    # VT Data structure: {'attributes': {...}, 'relationships': {...}}
                     attrs = results['virustotal'].get('attributes', {})
+                    rels = results['virustotal'].get('relationships', {})
+                    
                     stats = attrs.get('last_analysis_stats', {})
                     malicious = stats.get('malicious', 0)
                     color = "red" if malicious > 0 else "green"
                     st.markdown(f":{color}[**Detections: {malicious}**]")
-                    if stats:
-                         st.json(stats)
-                    else:
-                         st.write("See Full Report")
+                    
+                    # 1. Metadata
+                    with st.expander("🔍 Metadata & Tags", expanded=False):
+                        st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
+                        st.write(f"**Categories:** {', '.join(attrs.get('categories', {}).values())}")
+                        st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
+                        st.write(f"**Created:** {attrs.get('creation_date', 'N/A')}")
+                    
+                    # 2. Relations (Network)
+                    with st.expander("🕸️ Network Relations", expanded=False):
+                         if rels.get('contacted_urls'):
+                             st.write("**Contacted URLs:**")
+                             for u in rels['contacted_urls'].get('data', [])[:5]:
+                                 st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
+                         
+                         if rels.get('contacted_ips'):
+                             st.write("**Contacted IPs:**")
+                             for ip in rels['contacted_ips'].get('data', [])[:5]:
+                                 st.code(ip.get('id'))
+                                 
+                    # 3. Engines
+                    with st.expander("📊 Engine Detection", expanded=False):
+                        st.json(stats)
+                        
                 else: st.write("N/A")
                 
             with c2:
                 st.markdown("### 🌐 URLScan")
                 if isinstance(results.get('urlscan'), dict):
-                    # NOTE: Full Result JSON structure is different from Search Summary
-                    # Verdict is often at top level or task
-                    verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
-                    st.write(f"Verdict: **{verdict}**")
-                    
-                    # Screenshot in full result is usually in task.screenshotURL
+                    # Data from Full Result API
                     task = results['urlscan'].get('task', {})
-                    screen_url = task.get('screenshotURL')
-                    if screen_url: st.image(screen_url)
+                    verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
+                    
+                    st.write(f"**Target:** `{task.get('url', 'Unknown')}`")
+                    st.write(f"**Verdict:** {verdict}")
+                    
+                    if results['urlscan'].get('page', {}).get('country'):
+                         st.write(f"**Location:** {results['urlscan']['page']['country']}")
+                    
+                    # Screenshot
+                    if task.get('screenshotURL'): 
+                        st.image(task['screenshotURL'])
+                    
+                    with st.expander("See Raw Data"):
+                        st.json(results['urlscan'].get('page', {}))
                 else: st.write("N/A")
                 
             with c3:
@@ -295,6 +323,7 @@ with tab_tools:
                     score = results['abuseipdb'].get('abuseConfidenceScore', 0)
                     st.metric("Abuse Score", f"{score}%")
                     st.write(f"ISP: {results['abuseipdb'].get('isp')}")
+                    st.write(f"Usage: {results['abuseipdb'].get('usageType')}")
                 else: st.write("N/A")
 
             st.divider()
