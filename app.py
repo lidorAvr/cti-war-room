@@ -612,6 +612,32 @@ with tab_strat:
             st.markdown(get_feed_card_html(row, dt), unsafe_allow_html=True)
     else:
         st.info(f"No specific mentions of {actor['name']} found in the collected feeds.")
+        
+    # --- NEW DEEP WEB SCAN BUTTON ---
+    st.markdown("---")
+    c_scan_txt, c_scan_btn = st.columns([3, 1])
+    with c_scan_txt:
+        st.caption("Missing critical intel? Initiate a Deep Web Scan to hunt for recent mentions of this actor across the open web.")
+    with c_scan_btn:
+        if st.button("⚡ DEEP SCAN & IMPORT", use_container_width=True):
+            scanner = DeepWebScanner()
+            proc = AIBatchProcessor(GROQ_KEY)
+            with st.status(f"Hunting for {actor['name']} artifacts...", expanded=True) as status:
+                status.write("🔍 Scanning Deep Web sources...")
+                raw_hits = scanner.scan_actor(actor['name'])
+                
+                if raw_hits:
+                    status.write(f"🧠 Analyzing {len(raw_hits)} findings with AI...")
+                    analyzed_hits = asyncio.run(proc.analyze_batch(raw_hits))
+                    
+                    status.write("💾 Saving intelligence to database...")
+                    count = save_reports(raw_hits, analyzed_hits)
+                    
+                    status.update(label=f"Scan Complete! Imported {count} new items.", state="complete", expanded=False)
+                    time.sleep(1)
+                    st.rerun()
+                else:
+                    status.update(label="No new intelligence found.", state="error", expanded=False)
 
 # --- TAB 4: MAP ---
 with tab_map:
