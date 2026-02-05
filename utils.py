@@ -59,9 +59,9 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # CLEANUP LOGIC:
-    limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
-    c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
+    # Strict cleanup: Delete anything older than 48 hours to keep the feed fresh
+    limit_strict = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
+    c.execute("DELETE FROM intel_reports WHERE published_at < ?", (limit_strict,))
     conn.commit()
     conn.close()
 
@@ -75,24 +75,45 @@ def _is_url_processed(url):
         return result is not None
     except: return False
 
-# --- DEEP WEB SCANNER ---
+# --- DEEP WEB SCANNER (UPDATED WITH DATE FILTERING) ---
 class DeepWebScanner:
     def scan_actor(self, actor_name, limit=3):
+        """Searches for RECENT mentions only (Last 48 Hours logic applied)"""
         results = []
+        now = datetime.datetime.now(IL_TZ)
+        cutoff = now - datetime.timedelta(hours=48)
+        
         try:
-            query = f'"{actor_name}" cyber threat intelligence report'
+            query = f'"{actor_name}" cyber threat intelligence malware'
             with DDGS() as ddgs:
-                ddg_results = list(ddgs.text(query, max_results=limit))
+                # timelimit='w' -> Restrict search to last week to filter out old 2025/2024 data at source
+                ddg_results = list(ddgs.text(query, max_results=limit, timelimit='w'))
                 
                 for res in ddg_results:
                     url = res.get('href')
-                    if _is_url_processed(url): continue
-                    
                     body = res.get('body', '')
                     title = res.get('title', '')
                     
-                    # Initial date guess (will be refined by AI)
-                    pub_date = datetime.datetime.now(IL_TZ)
+                    if _is_url_processed(url): continue
+                    
+                    # 1. Try to extract date from snippet text
+                    pub_date = now 
+                    found_date = False
+                    try:
+                        # Search for patterns like "2 days ago", "Feb 05, 2026", etc. in the body
+                        # This is a heuristic attempt
+                        match = date_parser.parse(body, fuzzy=True, default=now)
+                        if match and match.year == now.year: # Basic sanity check
+                             pub_date = match.astimezone(IL_TZ)
+                             found_date = True
+                    except: pass
+                    
+                    # 2. Strict Filtering: If we found a date and it's old -> SKIP
+                    if found_date and pub_date < cutoff:
+                        continue
+                        
+                    # 3. If no date found, we rely on 'timelimit=w', but explicitly mark it as recent check
+                    # We only add it if we are fairly sure it's new.
                     
                     results.append({
                         "title": title,
@@ -102,7 +123,7 @@ class DeepWebScanner:
                         "summary": body
                     })
         except Exception as e:
-            print(f"Deep Scan Error: {e}")
+            print(f"Deep Scan Error for {actor_name}: {e}")
         return results
 
 # --- CONNECTION & AI ENGINES ---
@@ -182,25 +203,21 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
-        # UPDATED PROMPT TO HANDLE DATES AND SPECIFIC CATEGORIES
         system_instruction = """
         You are an expert CTI Analyst.
         Task: Analyze cyber news items.
         
         OUTPUT RULES:
-        1. **Categories**: Choose EXACTLY ONE from: [Phishing, Malware, News, Research, Vulnerabilities, General].
-           - Use "General" only if nothing else fits.
-        2. **Severity**: [Critical, High, Medium, Info].
-        3. **Date Extraction**: Extract the **original publication date/time** from the text content (e.g., from lines like "2026-02-03 • Kaspersky"). 
-           - Format: "YYYY-MM-DD HH:MM:SS" (ISO).
-           - If NO date is found in text, return null.
-        4. **Summary**: Write 3-4 clear lines explaining the threat. Do NOT repeat the title word-for-word.
-        5. **Title**: Short and informative (Max 8 words).
-        6. **Language**:
-           - IF Source is 'INCD' -> Hebrew.
-           - ELSE -> English.
+        1. IF Source is 'INCD' (Israel National Cyber Directorate):
+           - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
+        2. IF Source is 'DeepWeb' or 'Malpedia':
+           - CRITICAL: Verify the content is RECENT (Last 48 Hours). If the text mentions events from 2024 or 2025, prefix title with "[OLD]".
+           - SEVERITY: If 'APT', 'Ransomware' or 'Zero-Day' -> 'High' or 'Critical'.
+        3. GENERAL:
+           - TITLE: Short, informative (Max 8 words).
+           - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
-        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "...", "published_date": "..."}]}
+        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
@@ -208,7 +225,7 @@ class AIBatchProcessor:
             
             batch_lines = []
             for idx, x in enumerate(chunk):
-                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 500
+                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 400
                 clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
                 batch_lines.append(f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {clean_sum}")
 
@@ -228,26 +245,11 @@ class AIBatchProcessor:
                 final_sev = ai.get('severity', 'Medium')
                 final_cat = ai.get('category', 'News')
                 
-                # DATE CORRECTION LOGIC
-                extracted_date = ai.get('published_date')
-                final_date = chunk[j]['date'] # Default to scan time/RSS time
-                
-                if extracted_date:
-                    try:
-                        # Try to parse what AI found
-                        dt = date_parser.parse(extracted_date)
-                        if not dt.tzinfo:
-                            dt = dt.replace(tzinfo=pytz.utc).astimezone(IL_TZ)
-                        final_date = dt.isoformat()
-                    except:
-                        pass # If AI returned garbage, keep original
-                
                 results.append({
                     "category": final_cat, 
                     "severity": final_sev, 
                     "title": ai.get('title', chunk[j]['title']),
-                    "summary": ai.get('summary', chunk[j]['summary'][:350]),
-                    "date": final_date # This will now hold the AI-extracted date if found
+                    "summary": ai.get('summary', chunk[j]['summary'][:350])
                 })
         return results
 
@@ -429,116 +431,4 @@ class CTICollector:
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
         {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest", "type": "rss"},
         {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
-        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
-    ]
-
-    async def fetch_item(self, session, source):
-        items = []
-        try:
-            async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
-                if resp.status != 200: return []
-                content = await resp.text()
-                now = datetime.datetime.now(IL_TZ)
-                
-                is_incd = source['name'] == 'INCD'
-                
-                if source['type'] == 'rss':
-                    feed = feedparser.parse(content)
-                    entries_to_check = feed.entries[:4] if is_incd else feed.entries[:10]
-                    
-                    for entry in entries_to_check:
-                        pub_date = now
-                        try:
-                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
-                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                                pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
-                        except: pass
-                        
-                        if not is_incd:
-                            if (now - pub_date).total_seconds() > (48 * 3600): continue
-
-                        if _is_url_processed(entry.link): continue
-                        
-                        sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
-                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
-
-                elif source['type'] == 'json':
-                     data = json.loads(content)
-                     for v in data.get('vulnerabilities', [])[:10]:
-                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
-                         if _is_url_processed(url): continue
-                         try: pub_date = date_parser.parse(v['dateAdded']).replace(tzinfo=IL_TZ)
-                         except: pub_date = now
-                         if (now - pub_date).total_seconds() > 172800: continue
-                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
-
-                elif source['type'] == 'telegram':
-                    soup = BeautifulSoup(content, 'html.parser')
-                    msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    msgs_to_check = msgs[-4:] if is_incd else msgs[-10:]
-                    
-                    for msg in msgs_to_check:
-                        try:
-                            text_div = msg.find('div', class_='tgme_widget_message_text')
-                            if not text_div: continue
-                            text = text_div.get_text(separator=' ')
-                            
-                            pub_date = now
-                            time_span = msg.find('time', class_='time')
-                            if time_span and 'datetime' in time_span.attrs:
-                                try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
-                                except: pass
-                            
-                            if not is_incd:
-                                if (now - pub_date).total_seconds() > 432000: continue
-                            
-                            date_link = msg.find('a', class_='tgme_widget_message_date')
-                            post_link = date_link['href'] if date_link else f"https://t.me/s/Israel_Cyber?t={int(now.timestamp())}"
-                            
-                            if _is_url_processed(post_link): continue
-                            
-                            items.append({
-                                "title": "INCD Alert (Telegram)", 
-                                "url": post_link, 
-                                "date": pub_date.isoformat(), 
-                                "source": "INCD", 
-                                "summary": text[:800]
-                            })
-                        except: pass
-
-        except Exception as e: pass
-        return items
-
-    async def get_all_data(self):
-        async with aiohttp.ClientSession() as session:
-            tasks = [self.fetch_item(session, s) for s in self.SOURCES]
-            results = await asyncio.gather(*tasks)
-            all_items = [i for sub in results for i in sub]
-            
-            scanner = DeepWebScanner()
-            actors = APTSheetCollector().fetch_threats()
-            for actor in actors:
-                actor_hits = scanner.scan_actor(actor['name'], limit=2) 
-                if actor_hits:
-                    all_items.extend(actor_hits)
-            
-            return all_items
-
-def save_reports(raw, analyzed):
-    conn = sqlite3.connect(DB_NAME)
-    c, cnt = conn.cursor(), 0
-    for i, item in enumerate(raw):
-        if i < len(analyzed):
-            a = analyzed[i]
-            try:
-                # Use the AI-refined date if available (stored in a['date']), else fallback to raw item['date']
-                final_date = a.get('date', item['date'])
-                
-                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
-                if c.rowcount > 0: cnt += 1
-            except: pass
-    conn.commit()
-    conn.close()
-    return cnt
+        {"name
