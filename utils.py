@@ -370,6 +370,7 @@ class CTICollector:
         {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest", "type": "rss"},
         {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
         {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
     ]
