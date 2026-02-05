@@ -53,6 +53,24 @@ st.markdown("""
         background-color: #0f172a; color: white; border-color: #0f172a;
     }
     div[role="radiogroup"] label > div:first-child { display: none; }
+    
+    .tool-btn {
+        display: inline-block;
+        padding: 6px 12px;
+        margin: 4px;
+        background-color: #eef2ff;
+        border: 1px solid #c7d2fe;
+        border-radius: 6px;
+        color: #3730a3;
+        font-weight: 600;
+        font-size: 0.85rem;
+        text-decoration: none !important;
+        transition: background-color 0.2s;
+    }
+    .tool-btn:hover {
+        background-color: #e0e7ff;
+        color: #312e81;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -262,7 +280,7 @@ with tab_tools:
             with c1:
                 st.markdown("### 🦠 VirusTotal")
                 if isinstance(results.get('virustotal'), dict):
-                    # VT Data structure: {'attributes': {...}, 'relationships': {...}}
+                    # VT Data structure
                     attrs = results['virustotal'].get('attributes', {})
                     rels = results['virustotal'].get('relationships', {})
                     
@@ -279,7 +297,6 @@ with tab_tools:
                             st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
 
                         st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
-                        st.write(f"**Categories:** {', '.join(attrs.get('categories', {}).values())}")
                         st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
                         if attrs.get('creation_date'):
                             st.write(f"**Created:** {datetime.datetime.fromtimestamp(attrs['creation_date']).strftime('%Y-%m-%d')}")
@@ -347,34 +364,76 @@ with tab_tools:
 
 # --- TAB 3: STRATEGIC INTEL ---
 with tab_strat:
-    st.subheader("🧠 Strategic Threat Intel - Active Campaigns")
-    st.markdown("Focus: **Iran & Middle East** | Targets: **Israel**")
+    st.subheader("🧠 Strategic Threat Intel - Campaign Profiler")
+    st.markdown("Deep dive into active Threat Actors targeting **Israel** & the Middle East.")
     
     threats = APTSheetCollector().fetch_threats()
+    actor_names = [t['name'] for t in threats]
     
-    for actor in threats:
-        with st.expander(f"👹 {actor['name']} ({actor['origin']}) - {actor['type']}"):
-            col_desc, col_acts = st.columns([2, 1])
-            with col_desc:
-                st.markdown(f"**Description:** {actor['desc']}")
-                st.markdown(f"**Tools:** `{actor['tools']}`")
-                st.markdown(f"**MITRE:** `{actor['mitre']}`")
-            with col_acts:
-                if st.button(f"🏹 Generate Hunting Queries ({actor['name']})"):
-                    proc = AIBatchProcessor(GROQ_KEY)
-                    with st.spinner("Generating XQL & YARA..."):
-                        res = asyncio.run(proc.generate_hunting_queries(actor))
-                        st.markdown(res)
+    # --- ACTOR SELECTOR ---
+    selected_actor_name = st.selectbox("Select Threat Actor:", actor_names)
+    actor_data = next(t for t in threats if t['name'] == selected_actor_name)
     
-    st.divider()
-    st.subheader("🔥 Trending IOCs")
-    st.markdown("""
-    | Indicator | Type | Actor | Confidence |
-    |-----------|------|-------|------------|
-    | `185.200.118.55` | IP | MuddyWater | High |
-    | `update-win-srv.com` | Domain | OilRig | Medium |
-    | `0a8b9c...2d1` | SHA256 | Agonizing Serpens | Critical |
-    """)
+    col_prof, col_acts = st.columns([2, 1])
+    
+    # --- LEFT COLUMN: PROFILE ---
+    with col_prof:
+        st.markdown(f"### 👹 {actor_data['name']}")
+        st.markdown(f"**Origin:** {actor_data['origin']} | **Type:** {actor_data['type']}")
+        st.info(f"**Description:** {actor_data['desc']}")
+        
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**🛠️ Tools & Malware**")
+            for tool in actor_data['tools'].split(','):
+                st.code(tool.strip(), language="text")
+        with c2:
+            st.markdown("**🏗️ MITRE ATT&CK**")
+            for tech in actor_data['mitre'].split(','):
+                st.code(tech.strip(), language="text")
+        
+        st.markdown("---")
+        st.markdown("#### 🔗 External Intelligence (Curated)")
+        st.markdown(f"- [Malpedia Profile]({actor_data['malpedia']})")
+        st.markdown(f"- [MITRE Groups Search](https://attack.mitre.org/search/?q={actor_data['name'].split()[0]})")
+        st.markdown(f"- [Google APT Search](https://cse.google.com/cse?cx=003248445720253387346:turlh5vi4xc&q={actor_data['name']})")
+        
+    # --- RIGHT COLUMN: ACTIONS ---
+    with col_acts:
+        st.markdown("### ⚡ Operational Actions")
+        if st.button(f"🏹 Generate Hunting Queries", key="hunt_btn"):
+            proc = AIBatchProcessor(GROQ_KEY)
+            with st.spinner(f"Generating detection rules for {actor_data['name']}..."):
+                res = asyncio.run(proc.generate_hunting_queries(actor_data))
+                with st.expander("View XQL / YARA Rules", expanded=True):
+                    st.markdown(res)
+                    
+        st.write("")
+        st.markdown("### 📰 Recent Activity (Simulated)")
+        # In a real app, query the SQL DB here for title LIKE %muddywater%
+        st.caption("Latest reports linked to this actor:")
+        st.markdown(f"""
+        * 12/2025: [{actor_data['name']} New Phishing Campaign targeting Finance](https://www.gov.il/he/departments/topics/cyber-attack-network)
+        * 11/2025: [Indicator release: {actor_data['tools'].split(',')[0]} variant](https://unit42.paloaltonetworks.com/)
+        """)
+
+    # --- ANALYST TOOLKIT SECTION (FROM README) ---
+    st.markdown("---")
+    st.subheader("🧰 CTI Analyst Toolkit (Quick Links)")
+    st.markdown("Essential tools curated from *Awesome Threat Intelligence* list.")
+    
+    toolkit = AnalystToolkit.get_tools()
+    
+    for category, tools in toolkit.items():
+        st.markdown(f"**{category}**")
+        cols = st.columns(len(tools))
+        for idx, tool in enumerate(tools):
+            with cols[idx]:
+                st.markdown(f"""
+                <a href="{tool['url']}" target="_blank" class="tool-btn">{tool['name']}</a>
+                <div style="font-size: 0.8em; color: #666; margin-top: 4px; margin-left: 6px;">{tool['desc']}</div>
+                """, unsafe_allow_html=True)
+        st.write("")
 
 # --- TAB 4: MAP ---
 with tab_map:
