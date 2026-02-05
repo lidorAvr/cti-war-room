@@ -157,21 +157,21 @@ class AIBatchProcessor:
         OUTPUT RULES:
         1. IF Source is 'INCD' (Israel National Cyber Directorate):
            - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-           - CATEGORY & SEVERITY: Keep in **English** (for system compatibility).
-        2. IF Source is NOT 'INCD':
-           - All fields in **English**.
-           
-        3. TITLE: Short, informative (Max 8 words).
-        4. SUMMARY: 3-4 professional sentences. Explain 'What', 'Who', and 'Impact'.
-        5. CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
-        6. SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        2. IF Source is 'Malpedia':
+           - SUMMARY: Synthesize the technical description into 2 clear sentences. Explain what this malware family DOES.
+           - SEVERITY: If 'APT' or 'Ransomware' -> 'High' or 'Critical'.
+        3. GENERAL:
+           - TITLE: Short, informative (Max 8 words).
+           - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
+           - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
         Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
-            batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:300]}" for idx, x in enumerate(chunk)])
+            # Increase summary context limit for deep-fetched articles
+            batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:800]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
@@ -183,11 +183,21 @@ class AIBatchProcessor:
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
+                
+                final_sev = ai.get('severity', 'Medium')
+                final_cat = ai.get('category', 'News')
+                
+                if chunk[j]['source'] == 'Malpedia':
+                    txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
+                    if 'apt' in txt or 'ransomware' in txt or 'wiper' in txt:
+                        final_sev = 'High'
+                    final_cat = 'Research'
+
                 results.append({
-                    "category": ai.get('category', 'News'), 
-                    "severity": ai.get('severity', 'Medium'), 
+                    "category": final_cat, 
+                    "severity": final_sev, 
                     "title": ai.get('title', chunk[j]['title']),
-                    "summary": ai.get('summary', chunk[j]['summary'][:200])
+                    "summary": ai.get('summary', chunk[j]['summary'][:350])
                 })
         return results
 
@@ -289,7 +299,6 @@ class ThreatLookup:
 
 # --- STRATEGIC INTEL & TOOLS ---
 class AnalystToolkit:
-    """Curated list of tools from 'Awesome Threat Intelligence'"""
     @staticmethod
     def get_tools():
         return {
@@ -315,7 +324,6 @@ class AnalystToolkit:
 
 class APTSheetCollector:
     def fetch_threats(self): 
-        # Added 'keywords' for automatic DB hunting
         return [
             {
                 "name": "MuddyWater", 
@@ -403,6 +411,23 @@ class CTICollector:
                         if _is_url_processed(entry.link): continue
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
+                        
+                        # --- DEEP FETCH FOR MALPEDIA ---
+                        if source['name'] == 'Malpedia':
+                            # Try to scrape the actual page for better context
+                            try:
+                                async with session.get(entry.link, headers=HEADERS, timeout=10) as art_resp:
+                                    if art_resp.status == 200:
+                                        art_html = await art_resp.text()
+                                        art_soup = BeautifulSoup(art_html, 'html.parser')
+                                        # Generic scraper for p tags (captures description well on Malpedia)
+                                        paras = art_soup.find_all('p')
+                                        scraped_text = ' '.join([p.get_text() for p in paras])
+                                        if len(scraped_text) > 100:
+                                            # Found real content, use it!
+                                            sum_text = "Content Scraped: " + scraped_text[:1500]
+                            except: pass # Fallback to RSS summary if scraping fails
+
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
                 elif source['type'] == 'json':
