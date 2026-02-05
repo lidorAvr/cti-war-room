@@ -12,26 +12,26 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- UI STYLING (LARGE TEXT & HIGH CONTRAST) ---
+# --- UI STYLING (BALANCED PRO & VISIBILITY) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
     
-    /* 1. GLOBAL TEXT SIZE INCREASE (+2 Sizes) */
+    /* 1. BALANCED TEXT SIZES */
     html, body, [class*="css"] {
         font-family: 'Heebo', sans-serif;
-        font-size: 20px !important; /* BUMPING BASE SIZE */
+        font-size: 17px; /* Optimal size for readability without breaking layout */
     }
     
     p, .stMarkdown, span, div {
         color: #e6edf3;
-        line-height: 1.6;
+        line-height: 1.5;
     }
 
-    /* Headers Scale */
-    h1 { font-size: 3rem !important; }
-    h2 { font-size: 2.2rem !important; }
-    h3 { font-size: 1.8rem !important; }
+    /* Headers */
+    h1 { font-size: 2.5rem !important; margin-bottom: 0 !important; }
+    h2 { font-size: 2rem !important; }
+    h3 { font-size: 1.5rem !important; }
     
     h1, h2, h3 { 
         font-family: 'JetBrains Mono', monospace; 
@@ -39,111 +39,121 @@ st.markdown("""
         text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); 
     }
     
-    /* 2. BUTTON STYLING (CYBER OUTLINE STYLE) */
-    div.stButton > button {
-        background-color: transparent !important;
-        border: 2px solid #00f2ff !important;
-        color: #00f2ff !important;
-        border-radius: 8px;
+    /* 2. INPUT FIELDS & PLACEHOLDER FIX */
+    /* The Input Field Itself */
+    input[type="text"] {
+        background-color: #0d1117 !important;
+        color: #00f2ff !important; /* Text color when typing */
+        border: 1px solid #30363d !important;
         font-family: 'JetBrains Mono', monospace;
-        font-size: 1.1rem !important;
-        font-weight: bold;
-        transition: all 0.3s ease;
-        padding: 0.5rem 1rem;
     }
     
-    div.stButton > button:hover {
-        background-color: #00f2ff !important;
-        color: #000 !important;
-        box-shadow: 0 0 15px rgba(0, 242, 255, 0.7);
+    /* The Placeholder Text (The fix you asked for) */
+    input::placeholder {
+        color: #8b949e !important;
+        opacity: 1; /* Firefox */
     }
-
-    /* Primary Button override (Red/Orange actions) */
+    input::-ms-input-placeholder { color: #8b949e !important; }
+    
+    /* 3. BUTTON STYLING */
+    div.stButton > button {
+        background-color: transparent !important;
+        border: 1px solid #00f2ff !important;
+        color: #00f2ff !important;
+        border-radius: 6px;
+        font-family: 'JetBrains Mono', monospace;
+        transition: all 0.3s ease;
+    }
+    div.stButton > button:hover {
+        background-color: rgba(0, 242, 255, 0.1) !important;
+        box-shadow: 0 0 10px rgba(0, 242, 255, 0.4);
+    }
+    /* Primary Action Button */
     div.stButton > button[kind="primary"] {
         border-color: #ff7b72 !important;
         color: #ff7b72 !important;
     }
     div.stButton > button[kind="primary"]:hover {
-        background-color: #ff7b72 !important;
-        color: white !important;
-        box-shadow: 0 0 15px rgba(255, 123, 114, 0.7);
+        background-color: rgba(255, 123, 114, 0.1) !important;
+        box-shadow: 0 0 10px rgba(255, 123, 114, 0.4);
     }
 
-    /* 3. RADIO BUTTONS / TAGS - BETTER VISIBILITY */
+    /* 4. TAGS & RADIO BUTTONS */
     div[role="radiogroup"] label {
         background-color: #161b22 !important;
-        border: 1px solid #58a6ff !important; /* Blue border for visibility */
-        color: #a5d6ff !important; /* Light blue text */
-        padding: 10px 20px !important; /* Larger touch target */
-        font-size: 1.1rem !important;
-        border-radius: 8px;
+        border: 1px solid #30363d !important;
+        color: #e6edf3 !important;
+        padding: 6px 14px !important;
+        border-radius: 6px;
     }
-    
     div[role="radiogroup"] label[data-checked="true"] {
         background-color: #1f6feb !important;
         border-color: #1f6feb !important;
         color: white !important;
-        box-shadow: 0 0 15px rgba(31, 111, 235, 0.5);
     }
 
-    /* 4. INPUT FIELDS (DARK MODE) */
-    input[type="text"] {
-        background-color: #0d1117 !important;
-        color: #00f2ff !important;
-        border: 1px solid #30363d !important;
-        font-size: 1.2rem !important;
-        padding: 10px;
-    }
-
-    /* 5. CARDS & METRICS */
-    .stApp { background-color: #0d1117; }
-    
+    /* 5. CARDS */
     .report-card { 
         background-color: #161b22; 
-        padding: 22px; 
-        border-radius: 10px; 
+        padding: 15px 20px; 
+        border-radius: 8px; 
         border: 1px solid #30363d;
-        margin-bottom: 20px; 
+        margin-bottom: 12px; 
     }
     
-    /* Metrics Text Size */
+    /* Metric Values */
     div[data-testid="stMetricValue"] {
-        font-size: 2.5rem !important;
+        font-size: 2rem !important;
         color: #00f2ff !important;
-    }
-    div[data-testid="stMetricLabel"] {
-        font-size: 1.1rem !important;
-        color: #8b949e !important;
+        font-family: 'JetBrains Mono', monospace;
     }
 
-    /* INCD/Global Card Styles */
+    /* INCD/Global Styles */
     .card-incd {
-        border-right: 5px solid #2f81f7;
+        border-right: 4px solid #2f81f7;
         direction: rtl; text-align: right;
-        background: linear-gradient(90deg, #161b22 0%, #1f242c 100%);
+        background: linear-gradient(90deg, #161b22 0%, #1c2128 100%);
     }
-    .incd-title { color: #a5d6ff !important; font-weight: bold; font-size: 1.4rem; margin-bottom: 8px; }
+    .incd-title { color: #a5d6ff !important; font-weight: bold; font-size: 1.2rem; }
     
     .card-global {
-        border-left: 5px solid #3fb950;
+        border-left: 4px solid #3fb950;
         direction: ltr; text-align: left;
     }
-    .global-title { color: #7ee787 !important; font-weight: bold; font-size: 1.4rem; margin-bottom: 8px; }
+    .global-title { color: #7ee787 !important; font-weight: bold; font-size: 1.2rem; }
 
-    /* Severity Tags */
-    .sev-tag {
-        padding: 4px 12px; border-radius: 4px; 
-        font-size: 0.9rem; font-weight: bold;
-        margin: 0 6px; letter-spacing: 1px;
+    /* Links */
+    a { color: #58a6ff !important; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    
+    /* 6. CREDITS FOOTER */
+    .footer {
+        position: fixed;
+        left: 0;
+        bottom: 0;
+        width: 100%;
+        background-color: #0d1117;
+        color: #8b949e;
+        text-align: center;
+        padding: 10px;
+        border-top: 1px solid #30363d;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.8rem;
+        z-index: 9999;
     }
-    .sev-critical { background: rgba(255, 123, 114, 0.15); color: #ff7b72 !important; border: 1px solid #ff7b72; animation: pulse 2s infinite; }
-    .sev-high { background: rgba(210, 153, 34, 0.15); color: #d29922 !important; border: 1px solid #d29922; }
-    .sev-med { background: rgba(88, 166, 255, 0.15); color: #58a6ff !important; border: 1px solid #58a6ff; }
-    .sev-info { background: rgba(139, 148, 158, 0.15); color: #8b949e !important; border: 1px solid #30363d; }
-
-    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(255, 123, 114, 0); } 100% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0); } }
-
-    a { font-size: 1.1rem; font-weight: bold; color: #58a6ff !important; text-decoration: none; }
+    .footer a { color: #00f2ff !important; font-weight: bold; }
+    
+    /* CREDITS HEADER */
+    .header-credit {
+        text-align: center;
+        font-family: 'JetBrains Mono', monospace;
+        color: #484f58;
+        font-size: 0.75rem;
+        margin-top: -15px;
+        margin-bottom: 20px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -183,9 +193,9 @@ else:
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=80)
+    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=70)
     st.title("CTI WAR ROOM")
-    st.markdown("`v3.0 | CLASSIFIED`")
+    st.markdown("`v4.0 | CLASSIFIED`")
     
     st.markdown("---")
     st.markdown("### 🛰️ System Status")
@@ -207,8 +217,13 @@ with st.sidebar:
     st.caption("Current Alert Level: ELEVATED")
 
 # --- MAIN LAYOUT ---
+
+# 1. HEADER CREDIT
+st.markdown('<div class="header-credit">SYSTEM ARCHITECT: LIDOR AVRAHAMY</div>', unsafe_allow_html=True)
+
 st.title("📟 OPERATIONAL DASHBOARD")
 
+# Top Metrics
 conn = sqlite3.connect(DB_NAME)
 c = conn.cursor()
 c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-24 hours')")
@@ -218,7 +233,7 @@ count_crit = c.fetchone()[0]
 conn.close()
 
 m1, m2, m3, m4 = st.columns(4)
-with m1: st.metric("New Reports (24h)", count_24h, delta_color="normal")
+with m1: st.metric("New Reports (24h)", count_24h)
 with m2: st.metric("Critical Threats", count_crit, delta=f"+{count_crit}" if count_crit > 0 else "0", delta_color="inverse")
 with m3: st.metric("Active Sources", "7", "Online")
 with m4: st.metric("System Uptime", "99.9%", "Stable")
@@ -269,30 +284,29 @@ with tab_feed:
             card_class = "card-incd" if is_incd else "card-global"
             title_class = "incd-title" if is_incd else "global-title"
             
-            sev_lower = row['severity'].lower()
-            if "critical" in sev_lower or "high" in sev_lower: sev_class = "sev-critical"
-            elif "medium" in sev_lower: sev_class = "sev-med"
-            elif "low" in sev_lower or "info" in sev_lower: sev_class = "sev-info"
-            else: sev_class = "sev-high"
-
+            # Severity Tag logic inline styling
+            sev_tag_style = "background: rgba(88, 166, 255, 0.15); color: #58a6ff;"
+            if "Critical" in row['severity'] or "High" in row['severity']:
+                sev_tag_style = "background: rgba(255, 123, 114, 0.15); color: #ff7b72; border: 1px solid #ff7b72;"
+            
             source_badge = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
             
             st.markdown(f"""
             <div class="report-card {card_class}">
-                <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
                     <div>
-                        <span class="sev-tag {sev_class}">{row['severity'].upper()}</span>
-                        <span style="font-size: 1rem; color: #8b949e; margin: 0 8px;">{row['category']}</span>
+                        <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; {sev_tag_style}">{row['severity'].upper()}</span>
+                        <span style="font-size: 0.8rem; color: #8b949e; margin: 0 5px;">{row['category']}</span>
                     </div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 1rem; color: #8b949e;">
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: #8b949e;">
                         {date_str} • <b>{source_badge}</b>
                     </div>
                 </div>
                 <div class="{title_class}">{row['title']}</div>
-                <div style="margin-top: 8px; color: #e6edf3; font-size: 1.15rem; line-height: 1.6;">
+                <div style="margin-top: 8px; color: #c9d1d9; font-size: 0.95rem; line-height: 1.5;">
                     {row['summary']}
                 </div>
-                <div style="margin-top: 15px; text-align: {'left' if not is_incd else 'right'};">
+                <div style="margin-top: 12px; text-align: {'left' if not is_incd else 'right'};">
                     <a href="{row['url']}" target="_blank">🔗 SOURCE LINK</a>
                 </div>
             </div>
@@ -306,7 +320,6 @@ with tab_tools:
     with col_input:
         ioc_input = st.text_input("IOC Input", placeholder="IP, Domain, Hash, or URL...", label_visibility="collapsed")
     with col_action:
-        # Custom Primary Button
         btn_scan = st.button("🔍 INITIATE SCAN", type="primary", use_container_width=True)
 
     if btn_scan and ioc_input:
@@ -350,7 +363,7 @@ with tab_tools:
             with c_ai:
                 st.markdown("### 🤖 AI Analyst Verdict")
                 st.markdown(f"""
-                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 25px; border-radius: 8px; font-family: 'Heebo'; color: #e6edf3; font-size: 1.1rem;">
+                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 8px; font-family: 'Heebo'; color: #e6edf3;">
                     {ai_report}
                 </div>
                 """, unsafe_allow_html=True)
@@ -377,23 +390,22 @@ with tab_strat:
 
     with col_info:
         st.markdown(f"""
-        <div style="border: 1px solid #30363d; border-radius: 10px; padding: 30px; background: #161b22;">
-            <h2 style="margin-top:0; color: #f0f6fc !important; font-size: 2.5rem;">{actor['name']}</h2>
-            <div style="display: flex; gap: 15px; margin-bottom: 20px;">
-                <span class="sev-tag sev-med">ORIGIN: {actor['origin']}</span>
-                <span class="sev-tag sev-high">TARGET: {actor['target']}</span>
-                <span class="sev-tag sev-info">TYPE: {actor['type']}</span>
+        <div style="border: 1px solid #30363d; border-radius: 8px; padding: 20px; background: #161b22;">
+            <h2 style="margin-top:0; color: #f0f6fc !important; font-size: 2rem;">{actor['name']}</h2>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <span style="background: rgba(88, 166, 255, 0.15); color: #58a6ff; padding: 4px 10px; border-radius: 4px;">ORIGIN: {actor['origin']}</span>
+                <span style="background: rgba(210, 153, 34, 0.15); color: #d29922; padding: 4px 10px; border-radius: 4px;">TARGET: {actor['target']}</span>
             </div>
-            <p style="color: #e6edf3; font-size: 1.3rem; line-height: 1.6;">{actor['desc']}</p>
+            <p style="color: #e6edf3; font-size: 1.1rem; line-height: 1.5;">{actor['desc']}</p>
             <hr style="border-color: #30363d;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
                 <div>
-                    <h5 style="color: #58a6ff !important; font-size: 1.3rem;">🛠️ Toolset</h5>
-                    <code style="background: #0d1117; color: #ff7b72; font-size: 1rem; padding: 10px; display: block;">{actor['tools']}</code>
+                    <h5 style="color: #58a6ff !important;">🛠️ Toolset</h5>
+                    <code style="background: #0d1117; color: #ff7b72; display: block; padding: 8px;">{actor['tools']}</code>
                 </div>
                 <div>
-                    <h5 style="color: #58a6ff !important; font-size: 1.3rem;">📚 MITRE TTPs</h5>
-                    <code style="background: #0d1117; color: #d29922; font-size: 1rem; padding: 10px; display: block;">{actor['mitre']}</code>
+                    <h5 style="color: #58a6ff !important;">📚 MITRE TTPs</h5>
+                    <code style="background: #0d1117; color: #d29922; display: block; padding: 8px;">{actor['mitre']}</code>
                 </div>
             </div>
         </div>
@@ -407,3 +419,11 @@ with tab_strat:
 with tab_map:
     st.markdown("#### 🌍 Live Attack Map")
     components.iframe("https://threatmap.checkpoint.com/", height=700)
+
+# --- FOOTER CREDIT ---
+st.markdown("""
+<div class="footer">
+    DESIGNED & BUILT BY LIDOR AVRAHAMY | 
+    <a href="https://www.linkedin.com/in/lidoravrahamy/" target="_blank">LINKEDIN PROFILE 🔗</a>
+</div>
+""", unsafe_allow_html=True)
