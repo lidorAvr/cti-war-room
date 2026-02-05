@@ -1,5 +1,4 @@
 streamlit
-streamlit-autorefresh
 pandas
 requests
 beautifulsoup4
@@ -8,4 +7,3 @@ pytz
 aiohttp
 feedparser
 lxml
-ddgs
