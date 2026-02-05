@@ -191,7 +191,15 @@ class AIBatchProcessor:
         * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
         * If clean, confirm it's a False Positive risk.
         """
-        return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+        
+        # Priority 1: Try High-Tier Model (70b)
+        res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+        
+        # Priority 2: Fallback to Fast Model (8b) if Rate Limit or Error
+        if "Error" in res:
+            return await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=False)
+            
+        return res
 
     async def generate_hunting_queries(self, actor):
         prompt = f"""
@@ -217,18 +225,17 @@ class ThreatLookup:
                 endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
                 endpoint = f"{endpoint}/{ioc}"
             
-            # Attempt 1: Fetch WITH relationships (Heavy)
+            # Request Relationships (Include 'resolutions' for IPs!)
             params = {}
             if ioc_type in ['file', 'domain', 'ip', 'url']:
-                params['relationships'] = 'contacted_urls,contacted_ips,contacted_domains'
+                params['relationships'] = 'contacted_urls,contacted_ips,contacted_domains,resolutions'
             
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=15)
             
             if res.status_code == 200:
                 return res.json().get('data', {})
             
-            # Attempt 2: Fallback WITHOUT relationships (if 400/403/500 or just failure)
-            # This often fixes issues with standard keys or massive objects
+            # Fallback WITHOUT relationships (if 400/403/500/504)
             if res.status_code in [400, 403, 500, 504]:
                 res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
                 if res.status_code == 200:
