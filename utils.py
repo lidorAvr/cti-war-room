@@ -413,3 +413,19 @@ class CTICollector:
                 if hits: all_items.extend(hits)
             
             return all_items
+
+# --- SAVE FUNCTION (THE MISSING PIECE) ---
+def save_reports(raw, analyzed):
+    conn = sqlite3.connect(DB_NAME)
+    c, cnt = conn.cursor(), 0
+    for i, item in enumerate(raw):
+        if i < len(analyzed):
+            a = analyzed[i]
+            try:
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
+                if c.rowcount > 0: cnt += 1
+            except: pass
+    conn.commit()
+    conn.close()
+    return cnt
