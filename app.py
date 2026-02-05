@@ -14,19 +14,11 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- HELPER: ROBUST HTML CLEANER ---
-def clean_html(raw_text):
-    if not raw_text: return ""
-    # Convert to string and remove common breaking artifacts
-    text = str(raw_text)
-    # Remove all HTML tags
+# --- HELPER: CLEAN HTML FROM TEXT ---
+def clean_html(raw_html):
     cleanr = re.compile('<.*?>')
-    text = re.sub(cleanr, '', text)
-    # Remove navigation leftovers
-    text = text.replace('Open article on Malpedia', '').replace('[SCRAPED_CONTENT]', '')
-    # Normalize whitespace
-    text = ' '.join(text.split())
-    return text.replace('"', '&quot;').strip()
+    cleantext = re.sub(cleanr, '', str(raw_html))
+    return cleantext.replace('"', '&quot;').strip()
 
 # --- HTML GENERATORS (DARK MODE STYLE) ---
 def get_status_html(ok, msg):
@@ -39,27 +31,12 @@ def get_status_html(ok, msg):
     </div>
     """
 
-# --- NEW: MERGED CARD FOR LIVE FEED (FIXED LAYOUT & EXPLICIT SOURCES) ---
-def get_merged_feed_card_html(item, date_str):
-    # Unique source list
-    unique_sources = list(set(item['sources']))
-    source_display_text = " | ".join(unique_sources)
-    if len(source_display_text) > 40: source_display_text = f"{len(unique_sources)} SOURCES"
-
-    # Button generation (one per source)
-    sources_buttons_html = ""
-    for src, url in zip(item['sources'], item['urls']):
-        icon = "🇮🇱" if src == "INCD" else "📡"
-        # Using a distinct cleaner style for buttons to avoid layout breaking
-        sources_buttons_html += f"""
-            <a href="{url}" target="_blank" style="text-decoration: none; margin-right: 8px; margin-bottom: 5px; display: inline-block;">
-                <span style="display: inline-flex; align-items: center; gap: 5px; color: #38bdf8; font-size: 0.75rem; font-weight: 600; padding: 4px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 4px; border: 1px solid rgba(56, 189, 248, 0.2); transition: background 0.2s;">
-                    {icon} {src} 🔗
-                </span>
-            </a>
-        """
-
-    sev = item['severity'].lower()
+def get_feed_card_html(row, date_str):
+    is_incd = row['source'] == "INCD"
+    card_class = "card-incd" if is_incd else "card-global"
+    
+    # Severity Badge Logic
+    sev = row['severity'].lower()
     badge_bg = "rgba(100, 116, 139, 0.2)"
     badge_color = "#cbd5e1"
     border_color = "rgba(100, 116, 139, 0.3)"
@@ -72,25 +49,32 @@ def get_merged_feed_card_html(item, date_str):
         badge_bg = "rgba(59, 130, 246, 0.2)"
         badge_color = "#93c5fd"
         border_color = "#3b82f6"
-
-    clean_summary = clean_html(item['summary'])
+        
+    source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
+    align = 'right' if is_incd else 'left'
+    dir = 'rtl' if is_incd else 'ltr'
+    
+    # Clean summary to prevent HTML breakage
+    clean_summary = clean_html(row['summary'])
     
     return f"""
-    <div class="report-card" style="border-left: 4px solid {border_color}; padding: 20px; border-radius: 8px; background: rgba(30, 41, 59, 0.4); margin-bottom: 15px;">
+    <div class="report-card {card_class}" style="direction: {dir};">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
             <div class="card-meta">
-                {date_str} <span style="margin: 0 8px; color: #475569;">|</span> <span style="color: #cbd5e1; font-weight: 600;">{source_display_text}</span>
+                {date_str} • <b style="color: #e2e8f0;">{source_display}</b>
             </div>
             <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold; letter-spacing: 0.5px;">
-                {item['severity'].upper()}
+                {row['severity'].upper()}
             </div>
         </div>
-        <div class="card-title" style="margin-bottom: 8px; font-size: 1.1rem; font-weight: bold; color: #f1f5f9;">{item['title']}</div>
-        <div style="font-size: 0.9rem; color: #cbd5e1; margin-bottom: 15px; line-height: 1.5; opacity: 0.9; max-height: 100px; overflow: hidden; text-overflow: ellipsis;">
+        <div class="card-title">{row['title']}</div>
+        <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 15px; line-height: 1.6; opacity: 0.9; max-height: 100px; overflow: hidden; text-overflow: ellipsis;">
             {clean_summary}
         </div>
-        <div style="display: flex; flex-wrap: wrap; margin-top: 10px;">
-            {sources_buttons_html}
+        <div style="text-align: {align};">
+            <a href="{row['url']}" target="_blank" style="display: inline-flex; align-items: center; gap: 5px; color: #38bdf8; text-decoration: none; font-size: 0.85rem; font-weight: 600; padding: 5px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px; transition: all 0.2s;">
+                OPEN REPORT 🔗
+            </a>
         </div>
     </div>
     """
@@ -116,53 +100,6 @@ def get_dossier_html(actor):
                 <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px;">📚 MITRE TTPs</h5>
                 <code style="color: #fcd34d; background: transparent; font-size: 0.95rem;">{actor['mitre']}</code>
             </div>
-        </div>
-    </div>
-    """
-
-# --- LEGACY CARD (Used in Campaign Radar) ---
-def get_feed_card_html(row, date_str):
-    is_incd = row['source'] == "INCD"
-    card_class = "card-incd" if is_incd else "card-global"
-    
-    sev = row['severity'].lower()
-    badge_bg = "rgba(100, 116, 139, 0.2)"
-    badge_color = "#cbd5e1"
-    border_color = "rgba(100, 116, 139, 0.3)"
-    
-    if "critical" in sev or "high" in sev:
-        badge_bg = "rgba(220, 38, 38, 0.2)"
-        badge_color = "#fca5a5"
-        border_color = "#ef4444"
-    elif "medium" in sev:
-        badge_bg = "rgba(59, 130, 246, 0.2)"
-        badge_color = "#93c5fd"
-        border_color = "#3b82f6"
-        
-    source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
-    align = 'right' if is_incd else 'left'
-    dir = 'rtl' if is_incd else 'ltr'
-    
-    clean_summary = clean_html(row['summary'])
-    
-    return f"""
-    <div class="report-card {card_class}" style="direction: {dir};">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-            <div class="card-meta">
-                {date_str} • <b style="color: #e2e8f0;">{source_display}</b>
-            </div>
-            <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold; letter-spacing: 0.5px;">
-                {row['severity'].upper()}
-            </div>
-        </div>
-        <div class="card-title">{row['title']}</div>
-        <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 15px; line-height: 1.6; opacity: 0.9; max-height: 100px; overflow: hidden; text-overflow: ellipsis;">
-            {clean_summary}
-        </div>
-        <div style="text-align: {align};">
-            <a href="{row['url']}" target="_blank" style="display: inline-flex; align-items: center; gap: 5px; color: #38bdf8; text-decoration: none; font-size: 0.85rem; font-weight: 600; padding: 5px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px; transition: all 0.2s;">
-                OPEN REPORT 🔗
-            </a>
         </div>
     </div>
     """
@@ -482,14 +419,14 @@ st.markdown("---")
 # --- TABS ---
 tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ INVESTIGATION LAB", "🧠 THREAT PROFILER", "🌍 HEATMAP"])
 
-# --- TAB 1: LIVE FEED (GROUPED) ---
+# --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
-    df_all = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False)
+    df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     c1, c2 = st.columns([1, 1])
     with c1:
@@ -499,60 +436,26 @@ with tab_feed:
         st.caption("SEVERITY FILTER")
         filter_sev = st.radio("S2", ["All Levels", "🔥 Critical/High", "⚠️ Medium", "ℹ️ Info/Low"], horizontal=True, label_visibility="collapsed", key="f_sev")
 
-    # GROUPING LOGIC
-    grouped = []
-    seen_titles = {}
-
-    for _, row in df_all.iterrows():
-        # Clean title for comparison
-        norm_title = re.sub(r'\W+', '', row['title'].lower())
-        
-        if norm_title in seen_titles:
-            idx = seen_titles[norm_title]
-            # Add new source url if needed
-            if row['url'] not in grouped[idx]['urls']:
-                grouped[idx]['sources'].append(row['source'])
-                grouped[idx]['urls'].append(row['url'])
-                # Pick longer summary
-                if len(str(row['summary'])) > len(str(grouped[idx]['summary'])):
-                    grouped[idx]['summary'] = row['summary']
-        else:
-            seen_titles[norm_title] = len(grouped)
-            grouped.append({
-                'title': row['title'],
-                'severity': row['severity'],
-                'summary': row['summary'],
-                'published_at': row['published_at'],
-                'sources': [row['source']],
-                'urls': [row['url']]
-            })
-
-    # FILTERING
-    filtered_items = []
-    for item in grouped:
-        has_incd = "INCD" in item['sources']
-        if "INCD Only" in filter_source and not has_incd: continue
-        if "Global Only" in filter_source and has_incd and len(item['sources']) == 1: continue
-
-        sev = item['severity']
-        if "Critical" in filter_sev and not any(x in sev for x in ['Critical', 'High']): continue
-        if "Medium" in filter_sev and "Medium" not in sev: continue
-        if "Info" in filter_sev and not any(x in sev for x in ['Low', 'Info', 'News']): continue
-        
-        filtered_items.append(item)
+    df_display = df_final.copy()
+    if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
+    elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
+    
+    if "Critical" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
+    elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
+    elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
 
     st.write("") 
-    if not filtered_items: st.info("NO THREATS DETECTED MATCHING CRITERIA.")
+    if df_display.empty: st.info("NO THREATS DETECTED MATCHING CRITERIA.")
     
-    for item in filtered_items:
+    for _, row in df_display.iterrows():
         try:
-            dt = date_parser.parse(item['published_at'])
+            # Safe Parsing of the date (AI ISO format or Fallback)
+            dt = date_parser.parse(row['published_at'])
             if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
             else: dt = dt.astimezone(IL_TZ)
             date_str = dt.strftime('%H:%M | %d/%m')
         except: date_str = "--:--"
-        
-        st.markdown(get_merged_feed_card_html(item, date_str), unsafe_allow_html=True)
+        st.markdown(get_feed_card_html(row, date_str), unsafe_allow_html=True)
 
 # --- TAB 2: FORENSIC LAB ---
 with tab_tools:
