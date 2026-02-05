@@ -58,7 +58,6 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Cleanup: Keep INCD forever, others 48h
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source != 'INCD' AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -101,6 +100,22 @@ class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
         
+    def _prune_data(self, data, max_list_items=5):
+        """Helper to trim massive JSONs for AI context window"""
+        if isinstance(data, dict):
+            new_data = {}
+            for k, v in data.items():
+                # Remove heavy fields irrelevant to high-level analysis
+                if k in ['icon', 'favicon', 'html', 'screenshot', 'raw_response', 'response_headers']:
+                    continue
+                new_data[k] = self._prune_data(v, max_list_items)
+            return new_data
+        elif isinstance(data, list):
+            # Limit lists to top N items
+            return [self._prune_data(i, max_list_items) for i in data[:max_list_items]]
+        else:
+            return data
+
     async def analyze_batch(self, items):
         if not items: return []
         chunk_size = 10
@@ -148,12 +163,15 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
+        # PRUNE DATA BEFORE SENDING TO AI
+        sanitized_data = self._prune_data(data, max_list_items=5)
+        
         prompt = f"""
         Act as a Senior Tier 3 SOC Analyst.
         Your task is to provide an OPERATIONAL analysis for an Enterprise Environment.
         
         Target IOC: {ioc} ({ioc_type})
-        Raw Intelligence Data: {json.dumps(data)}
+        Raw Intelligence Data: {json.dumps(sanitized_data)}
         
         Output Structure (Markdown, English Only):
         
@@ -169,7 +187,7 @@ class AIBatchProcessor:
         * **Containment**: Immediate steps if traffic is seen.
 
         ### 🔬 Technical Context
-        * Analyze the available attributes (tags, categories, history) and RELATIONS (contacted URLs/IPs) if available.
+        * Analyze the available attributes and relations.
         * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
         * If clean, confirm it's a False Positive risk.
         """
@@ -192,29 +210,38 @@ class ThreatLookup:
         if not self.vt_key: return None
         try:
             if ioc_type == "url":
+                # Ensure correct URL ID calculation for VT v3
                 url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
                 endpoint = f"urls/{url_id}"
             else:
                 endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
                 endpoint = f"{endpoint}/{ioc}"
             
-            # Request Relationships to get "Contacted Hosts", "Referrers", etc.
+            # Attempt 1: Fetch WITH relationships (Heavy)
             params = {}
             if ioc_type in ['file', 'domain', 'ip', 'url']:
                 params['relationships'] = 'contacted_urls,contacted_ips,contacted_domains'
-                
-            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=20)
             
-            return res.json().get('data', {}) if res.status_code == 200 else None
+            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=15)
+            
+            if res.status_code == 200:
+                return res.json().get('data', {})
+            
+            # Attempt 2: Fallback WITHOUT relationships (if 400/403/500 or just failure)
+            # This often fixes issues with standard keys or massive objects
+            if res.status_code in [400, 403, 500, 504]:
+                res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
+                if res.status_code == 200:
+                     return res.json().get('data', {})
+                
+            return None
         except: return None
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # FIX: Robust Search Logic
+            # Fix: Pivot to domain for more robust results
             search_query = ioc
-            
-            # If URL, pivot to domain search to ensure we find *something*
             try:
                 if "://" in ioc:
                     parsed = urlparse(ioc)
@@ -227,7 +254,7 @@ class ThreatLookup:
             data = res.json()
             
             if data.get('results'):
-                # Step 2: Extract UUID from the first result (Latest scan)
+                # Step 2: Extract UUID from the first result
                 first_hit = data['results'][0]
                 scan_uuid = first_hit.get('_id')
                 
