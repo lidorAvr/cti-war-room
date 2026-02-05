@@ -80,8 +80,7 @@ init_db()
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 REFRESH_MINUTES = 15
 
-# --- AUTO-REFRESH COMPONENT (TRIGGERS RERUN EVERY X MIN) ---
-# This forces the script to rerun every 15 minutes, allowing us to check if update is needed
+# --- AUTO-REFRESH COMPONENT ---
 st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
 
 GROQ_KEY = st.secrets.get("groq_key", "")
@@ -100,17 +99,13 @@ async def perform_update():
 
 # --- AUTO-LOAD & UPDATE CHECK ---
 if "last_run" not in st.session_state:
-    # First Load
     st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
     with st.spinner("🚀 Initializing CTI Feeds..."):
         asyncio.run(perform_update())
-
 else:
-    # Check if interval passed
     now = datetime.datetime.now(IL_TZ)
     last_run = st.session_state["last_run"]
     if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
-        # Time to update!
         with st.spinner("🔄 Auto-updating feeds..."):
             asyncio.run(perform_update())
             st.session_state["last_run"] = now
@@ -137,7 +132,6 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SO
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
-    # 1. Update Status with Calc
     last_up = st.session_state["last_run"]
     next_up = last_up + datetime.timedelta(minutes=REFRESH_MINUTES)
     
@@ -148,71 +142,41 @@ with tab_feed:
     st.divider()
 
     conn = sqlite3.connect(DB_NAME)
-    
-    # Priority Fetch: INCD top
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC", conn)
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
     conn.close()
     
-    # Merge
     df_final = pd.concat([df_incd.head(8), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
         st.info("No active threats found. Try 'Force Global Update'.")
     else:
-        # --- FILTERS SECTION ---
         st.write("##### 🕵️ Filter Intelligence")
-        
-        # Calculate Counts
         cnt_all = len(df_final)
         cnt_incd = len(df_final[df_final['source'] == 'INCD'])
         cnt_global = len(df_final[df_final['source'] != 'INCD'])
-        
         cnt_crit = len(df_final[df_final['severity'].str.contains('Critical|High', case=False, na=False)])
         cnt_med = len(df_final[df_final['severity'].str.contains('Medium', case=False, na=False)])
         cnt_info = len(df_final[df_final['severity'].str.contains('Low|Info|News', case=False, na=False)])
 
         c_src, c_sev = st.columns([1, 2])
-        
         with c_src:
             st.caption("Source")
-            filter_source = st.radio(
-                "Source Filter", 
-                [f"All ({cnt_all})", f"INCD ({cnt_incd})", f"Global ({cnt_global})"], 
-                horizontal=True, 
-                label_visibility="collapsed"
-            )
-        
+            filter_source = st.radio("Source Filter", [f"All ({cnt_all})", f"INCD ({cnt_incd})", f"Global ({cnt_global})"], horizontal=True, label_visibility="collapsed")
         with c_sev:
             st.caption("Severity")
-            filter_sev = st.radio(
-                "Severity Filter", 
-                [f"All", f"Critical ({cnt_crit})", f"Medium ({cnt_med})", f"Info ({cnt_info})"], 
-                horizontal=True, 
-                label_visibility="collapsed"
-            )
+            filter_sev = st.radio("Severity Filter", [f"All", f"Critical ({cnt_crit})", f"Medium ({cnt_med})", f"Info ({cnt_info})"], horizontal=True, label_visibility="collapsed")
 
-        # Apply Filters
         df_display = df_final.copy()
-        
-        # 1. Source Filter
-        if "INCD" in filter_source:
-            df_display = df_display[df_display['source'] == 'INCD']
-        elif "Global" in filter_source:
-            df_display = df_display[df_display['source'] != 'INCD']
-            
-        # 2. Severity Filter
-        if "Critical" in filter_sev:
-            df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
-        elif "Medium" in filter_sev:
-            df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
-        elif "Info" in filter_sev:
-             df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
+        if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
+        elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
+        if "Critical" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
+        elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
+        elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
 
         st.divider()
 
         for _, row in df_display.iterrows():
-            # Parse Date
             try:
                 dt = date_parser.parse(row['published_at'])
                 if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
@@ -221,8 +185,6 @@ with tab_feed:
             except: date_str = "Unknown"
 
             sev_class = "tag-critical" if "Critical" in row['severity'] else ""
-            
-            # CUSTOM LOGIC FOR INCD
             if row['source'] == "INCD":
                 source_display = "מערך הסייבר"
                 source_tag_class = "tag-incd"
@@ -251,37 +213,28 @@ with tab_feed:
 # --- TAB 2: SOC TOOLBOX ---
 with tab_tools:
     st.subheader("🛠️ SOC Toolbox - IOC Investigation")
-    
     c_input, c_btn = st.columns([4, 1])
     with c_input:
         ioc_input = st.text_input("Enter Indicator", placeholder="e.g., 1.2.3.4, evil.com, http://bad-site.com/login").strip()
     with c_btn:
-        st.write("") 
-        st.write("") 
+        st.write(""); st.write("") 
         btn_scan = st.button("Investigate 🕵️")
 
     if btn_scan and ioc_input:
         ioc_type = identify_ioc_type(ioc_input)
-        
         if not ioc_type:
             st.error("❌ Invalid Input! Please enter a valid IP, Domain, Hash or URL.")
         else:
             st.success(f"Identified Type: {ioc_type.upper()}")
             tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
             results = {}
-            
             with st.status("Scanning External Sources...", expanded=True):
-                st.write("Querying VirusTotal...")
                 vt_data = tl.query_virustotal(ioc_input, ioc_type)
                 results['virustotal'] = vt_data if vt_data else "No Data"
-                
                 if ioc_type in ["domain", "url", "ip"]:
-                    st.write("Querying URLScan.io...")
                     us_data = tl.query_urlscan(ioc_input)
                     results['urlscan'] = us_data if us_data else "No Data"
-                
                 if ioc_type == "ip":
-                    st.write("Querying AbuseIPDB...")
                     ab = tl.query_abuseipdb(ioc_input)
                     results['abuseipdb'] = ab if ab else "No Data"
                     
@@ -289,72 +242,35 @@ with tab_tools:
             with c1:
                 st.markdown("### 🦠 VirusTotal")
                 if isinstance(results.get('virustotal'), dict):
-                    # VT Data structure
                     attrs = results['virustotal'].get('attributes', {})
                     rels = results['virustotal'].get('relationships', {})
-                    
                     stats = attrs.get('last_analysis_stats', {})
                     malicious = stats.get('malicious', 0)
                     color = "red" if malicious > 0 else "green"
                     st.markdown(f":{color}[**Detections: {malicious}**]")
-                    
-                    # 1. Metadata
                     with st.expander("🔍 Metadata & Tags", expanded=False):
-                        if attrs.get('country'):
-                            st.write(f"**Country:** {attrs.get('country')} 🌍")
-                        if attrs.get('as_owner'):
-                            st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
-
+                        if attrs.get('country'): st.write(f"**Country:** {attrs.get('country')} 🌍")
+                        if attrs.get('as_owner'): st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
                         st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
                         st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
-                        if attrs.get('creation_date'):
-                            st.write(f"**Created:** {datetime.datetime.fromtimestamp(attrs['creation_date']).strftime('%Y-%m-%d')}")
-                    
-                    # 2. Relations (Network)
                     with st.expander("🕸️ Network Relations", expanded=False):
-                         # Resolutions (Passive DNS)
                          if rels.get('resolutions'):
-                             st.write("**Passive DNS (Domains on this IP):**")
-                             for r in rels['resolutions'].get('data', [])[:8]:
-                                 st.code(r.get('attributes', {}).get('host_name', 'Unknown'))
-                                 
+                             st.write("**Passive DNS:**")
+                             for r in rels['resolutions'].get('data', [])[:8]: st.code(r.get('attributes', {}).get('host_name', 'Unknown'))
                          if rels.get('contacted_urls'):
                              st.write("**Contacted URLs:**")
-                             for u in rels['contacted_urls'].get('data', [])[:5]:
-                                 st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
-                         
-                         if rels.get('contacted_ips'):
-                             st.write("**Contacted IPs:**")
-                             for ip in rels['contacted_ips'].get('data', [])[:5]:
-                                 st.code(ip.get('id'))
-                                 
-                    # 3. Engines
-                    with st.expander("📊 Engine Detection", expanded=False):
-                        st.json(stats)
-                        
+                             for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
                 else: st.write("N/A")
-                
             with c2:
                 st.markdown("### 🌐 URLScan")
                 if isinstance(results.get('urlscan'), dict):
-                    # Data from Full Result API
                     task = results['urlscan'].get('task', {})
                     verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
-                    
                     st.write(f"**Target:** `{task.get('url', 'Unknown')}`")
                     st.write(f"**Verdict:** {verdict}")
-                    
-                    if results['urlscan'].get('page', {}).get('country'):
-                         st.write(f"**Location:** {results['urlscan']['page']['country']}")
-                    
-                    # Screenshot
-                    if task.get('screenshotURL'): 
-                        st.image(task['screenshotURL'])
-                    
-                    with st.expander("See Raw Data"):
-                        st.json(results['urlscan'].get('page', {}))
+                    if results['urlscan'].get('page', {}).get('country'): st.write(f"**Location:** {results['urlscan']['page']['country']}")
+                    if task.get('screenshotURL'): st.image(task['screenshotURL'])
                 else: st.write("N/A")
-                
             with c3:
                 st.markdown("### 🛑 AbuseIPDB")
                 if ioc_type == 'ip' and isinstance(results.get('abuseipdb'), dict):
@@ -363,7 +279,6 @@ with tab_tools:
                     st.write(f"ISP: {results['abuseipdb'].get('isp')}")
                     st.write(f"Usage: {results['abuseipdb'].get('usageType')}")
                 else: st.write("N/A")
-
             st.divider()
             st.subheader("🤖 AI Analyst Assessment (Tier 3)")
             with st.spinner("Generating Enterprise Defense Playbook..."):
@@ -374,74 +289,86 @@ with tab_tools:
 # --- TAB 3: STRATEGIC INTEL ---
 with tab_strat:
     st.subheader("🧠 Strategic Threat Intel - Campaign Profiler")
-    st.markdown("Deep dive into active Threat Actors targeting **Israel** & the Middle East.")
     
+    # --- 1. TOOLKIT MOVED TO TOP ---
+    with st.expander("🧰 CTI Analyst Toolkit (Quick Links)", expanded=True):
+        toolkit = AnalystToolkit.get_tools()
+        for category, tools in toolkit.items():
+            st.markdown(f"**{category}**")
+            cols = st.columns(len(tools))
+            for idx, tool in enumerate(tools):
+                with cols[idx]:
+                    st.markdown(f"""
+                    <a href="{tool['url']}" target="_blank" class="tool-btn">{tool['name']}</a>
+                    <div style="font-size: 0.8em; color: #666; margin-top: 4px; margin-left: 6px;">{tool['desc']}</div>
+                    """, unsafe_allow_html=True)
+            st.write("")
+    
+    st.divider()
+    
+    # --- 2. CAMPAIGN RADAR ---
+    st.markdown("### 📡 Active Campaign Radar")
+    st.markdown("Select an Actor to perform a deep-dive scan on collected intelligence.")
+
     threats = APTSheetCollector().fetch_threats()
     actor_names = [t['name'] for t in threats]
-    
-    # --- ACTOR SELECTOR ---
-    selected_actor_name = st.selectbox("Select Threat Actor:", actor_names)
+    selected_actor_name = st.selectbox("🎯 Target Actor:", actor_names)
     actor_data = next(t for t in threats if t['name'] == selected_actor_name)
     
-    col_prof, col_acts = st.columns([2, 1])
+    # Perform Search in DB
+    conn = sqlite3.connect(DB_NAME)
+    keywords = actor_data.get('keywords', []) + [actor_data['name']]
     
-    # --- LEFT COLUMN: PROFILE ---
+    # Dynamic SQL Query Construction
+    query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
+    full_query = f"SELECT * FROM intel_reports WHERE { ' OR '.join(query_parts) } ORDER BY published_at DESC"
+    
+    df_hits = pd.read_sql_query(full_query, conn)
+    conn.close()
+    
+    # Layout
+    col_prof, col_live = st.columns([1, 2])
+    
     with col_prof:
-        st.markdown(f"### 👹 {actor_data['name']}")
-        st.markdown(f"**Origin:** {actor_data['origin']} | **Type:** {actor_data['type']}")
-        st.info(f"**Description:** {actor_data['desc']}")
+        st.info(f"""
+        **Why monitor {actor_data['name']}?**
         
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**🛠️ Tools & Malware**")
-            for tool in actor_data['tools'].split(','):
-                st.code(tool.strip(), language="text")
-        with c2:
-            st.markdown("**🏗️ MITRE ATT&CK**")
-            for tech in actor_data['mitre'].split(','):
-                st.code(tech.strip(), language="text")
+        {actor_data['desc']}
         
-        st.markdown("---")
-        st.markdown("#### 🔗 External Intelligence (Curated)")
-        st.markdown(f"- [Malpedia Profile]({actor_data['malpedia']})")
-        st.markdown(f"- [MITRE Groups Search](https://attack.mitre.org/search/?q={actor_data['name'].split()[0]})")
-        st.markdown(f"- [Google APT Search](https://cse.google.com/cse?cx=003248445720253387346:turlh5vi4xc&q={actor_data['name']})")
-        
-    # --- RIGHT COLUMN: ACTIONS ---
-    with col_acts:
-        st.markdown("### ⚡ Operational Actions")
-        if st.button(f"🏹 Generate Hunting Queries", key="hunt_btn"):
-            proc = AIBatchProcessor(GROQ_KEY)
-            with st.spinner(f"Generating detection rules for {actor_data['name']}..."):
-                res = asyncio.run(proc.generate_hunting_queries(actor_data))
-                with st.expander("View XQL / YARA Rules", expanded=True):
-                    st.markdown(res)
-                    
-        st.write("")
-        st.markdown("### 📰 Recent Activity (Simulated)")
-        st.caption("Latest reports linked to this actor:")
-        st.markdown(f"""
-        * 12/2025: [{actor_data['name']} New Phishing Campaign targeting Finance](https://www.gov.il/he/departments/topics/cyber-attack-network)
-        * 11/2025: [Indicator release: {actor_data['tools'].split(',')[0]} variant](https://unit42.paloaltonetworks.com/)
+        **Target:** {actor_data['target']}
+        **Origin:** {actor_data['origin']}
         """)
+        
+        st.markdown("**Known Tools:**")
+        for tool in actor_data['tools'].split(','):
+            st.code(tool.strip())
+            
+        st.markdown(f"[📚 Malpedia Profile]({actor_data['malpedia']})")
+        
+        if st.button(f"🏹 Generate Hunting Rules", key="hunt_btn"):
+            proc = AIBatchProcessor(GROQ_KEY)
+            with st.spinner(f"Generating XQL/YARA for {actor_data['name']}..."):
+                res = asyncio.run(proc.generate_hunting_queries(actor_data))
+                with st.expander("View Detection Rules", expanded=True):
+                    st.markdown(res)
 
-    # --- ANALYST TOOLKIT SECTION (FROM README) ---
-    st.markdown("---")
-    st.subheader("🧰 CTI Analyst Toolkit (Quick Links)")
-    st.markdown("Essential tools curated from *Awesome Threat Intelligence* list.")
-    
-    toolkit = AnalystToolkit.get_tools()
-    
-    for category, tools in toolkit.items():
-        st.markdown(f"**{category}**")
-        cols = st.columns(len(tools))
-        for idx, tool in enumerate(tools):
-            with cols[idx]:
-                st.markdown(f"""
-                <a href="{tool['url']}" target="_blank" class="tool-btn">{tool['name']}</a>
-                <div style="font-size: 0.8em; color: #666; margin-top: 4px; margin-left: 6px;">{tool['desc']}</div>
-                """, unsafe_allow_html=True)
-        st.write("")
+    with col_live:
+        st.markdown("#### 🚨 Live Intelligence Feed")
+        
+        if not df_hits.empty:
+            st.success(f"Found {len(df_hits)} recent intelligence reports linked to this actor!")
+            
+            for _, row in df_hits.head(5).iterrows():
+                try: dt = date_parser.parse(row['published_at']).strftime('%d/%m/%Y')
+                except: dt = "?"
+                
+                with st.expander(f"{dt} | {row['title']}"):
+                    st.markdown(f"**Source:** {row['source']}")
+                    st.markdown(row['summary'])
+                    st.markdown(f"[Read Full Report]({row['url']})")
+        else:
+            st.warning("No direct mentions found in the last 48h. Actor may be dormant or using new TTPs.")
+            st.caption(f"Searched for: {', '.join(keywords)}")
 
 # --- TAB 4: MAP ---
 with tab_map:
