@@ -448,6 +448,11 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
+            # --- מניעת כפילויות מתקדמת ---
+            # בדיקה אם קיימת כבר ידיעה עם כותרת זהה מאותו מקור ב-24 השעות האחרונות
+            c.execute("SELECT id FROM intel_reports WHERE title = ? AND source = ? AND published_at > datetime('now', '-1 day')", (a['title'], item['source']))
+            if c.fetchone(): continue
+
             final_date = a.get('published_at', item['date'])
             try:
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
