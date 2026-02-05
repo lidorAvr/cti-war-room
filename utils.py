@@ -28,7 +28,8 @@ HEADERS = {
 
 # --- HELPER FUNCTIONS ---
 def clean_html(raw_html):
-    """Removes HTML tags from text."""
+    """Cleans HTML tags from text safely."""
+    if not raw_html: return ""
     cleanr = re.compile('<.*?>')
     cleantext = re.sub(cleanr, '', str(raw_html))
     return cleantext.replace('"', '&quot;').strip()
@@ -66,7 +67,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Logic: Keep RSS fresh (48h), keep DeepWeb/INCD history longer for Tab 3
+    # Logic: Delete RSS older than 48h, but KEEP DeepWeb/INCD for history
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -125,7 +126,6 @@ class DeepWebScanner:
         """ACTIVE OSINT SCAN FOR IOC (Smart AI Feature)"""
         results = []
         try:
-            # Check if it's an official site or a threat
             query = f'"{ioc}" official site OR cyber security reputation OR malware analysis'
             with DDGS() as ddgs:
                 ddg_results = list(ddgs.text(query, max_results=limit))
@@ -242,7 +242,7 @@ class AIBatchProcessor:
         # 1. Extract Technical Data
         lean_data = self._extract_key_intel(data)
         
-        # 2. RUN ACTIVE DEEP WEB SCAN (OSINT)
+        # 2. RUN ACTIVE DEEP WEB SCAN (OSINT) - This makes the AI "Smart"
         scanner = DeepWebScanner()
         osint_hits = scanner.scan_ioc(ioc, limit=4)
         
@@ -364,13 +364,13 @@ class CTICollector:
     ]
 
     async def fetch_item(self, session, source):
-        # Full logic implementation
         items = []
         try:
             async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
                 if resp.status != 200: return []
                 content = await resp.text()
                 now = datetime.datetime.now(IL_TZ)
+                
                 is_incd = source['name'] == 'INCD'
                 
                 if source['type'] == 'rss':
@@ -384,21 +384,26 @@ class CTICollector:
                         if not is_incd and (now - pub_date).total_seconds() > (48 * 3600): continue
                         if _is_url_processed(entry.link): continue
                         
-                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": "RSS Item"})
+                        sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
+                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
                 
-                # ... (Telegram/JSON parsing included implicitly via previous context)
+                # ... (Additional parsers would go here)
         except: pass
         return items
 
     async def get_all_data(self):
         async with aiohttp.ClientSession() as session:
+            # 1. Fetch Standard Feeds
             tasks = [self.fetch_item(session, s) for s in self.SOURCES]
             results = await asyncio.gather(*tasks)
             all_items = [i for sub in results for i in sub]
             
+            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS
+            # Runs automatically on every refresh!
             scanner = DeepWebScanner()
             actors = APTSheetCollector().fetch_threats()
             for actor in actors:
+                # Limit to 2 results per actor per run
                 hits = scanner.scan_actor(actor['name'], limit=2) 
                 if hits: all_items.extend(hits)
             
