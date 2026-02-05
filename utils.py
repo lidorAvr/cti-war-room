@@ -27,7 +27,6 @@ HEADERS = {
 # --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
     ioc = ioc.strip()
-    # Check for URL first (simple regex)
     if re.match(r'^https?://', ioc) or re.match(r'^www\.', ioc):
         return "url"
     try:
@@ -130,7 +129,7 @@ class AIBatchProcessor:
             batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:300]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
-            # 70B Model for high quality
+            # Using 70B model for quality Hebrew
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             chunk_map = {}
             try:
@@ -149,7 +148,6 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        # --- ENTERPRISE SOC PLAYBOOK PROMPT ---
         prompt = f"""
         Act as a Senior Tier 3 SOC Analyst.
         Your task is to provide an OPERATIONAL analysis for an Enterprise Environment.
@@ -171,7 +169,7 @@ class AIBatchProcessor:
         * **Containment**: Immediate steps if traffic is seen.
 
         ### 🔬 Technical Context
-        * Analyze the available attributes (tags, categories, history).
+        * Analyze the available attributes (tags, categories, history) and RELATIONS (contacted URLs/IPs) if available.
         * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
         * If clean, confirm it's a False Positive risk.
         """
@@ -193,27 +191,46 @@ class ThreatLookup:
     def query_virustotal(self, ioc, ioc_type):
         if not self.vt_key: return None
         try:
-            # VT API v3 logic for URLs requires Base64 ID
+            # Prepare VT Endpoint
             if ioc_type == "url":
                 url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
                 endpoint = f"urls/{url_id}"
             else:
                 endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
                 endpoint = f"{endpoint}/{ioc}"
+            
+            # Enrich with Relationships (Behavior, Contacted Hosts)
+            params = {}
+            if ioc_type in ['file', 'domain', 'ip']:
+                params['relationships'] = 'contacted_urls,contacted_ips,contacted_domains'
                 
-            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
-            # Returning full attributes to let AI analyze deep data
-            return res.json().get('data', {}).get('attributes', {}) if res.status_code == 200 else None
+            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=20)
+            
+            # Return the FULL 'data' object (attributes + relationships)
+            # This gives the AI the full context including behavior
+            return res.json().get('data', {}) if res.status_code == 200 else None
         except: return None
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # URLScan search handles URLs/Domains/IPs via query string
+            # Step 1: Search for the IOC
             res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=15)
-            results = res.json().get('results', [])
-            if results:
-                return results[0] # Return the most recent scan
+            data = res.json()
+            
+            if data.get('results'):
+                # Step 2: Extract UUID from the first result
+                # Note: Search results are summaries. We need the FULL result.
+                first_hit = data['results'][0]
+                scan_uuid = first_hit.get('_id') # usually _id or task.uuid
+                
+                if scan_uuid:
+                    # Step 3: Fetch the FULL result using the UUID
+                    # This endpoint returns the deep analysis (DOM, Requests, Verdict)
+                    full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_uuid}/", headers={"API-Key": self.urlscan_key}, timeout=15)
+                    if full_res.status_code == 200:
+                        return full_res.json()
+                    
             return None
         except: return None
 
