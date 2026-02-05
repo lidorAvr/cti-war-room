@@ -129,7 +129,7 @@ if 'booted' not in st.session_state:
         st.session_state['booted'] = True
         st.rerun()
 
-# --- UI STYLING ---
+# --- UI STYLING (DARK MODE) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
@@ -148,30 +148,184 @@ st.markdown("""
         color: #ffffff !important;
     }
     
-    p, div, span { color: #cbd5e1; line-height: 1.6; }
+    p, div, span {
+        color: #cbd5e1;
+        line-height: 1.6;
+    }
 
-    /* CARDS */
+    /* GLASSMORPHISM CARDS */
     .report-card {
         background: rgba(30, 41, 59, 0.4);
         backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         border-radius: 12px;
         padding: 24px;
         margin-bottom: 20px;
+        transition: transform 0.2s;
+    }
+    .report-card:hover {
+        border-color: rgba(56, 189, 248, 0.3);
+        transform: translateY(-2px);
     }
     .card-incd { border-right: 4px solid #3b82f6; }
     .card-global { border-left: 4px solid #10b981; }
-    .card-title { font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin-bottom: 12px; }
-    .card-meta { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #94a3b8; }
 
-    /* FOOTER & METRICS */
-    .footer { position: fixed; left: 0; bottom: 0; width: 100%; background: rgba(15, 23, 42, 0.95); text-align: center; padding: 10px; font-size: 0.75rem; z-index: 999; }
-    div[data-testid="stMetricValue"] { color: #f8fafc !important; }
-    .update-info { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: #64748b; margin-top: -10px; margin-bottom: 20px; display: flex; gap: 15px; }
-    .update-tag { background: #1e293b; padding: 2px 8px; border-radius: 4px; border: 1px solid #334155; }
+    .card-title {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #f1f5f9;
+        margin-bottom: 12px;
+    }
     
-    /* INPUTS */
-    input[type="text"] { background-color: #0f172a !important; color: white !important; border: 1px solid #334155 !important; }
+    .card-meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.85rem;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    /* BADGES */
+    .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 12px;
+        border-radius: 99px;
+        font-size: 0.75rem;
+        font-weight: 600;
+        font-family: 'Inter', sans-serif;
+        letter-spacing: 0.5px;
+        margin-right: 8px;
+        border: 1px solid transparent;
+    }
+    .b-crit { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border-color: rgba(239, 68, 68, 0.3); }
+    .b-high { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border-color: rgba(245, 158, 11, 0.3); }
+    .b-med { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border-color: rgba(59, 130, 246, 0.3); }
+    .b-low { background: rgba(100, 116, 139, 0.15); color: #cbd5e1; border-color: rgba(100, 116, 139, 0.3); }
+
+    /* INPUT FIELDS */
+    input[type="text"] {
+        background-color: #0f172a !important;
+        border: 1px solid #334155 !important;
+        color: #ffffff !important;
+        font-weight: 500;
+        border-radius: 8px;
+        padding: 12px 16px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 1rem;
+    }
+    input[type="text"]:focus {
+        border-color: #38bdf8 !important;
+        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+    }
+    ::placeholder { color: #64748b !important; opacity: 1; }
+
+    /* BUTTONS */
+    div.stButton > button {
+        background-color: rgba(30, 41, 59, 0.5) !important;
+        color: #e2e8f0 !important;
+        border: 1px solid #475569 !important;
+        border-radius: 8px;
+        font-weight: 500;
+        padding: 0.6rem 1.5rem;
+    }
+    div.stButton > button:hover {
+        border-color: #94a3b8 !important;
+        color: #ffffff !important;
+        background-color: #1e293b !important;
+    }
+    div.stButton > button[kind="primary"] {
+        background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%) !important;
+        border: none !important;
+        color: white !important;
+    }
+
+    /* LINKS */
+    .tool-link {
+        display: block;
+        padding: 12px;
+        background: rgba(30, 41, 59, 0.4);
+        border: 1px solid rgba(51, 65, 85, 0.5);
+        border-radius: 8px;
+        color: #cbd5e1 !important;
+        text-decoration: none;
+        font-size: 0.9rem;
+        text-align: center;
+        transition: all 0.2s;
+    }
+    .tool-link:hover {
+        background: rgba(56, 189, 248, 0.1);
+        border-color: #38bdf8;
+        color: #38bdf8 !important;
+        transform: translateY(-2px);
+    }
+
+    /* FOOTER */
+    .footer {
+        position: fixed; left: 0; bottom: 0; width: 100%;
+        background: rgba(15, 23, 42, 0.95);
+        border-top: 1px solid #1e293b;
+        color: #64748b;
+        text-align: center;
+        padding: 10px;
+        font-size: 0.75rem;
+        font-family: 'JetBrains Mono', monospace;
+        z-index: 999;
+    }
+    .footer a { color: #38bdf8 !important; text-decoration: none; font-weight: bold; }
+    
+    .header-credit {
+        text-align: center;
+        font-family: 'JetBrains Mono', monospace;
+        color: #64748b;
+        font-size: 0.8rem;
+        margin-top: -20px;
+        margin-bottom: 25px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+    }
+    
+    /* RADIO GROUPS */
+    div[role="radiogroup"] label {
+        background: #1e293b !important;
+        border: 1px solid #334155;
+        padding: 8px 16px !important;
+        border-radius: 6px;
+        color: #94a3b8 !important;
+    }
+    div[role="radiogroup"] label[data-checked="true"] {
+        background: #0f172a !important;
+        border-color: #38bdf8 !important;
+        color: #38bdf8 !important;
+        font-weight: bold;
+    }
+
+    /* METRICS */
+    div[data-testid="stMetricValue"] {
+        color: #f8fafc !important;
+        font-family: 'Inter', sans-serif;
+    }
+    div[data-testid="stMetricLabel"] { color: #64748b !important; }
+    
+    /* UPDATE TEXT */
+    .update-info {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.75rem;
+        color: #64748b;
+        margin-top: -10px;
+        margin-bottom: 20px;
+        display: flex;
+        gap: 15px;
+        align-items: center;
+    }
+    .update-tag {
+        background: #1e293b;
+        padding: 2px 8px;
+        border-radius: 4px;
+        border: 1px solid #334155;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -185,8 +339,10 @@ VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
+# --- AUTO-REFRESH ---
 st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
 
+# --- UPDATE LOGIC ---
 async def perform_update():
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
     raw = await col.get_all_data()
@@ -195,12 +351,14 @@ async def perform_update():
         return save_reports(raw, analyzed)
     return 0
 
+# --- AUTO-LOAD ---
 if "last_run" not in st.session_state:
     st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
     asyncio.run(perform_update())
 else:
     now = datetime.datetime.now(IL_TZ)
-    if (now - st.session_state["last_run"]).total_seconds() > (REFRESH_MINUTES * 60):
+    last_run = st.session_state["last_run"]
+    if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
         asyncio.run(perform_update())
         st.session_state["last_run"] = now
 
@@ -229,6 +387,7 @@ with st.sidebar:
 st.markdown('<div class="header-credit">SYSTEM ARCHITECT: LIDOR AVRAHAMY</div>', unsafe_allow_html=True)
 st.title("OPERATIONAL DASHBOARD")
 
+# Update Timers Display (Small & Styled)
 last_run = st.session_state["last_run"]
 next_run = last_run + datetime.timedelta(minutes=REFRESH_MINUTES)
 st.markdown(f"""
@@ -246,6 +405,7 @@ c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' A
 count_crit = c.fetchone()[0]
 conn.close()
 
+# 4 Metrics as requested
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("INTEL REPORTS (24H)", count_24h)
 m2.metric("CRITICAL THREATS", count_crit, delta=count_crit, delta_color="inverse")
@@ -260,8 +420,8 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ IN
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    # FILTER: Exclude DeepWeb (keep only standard feeds)
-    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 15", conn)
+    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
+    # FILTER: Exclude DeepWeb from Live Feed
     df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
@@ -295,7 +455,7 @@ with tab_feed:
         except: date_str = "--:--"
         st.markdown(get_feed_card_html(row, date_str), unsafe_allow_html=True)
 
-# --- TAB 2: INVESTIGATION ---
+# --- TAB 2: FORENSIC LAB ---
 with tab_tools:
     st.markdown("#### 🔬 IOC FORENSICS & TOOLKIT")
     with st.expander("🧰 ANALYST QUICK ACCESS TOOLKIT", expanded=True):
@@ -326,6 +486,7 @@ with tab_tools:
                 results_context = {"virustotal": vt_data, "urlscan": us_data, "abuseipdb": ab_data}
                 proc = AIBatchProcessor(GROQ_KEY)
                 
+                # Safety Block for AI Rate Limits
                 try:
                     ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
                     if "Error" in str(ai_report) and "429" in str(ai_report):
@@ -336,6 +497,7 @@ with tab_tools:
             c_left, c_right = st.columns([1, 1])
             with c_left:
                 st.markdown("##### 📊 TELEMETRY DATA")
+                # VirusTotal
                 if vt_data:
                     attrs = vt_data.get('attributes', {})
                     stats = attrs.get('last_analysis_stats', {})
@@ -364,6 +526,7 @@ with tab_tools:
                              st.write("**Contacted URLs:**")
                              for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
 
+                # AbuseIPDB (FIXED: Display logic updated)
                 if ab_data: 
                      st.markdown(f"""
                      <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid #3b82f6; border-radius: 8px; padding: 10px; margin-top: 10px;">
@@ -375,6 +538,7 @@ with tab_tools:
                      </div>
                      """, unsafe_allow_html=True)
 
+                # URLScan
                 if us_data:
                     task = us_data.get('task', {})
                     page = us_data.get('page', {})
@@ -390,13 +554,15 @@ with tab_tools:
                 st.markdown("##### 🤖 AI ANALYST VERDICT")
                 with st.container(): st.markdown(ai_report)
 
-# --- TAB 3: STRATEGIC INTEL ---
+# --- TAB 3: THREAT PROFILER (RESTORED CAMPAIGN RADAR) ---
 with tab_strat:
     st.markdown("#### 🏴‍☠️ ADVERSARY DOSSIER")
     threats = APTSheetCollector().fetch_threats()
     names = [t['name'] for t in threats]
     
+    # Selection Row
     c_sel, c_detail = st.columns([1, 2])
+    
     with c_sel:
         st.caption("SELECT TARGET")
         selected = st.radio("APT", names, label_visibility="collapsed")
@@ -407,9 +573,14 @@ with tab_strat:
                 proc = AIBatchProcessor(GROQ_KEY)
                 try:
                     rules = asyncio.run(proc.generate_hunting_queries(actor))
-                    if "Error" in str(rules): st.warning(f"AI Busy: {rules}")
-                    else: st.session_state['hunt_rules'] = rules
-                except Exception as e: st.error(str(e))
+                    if "Error" in str(rules) and "429" in str(rules):
+                        st.warning(f"⚠️ **AI Limit Reached:** {rules}")
+                    elif "Error" in str(rules):
+                        st.warning(f"⚠️ AI Busy: {rules}")
+                    else:
+                        st.session_state['hunt_rules'] = rules
+                except Exception as e:
+                    st.error(f"Analysis Failed: {str(e)}")
 
     with c_detail:
         st.markdown(get_dossier_html(actor), unsafe_allow_html=True)
@@ -419,19 +590,24 @@ with tab_strat:
             st.markdown(st.session_state['hunt_rules'])
 
     st.markdown("---")
+    
+    # --- CAMPAIGN RADAR (RESTORED & IMPROVED) ---
     st.markdown("##### 📡 LATEST INTEL FEED (LIVE DB SEARCH)")
     
-    # Allow DeepWeb results here
+    # Perform Search in DB for Actor (All history, top 5)
     conn = sqlite3.connect(DB_NAME)
     keywords = actor.get('keywords', []) + [actor['name']]
-    query = f"SELECT * FROM intel_reports WHERE {' OR '.join([f'title LIKE \"%{k}%\"' for k in keywords])} ORDER BY published_at DESC LIMIT 5"
-    df = pd.read_sql_query(query, conn)
+    query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
+    full_query = f"SELECT * FROM intel_reports WHERE { ' OR '.join(query_parts) } ORDER BY published_at DESC LIMIT 5"
+    df_hits = pd.read_sql_query(full_query, conn)
     conn.close()
-    
-    if not df.empty:
-        for _, row in df.iterrows():
+
+    if not df_hits.empty:
+        st.success(f"Tracked {len(df_hits)} recent intelligence reports linked to {actor['name']}")
+        for _, row in df_hits.iterrows():
             try: dt = date_parser.parse(row['published_at']).strftime('%d/%m/%Y')
             except: dt = "?"
+            # Using the existing card style for consistency
             st.markdown(get_feed_card_html(row, dt), unsafe_allow_html=True)
     else:
         st.info(f"No specific mentions of {actor['name']} found in the collected feeds.")
