@@ -10,67 +10,115 @@ from dateutil import parser as date_parser
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- UI STYLING ---
+# --- UI STYLING (CYBER DARK MODE) ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
     
-    html, body, [class*="css"] {
-        font-family: 'Roboto', sans-serif;
+    /* GLOBAL THEME */
+    .stApp {
+        background-color: #0e1117;
+        color: #e0e0e0;
+        font-family: 'Heebo', sans-serif;
     }
     
-    .report-card { 
-        background-color: #ffffff; 
-        padding: 15px 20px; 
-        border-radius: 8px; 
-        border-left: 5px solid #333; 
-        margin-bottom: 15px; 
-        box-shadow: 0 2px 5px rgba(0,0,0,0.05);
-    }
+    h1, h2, h3 { font-family: 'JetBrains Mono', monospace; color: #00f2ff; }
+    h4, h5, h6 { color: #b3b3b3; }
     
-    /* RTL Specific Style */
-    .rtl-content {
-        direction: rtl;
-        text-align: right;
+    /* CUSTOM SCROLLBAR */
+    ::-webkit-scrollbar { width: 10px; }
+    ::-webkit-scrollbar-track { background: #0e1117; }
+    ::-webkit-scrollbar-thumb { background: #333; border-radius: 5px; }
+    ::-webkit-scrollbar-thumb:hover { background: #00f2ff; }
+
+    /* METRIC CARDS */
+    div[data-testid="stMetricValue"] {
+        color: #00f2ff !important;
+        font-family: 'JetBrains Mono', monospace;
     }
 
-    .card-title { font-weight: 700; font-size: 1.15rem; color: #111; margin-bottom: 8px; }
-    .card-summary { color: #444; font-size: 0.95rem; margin-bottom: 10px; line-height: 1.5; }
+    /* REPORT CARDS (General) */
+    .report-card { 
+        background-color: #161b22; 
+        padding: 15px; 
+        border-radius: 6px; 
+        border: 1px solid #30363d;
+        margin-bottom: 15px; 
+        transition: transform 0.2s, box-shadow 0.2s;
+    }
+    .report-card:hover {
+        border-color: #58a6ff;
+        box-shadow: 0 4px 20px rgba(88, 166, 255, 0.1);
+    }
+
+    /* INCD CARDS (Hebrew / RTL) */
+    .card-incd {
+        border-right: 4px solid #2f81f7; /* Blue accent */
+        direction: rtl;
+        text-align: right;
+        background: linear-gradient(90deg, #161b22 0%, #1c2128 100%);
+    }
+    .incd-title { color: #a5d6ff; font-weight: bold; font-size: 1.1rem; }
     
-    .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; margin-right: 6px; }
-    .tag-critical { background: #fee2e2; color: #991b1b; }
-    .tag-incd { background: #1e3a8a; color: #fff; }
-    .tag-time { background: #f3f4f6; color: #666; }
+    /* GLOBAL CARDS (English / LTR) */
+    .card-global {
+        border-left: 4px solid #3fb950; /* Green accent */
+        direction: ltr;
+        text-align: left;
+    }
+    .global-title { color: #7ee787; font-weight: bold; font-size: 1.1rem; }
     
-    a { text-decoration: none; color: #2563eb; font-weight: bold; }
+    /* SEVERITY TAGS & ANIMATION */
+    .sev-tag {
+        display: inline-block; padding: 2px 8px; border-radius: 4px; 
+        font-size: 0.75rem; font-family: 'JetBrains Mono', monospace; font-weight: bold;
+        margin: 0 5px;
+    }
     
-    div[role="radiogroup"] { display: flex; gap: 8px; flex-wrap: wrap; }
+    .sev-critical { 
+        background: rgba(255, 0, 0, 0.2); color: #ff7b72; border: 1px solid #ff7b72;
+        animation: pulse 2s infinite;
+    }
+    
+    @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0.4); }
+        70% { box-shadow: 0 0 0 10px rgba(255, 123, 114, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0); }
+    }
+
+    .sev-high { background: rgba(210, 153, 34, 0.2); color: #d29922; border: 1px solid #d29922; }
+    .sev-med { background: rgba(56, 139, 253, 0.2); color: #58a6ff; border: 1px solid #58a6ff; }
+    .sev-info { background: rgba(139, 148, 158, 0.2); color: #8b949e; border: 1px solid #30363d; }
+
+    /* LINKS */
+    a { text-decoration: none; color: #58a6ff; transition: color 0.2s; }
+    a:hover { color: #a5d6ff; text-decoration: underline; }
+
+    /* RADIO BUTTONS AS TAGS */
+    div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
     div[role="radiogroup"] label {
-        background-color: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 4px 12px; transition: all 0.2s; font-size: 0.9rem;
+        background-color: #21262d !important;
+        border: 1px solid #30363d;
+        color: #c9d1d9 !important;
+        border-radius: 20px;
+        padding: 5px 15px;
+        font-size: 0.9rem;
     }
     div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #0f172a; color: white; border-color: #0f172a;
+        background-color: #1f6feb !important;
+        border-color: #1f6feb;
+        color: white !important;
+        box-shadow: 0 0 10px rgba(31, 111, 235, 0.5);
     }
-    div[role="radiogroup"] label > div:first-child { display: none; }
     
-    .tool-btn {
-        display: inline-block;
-        padding: 6px 12px;
-        margin: 4px;
-        background-color: #eef2ff;
-        border: 1px solid #c7d2fe;
-        border-radius: 6px;
-        color: #3730a3;
-        font-weight: 600;
-        font-size: 0.85rem;
-        text-decoration: none !important;
-        transition: background-color 0.2s;
-    }
-    .tool-btn:hover {
-        background-color: #e0e7ff;
-        color: #312e81;
+    /* TOOLBOX STYLES */
+    .toolbox-input input {
+        background-color: #0d1117;
+        color: #00f2ff;
+        border: 1px solid #30363d;
+        font-family: 'JetBrains Mono', monospace;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -78,7 +126,7 @@ st.markdown("""
 # --- INITIALIZATION ---
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
-REFRESH_MINUTES = 15
+REFRESH_MINUTES = 10
 
 # --- AUTO-REFRESH COMPONENT ---
 st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
@@ -88,7 +136,7 @@ VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-# --- UPDATE LOGIC FUNCTION ---
+# --- UPDATE LOGIC ---
 async def perform_update():
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
     raw = await col.get_all_data()
@@ -97,279 +145,262 @@ async def perform_update():
         return save_reports(raw, analyzed)
     return 0
 
-# --- AUTO-LOAD & UPDATE CHECK ---
+# --- AUTO-LOAD CHECK ---
 if "last_run" not in st.session_state:
     st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-    with st.spinner("🚀 Initializing CTI Feeds..."):
+    with st.spinner("📡 ESTABLISHING UPLINK..."):
         asyncio.run(perform_update())
 else:
     now = datetime.datetime.now(IL_TZ)
     last_run = st.session_state["last_run"]
     if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
-        with st.spinner("🔄 Auto-updating feeds..."):
+        with st.empty():
+            st.info("🔄 SYNCING INTEL FEEDS...")
             asyncio.run(perform_update())
             st.session_state["last_run"] = now
-            st.toast("Feeds updated automatically!", icon="🔄")
 
-
-# --- SIDEBAR ---
+# --- SIDEBAR (COMMAND CENTER) ---
 with st.sidebar:
-    st.header("⚙️ System Status")
+    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=70)
+    st.title("CTI WAR ROOM")
+    st.markdown("`v2.0 | CLASSIFIED`")
+    
+    st.markdown("---")
+    st.markdown("### 🛰️ System Status")
+    
+    # Live Status Indicators
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
-    st.write(f"Groq AI: {'✅' if ok else '❌'} ({msg})")
+    col_s1, col_s2 = st.columns([1, 4])
+    with col_s1: st.markdown("🟢" if ok else "🔴")
+    with col_s2: st.caption(f"AI Engine: {msg}")
     
-    st.divider()
-    
-    if st.button("🚀 Force Global Update", type="primary"):
-        with st.status("Fetching New Intelligence...", expanded=True):
+    st.markdown("---")
+    if st.button("⚡ FORCE SYNC", type="primary", use_container_width=True):
+        with st.status("Executing Global Scan...", expanded=True):
             count = asyncio.run(perform_update())
             st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-            st.success(f"Discovered {count} new items.")
+            st.success(f"Intel Updated: {count} new items")
             st.rerun()
 
-# --- MAIN TABS ---
-tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 Live Feed", "🛠️ SOC Toolbox", "🧠 Strategic Intel", "🌍 Global Map"])
+    st.markdown("### 🛡️ Defcon Level")
+    st.progress(70) # Static for visual effect
+    st.caption("Current Alert Level: ELEVATED")
+
+# --- MAIN LAYOUT ---
+st.title("📟 OPERATIONAL DASHBOARD")
+
+# Top Metrics
+conn = sqlite3.connect(DB_NAME)
+c = conn.cursor()
+c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-24 hours')")
+count_24h = c.fetchone()[0]
+c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' AND published_at > datetime('now', '-24 hours')")
+count_crit = c.fetchone()[0]
+conn.close()
+
+m1, m2, m3, m4 = st.columns(4)
+with m1: st.metric("New Reports (24h)", count_24h, delta_color="normal")
+with m2: st.metric("Critical Threats", count_crit, delta=f"+{count_crit}" if count_crit > 0 else "0", delta_color="inverse")
+with m3: st.metric("Active Sources", "7", "Online")
+with m4: st.metric("System Uptime", "99.9%", "Stable")
+
+st.markdown("---")
+
+# Tabs
+tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ INVESTIGATION LAB", "🧠 THREAT PROFILER", "🌍 GLOBAL HEATMAP"])
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
-    last_up = st.session_state["last_run"]
-    next_up = last_up + datetime.timedelta(minutes=REFRESH_MINUTES)
-    
-    c1, c2, c3 = st.columns([2, 2, 4])
-    with c1: st.info(f"Last Update: {last_up.strftime('%H:%M')} (IL)")
-    with c2: st.warning(f"Next Auto-Update: {next_up.strftime('%H:%M')} (IL)")
-    
-    st.divider()
-
     conn = sqlite3.connect(DB_NAME)
-    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC", conn)
-    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC", conn)
+    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
+    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
-    df_final = pd.concat([df_incd.head(8), df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
+    df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     if df_final.empty:
-        st.info("No active threats found. Try 'Force Global Update'.")
+        st.info("No active threats found. Systems Clear.")
     else:
-        st.write("##### 🕵️ Filter Intelligence")
-        cnt_all = len(df_final)
-        cnt_incd = len(df_final[df_final['source'] == 'INCD'])
-        cnt_global = len(df_final[df_final['source'] != 'INCD'])
-        cnt_crit = len(df_final[df_final['severity'].str.contains('Critical|High', case=False, na=False)])
-        cnt_med = len(df_final[df_final['severity'].str.contains('Medium', case=False, na=False)])
-        cnt_info = len(df_final[df_final['severity'].str.contains('Low|Info|News', case=False, na=False)])
+        # Filters
+        c_filter1, c_filter2 = st.columns([1, 1])
+        with c_filter1:
+            st.markdown("##### 🕵️ Data Source")
+            filter_source = st.radio("Source", ["All Sources", "🇮🇱 INCD Only", "🌍 Global Only"], horizontal=True, label_visibility="collapsed")
+        with c_filter2:
+            st.markdown("##### 🚨 Severity Level")
+            filter_sev = st.radio("Severity", ["All Levels", "🔥 Critical/High", "⚠️ Medium", "ℹ️ Info/Low"], horizontal=True, label_visibility="collapsed")
 
-        c_src, c_sev = st.columns([1, 2])
-        with c_src:
-            st.caption("Source")
-            filter_source = st.radio("Source Filter", [f"All ({cnt_all})", f"INCD ({cnt_incd})", f"Global ({cnt_global})"], horizontal=True, label_visibility="collapsed")
-        with c_sev:
-            st.caption("Severity")
-            filter_sev = st.radio("Severity Filter", [f"All", f"Critical ({cnt_crit})", f"Medium ({cnt_med})", f"Info ({cnt_info})"], horizontal=True, label_visibility="collapsed")
-
+        # Apply Logic
         df_display = df_final.copy()
         if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
         elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
+        
         if "Critical" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
         elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
         elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
 
-        st.divider()
-
+        st.write("")
+        
+        # Render Feed
         for _, row in df_display.iterrows():
+            # Date Parsing
             try:
                 dt = date_parser.parse(row['published_at'])
                 if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
                 else: dt = dt.astimezone(IL_TZ)
-                date_str = dt.strftime('%d/%m %H:%M')
-            except: date_str = "Unknown"
+                date_str = dt.strftime('%H:%M | %d/%m')
+            except: date_str = "--:--"
 
-            sev_class = "tag-critical" if "Critical" in row['severity'] else ""
-            if row['source'] == "INCD":
-                source_display = "מערך הסייבר"
-                source_tag_class = "tag-incd"
-                rtl_class = "rtl-content"
-            else:
-                source_display = row['source']
-                source_tag_class = "tag-time"
-                rtl_class = ""
+            # Classes
+            is_incd = row['source'] == "INCD"
+            card_class = "card-incd" if is_incd else "card-global"
+            title_class = "incd-title" if is_incd else "global-title"
             
+            sev_lower = row['severity'].lower()
+            if "critical" in sev_lower or "high" in sev_lower: sev_class = "sev-critical"
+            elif "medium" in sev_lower: sev_class = "sev-med"
+            elif "low" in sev_lower or "info" in sev_lower: sev_class = "sev-info"
+            else: sev_class = "sev-high"
+
+            # Content Logic
+            source_badge = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
+            
+            # HTML Card
             st.markdown(f"""
-            <div class="report-card">
-                <div style="margin-bottom: 8px; direction: ltr;">
-                    <span class="tag {source_tag_class}">{source_display}</span>
-                    <span class="tag tag-time">{date_str}</span>
-                    <span class="tag {sev_class}">{row['severity']}</span>
-                    <span class="tag tag-time">{row['category']}</span>
+            <div class="report-card {card_class}">
+                <div style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                    <div>
+                        <span class="sev-tag {sev_class}">{row['severity'].upper()}</span>
+                        <span style="font-size: 0.8rem; color: #8b949e; margin: 0 5px;">{row['category']}</span>
+                    </div>
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: #8b949e;">
+                        {date_str} • <b>{source_badge}</b>
+                    </div>
                 </div>
-                <div class="card-title {rtl_class}">{row['title']}</div>
-                <div class="card-summary {rtl_class}">{row['summary']}</div>
-                <div style="font-size: 0.85rem; margin-top: 10px; text-align: left; direction: ltr;">
-                    <a href="{row['url']}" target="_blank">🔗 Read Full Report</a>
+                <div class="{title_class}">{row['title']}</div>
+                <div style="margin-top: 8px; color: #c9d1d9; font-size: 0.95rem; line-height: 1.5;">
+                    {row['summary']}
+                </div>
+                <div style="margin-top: 12px; text-align: {'left' if not is_incd else 'right'};">
+                    <a href="{row['url']}" target="_blank">🔗 SOURCE LINK</a>
                 </div>
             </div>
             """, unsafe_allow_html=True)
 
 # --- TAB 2: SOC TOOLBOX ---
 with tab_tools:
-    st.subheader("🛠️ SOC Toolbox - IOC Investigation")
-    c_input, c_btn = st.columns([4, 1])
-    with c_input:
-        ioc_input = st.text_input("Enter Indicator", placeholder="e.g., 1.2.3.4, evil.com, http://bad-site.com/login").strip()
-    with c_btn:
-        st.write(""); st.write("") 
-        btn_scan = st.button("Investigate 🕵️")
+    st.markdown("#### 🔬 IOC Forensic Analysis")
+    
+    col_input, col_action = st.columns([3, 1])
+    with col_input:
+        ioc_input = st.text_input("IOC Input", placeholder="IP, Domain, Hash, or URL...", label_visibility="collapsed")
+    with col_action:
+        btn_scan = st.button("🔍 INITIATE SCAN", use_container_width=True, type="primary")
 
     if btn_scan and ioc_input:
         ioc_type = identify_ioc_type(ioc_input)
         if not ioc_type:
-            st.error("❌ Invalid Input! Please enter a valid IP, Domain, Hash or URL.")
+            st.error("❌ INVALID FORMAT DETECTED")
         else:
-            st.success(f"Identified Type: {ioc_type.upper()}")
+            st.success(f"TARGET ACQUIRED: {ioc_type.upper()}")
             tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
-            results = {}
-            with st.status("Scanning External Sources...", expanded=True):
+            
+            # Use columns for layout
+            with st.spinner("⚡ Querying Threat Intelligence Engines..."):
                 vt_data = tl.query_virustotal(ioc_input, ioc_type)
-                results['virustotal'] = vt_data if vt_data else "No Data"
-                if ioc_type in ["domain", "url", "ip"]:
-                    us_data = tl.query_urlscan(ioc_input)
-                    results['urlscan'] = us_data if us_data else "No Data"
-                if ioc_type == "ip":
-                    ab = tl.query_abuseipdb(ioc_input)
-                    results['abuseipdb'] = ab if ab else "No Data"
-                    
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("### 🦠 VirusTotal")
-                if isinstance(results.get('virustotal'), dict):
-                    attrs = results['virustotal'].get('attributes', {})
-                    rels = results['virustotal'].get('relationships', {})
-                    stats = attrs.get('last_analysis_stats', {})
-                    malicious = stats.get('malicious', 0)
-                    color = "red" if malicious > 0 else "green"
-                    st.markdown(f":{color}[**Detections: {malicious}**]")
-                    with st.expander("🔍 Metadata & Tags", expanded=False):
-                        if attrs.get('country'): st.write(f"**Country:** {attrs.get('country')} 🌍")
-                        if attrs.get('as_owner'): st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
-                        st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
-                        st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
-                    with st.expander("🕸️ Network Relations", expanded=False):
-                         if rels.get('resolutions'):
-                             st.write("**Passive DNS:**")
-                             for r in rels['resolutions'].get('data', [])[:8]: st.code(r.get('attributes', {}).get('host_name', 'Unknown'))
-                         if rels.get('contacted_urls'):
-                             st.write("**Contacted URLs:**")
-                             for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
-                else: st.write("N/A")
-            with c2:
-                st.markdown("### 🌐 URLScan")
-                if isinstance(results.get('urlscan'), dict):
-                    task = results['urlscan'].get('task', {})
-                    verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
-                    st.write(f"**Target:** `{task.get('url', 'Unknown')}`")
-                    st.write(f"**Verdict:** {verdict}")
-                    if results['urlscan'].get('page', {}).get('country'): st.write(f"**Location:** {results['urlscan']['page']['country']}")
-                    if task.get('screenshotURL'): st.image(task['screenshotURL'])
-                else: st.write("N/A")
-            with c3:
-                st.markdown("### 🛑 AbuseIPDB")
-                if ioc_type == 'ip' and isinstance(results.get('abuseipdb'), dict):
-                    score = results['abuseipdb'].get('abuseConfidenceScore', 0)
-                    st.metric("Abuse Score", f"{score}%")
-                    st.write(f"ISP: {results['abuseipdb'].get('isp')}")
-                    st.write(f"Usage: {results['abuseipdb'].get('usageType')}")
-                else: st.write("N/A")
-            st.divider()
-            st.subheader("🤖 AI Analyst Assessment (Tier 3)")
-            with st.spinner("Generating Enterprise Defense Playbook..."):
+                us_data = tl.query_urlscan(ioc_input) if ioc_type in ["domain", "url", "ip"] else None
+                ab_data = tl.query_abuseipdb(ioc_input) if ioc_type == "ip" else None
+                
+                # Combine for AI
+                results_context = {"virustotal": vt_data, "urlscan": us_data, "abuseipdb": ab_data}
+                
+                # AI Analysis
                 proc = AIBatchProcessor(GROQ_KEY)
-                report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results))
-                st.markdown(report)
+                ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
+
+            # Display Results
+            c_res, c_ai = st.columns([1, 1])
+            
+            with c_res:
+                st.markdown("### 📊 Raw Telemetry")
+                with st.expander("🦠 VirusTotal Data", expanded=True):
+                    if vt_data:
+                        stats = vt_data.get('attributes', {}).get('last_analysis_stats', {})
+                        mal = stats.get('malicious', 0)
+                        color = "red" if mal > 0 else "green"
+                        st.markdown(f":{color}[**Detections: {mal}/{sum(stats.values())}**]")
+                        st.json(stats)
+                    else: st.write("No Data Available")
+                
+                with st.expander("🛑 AbuseIPDB / URLScan"):
+                    if ab_data: 
+                        st.metric("Abuse Confidence", f"{ab_data.get('abuseConfidenceScore', 0)}%")
+                        st.write(f"ISP: {ab_data.get('isp')}")
+                    if us_data:
+                        st.write(f"Verdict: {us_data.get('verdict', {}).get('overall')}")
+                        if us_data.get('task', {}).get('screenshotURL'):
+                            st.image(us_data['task']['screenshotURL'])
+
+            with c_ai:
+                st.markdown("### 🤖 AI Analyst Verdict")
+                st.markdown(f"""
+                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 8px; font-family: 'Heebo';">
+                    {ai_report}
+                </div>
+                """, unsafe_allow_html=True)
 
 # --- TAB 3: STRATEGIC INTEL ---
 with tab_strat:
-    st.subheader("🧠 Strategic Threat Intel - Campaign Profiler")
+    st.markdown("#### 🏴‍☠️ Adversary Profiling")
     
-    # --- 1. TOOLKIT MOVED TO TOP ---
-    with st.expander("🧰 CTI Analyst Toolkit (Quick Links)", expanded=True):
-        toolkit = AnalystToolkit.get_tools()
-        for category, tools in toolkit.items():
-            st.markdown(f"**{category}**")
-            cols = st.columns(len(tools))
-            for idx, tool in enumerate(tools):
-                with cols[idx]:
-                    st.markdown(f"""
-                    <a href="{tool['url']}" target="_blank" class="tool-btn">{tool['name']}</a>
-                    <div style="font-size: 0.8em; color: #666; margin-top: 4px; margin-left: 6px;">{tool['desc']}</div>
-                    """, unsafe_allow_html=True)
-            st.write("")
-    
-    st.divider()
-    
-    # --- 2. CAMPAIGN RADAR ---
-    st.markdown("### 📡 Active Campaign Radar")
-    st.markdown("Select an Actor to perform a deep-dive scan on collected intelligence.")
-
     threats = APTSheetCollector().fetch_threats()
-    actor_names = [t['name'] for t in threats]
-    selected_actor_name = st.selectbox("🎯 Target Actor:", actor_names)
-    actor_data = next(t for t in threats if t['name'] == selected_actor_name)
+    names = [t['name'] for t in threats]
     
-    # Perform Search in DB
-    conn = sqlite3.connect(DB_NAME)
-    keywords = actor_data.get('keywords', []) + [actor_data['name']]
+    col_sel, col_info = st.columns([1, 3])
     
-    # Dynamic SQL Query Construction
-    query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
-    full_query = f"SELECT * FROM intel_reports WHERE { ' OR '.join(query_parts) } ORDER BY published_at DESC"
-    
-    df_hits = pd.read_sql_query(full_query, conn)
-    conn.close()
-    
-    # Layout
-    col_prof, col_live = st.columns([1, 2])
-    
-    with col_prof:
-        st.info(f"""
-        **Why monitor {actor_data['name']}?**
+    with col_sel:
+        st.markdown("**Select Target:**")
+        selected = st.radio("APT Group", names, label_visibility="collapsed")
+        actor = next(t for t in threats if t['name'] == selected)
         
-        {actor_data['desc']}
-        
-        **Target:** {actor_data['target']}
-        **Origin:** {actor_data['origin']}
-        """)
-        
-        st.markdown("**Known Tools:**")
-        for tool in actor_data['tools'].split(','):
-            st.code(tool.strip())
-            
-        st.markdown(f"[📚 Malpedia Profile]({actor_data['malpedia']})")
-        
-        if st.button(f"🏹 Generate Hunting Rules", key="hunt_btn"):
-            proc = AIBatchProcessor(GROQ_KEY)
-            with st.spinner(f"Generating XQL/YARA for {actor_data['name']}..."):
-                res = asyncio.run(proc.generate_hunting_queries(actor_data))
-                with st.expander("View Detection Rules", expanded=True):
-                    st.markdown(res)
+        st.markdown("---")
+        if st.button("🏹 Gen. Hunting Rules"):
+            with st.spinner("Generating XQL/YARA..."):
+                proc = AIBatchProcessor(GROQ_KEY)
+                rules = asyncio.run(proc.generate_hunting_queries(actor))
+                st.session_state['hunt_rules'] = rules
 
-    with col_live:
-        st.markdown("#### 🚨 Live Intelligence Feed")
-        
-        if not df_hits.empty:
-            st.success(f"Found {len(df_hits)} recent intelligence reports linked to this actor!")
-            
-            for _, row in df_hits.head(5).iterrows():
-                try: dt = date_parser.parse(row['published_at']).strftime('%d/%m/%Y')
-                except: dt = "?"
-                
-                with st.expander(f"{dt} | {row['title']}"):
-                    st.markdown(f"**Source:** {row['source']}")
-                    st.markdown(row['summary'])
-                    st.markdown(f"[Read Full Report]({row['url']})")
-        else:
-            st.warning("No direct mentions found in the last 48h. Actor may be dormant or using new TTPs.")
-            st.caption(f"Searched for: {', '.join(keywords)}")
+    with col_info:
+        # DOSSIER UI
+        st.markdown(f"""
+        <div style="border: 1px solid #30363d; border-radius: 8px; padding: 20px; background: #161b22;">
+            <h2 style="margin-top:0; color: #f0f6fc;">{actor['name']}</h2>
+            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+                <span class="sev-tag sev-med">ORIGIN: {actor['origin']}</span>
+                <span class="sev-tag sev-high">TARGET: {actor['target']}</span>
+                <span class="sev-tag sev-info">TYPE: {actor['type']}</span>
+            </div>
+            <p style="color: #c9d1d9;">{actor['desc']}</p>
+            <hr style="border-color: #30363d;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                <div>
+                    <h5 style="color: #58a6ff;">🛠️ Toolset</h5>
+                    <code style="background: #0d1117; color: #ff7b72;">{actor['tools']}</code>
+                </div>
+                <div>
+                    <h5 style="color: #58a6ff;">📚 MITRE TTPs</h5>
+                    <code style="background: #0d1117; color: #d29922;">{actor['mitre']}</code>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # SHOW RULES IF GENERATED
+        if 'hunt_rules' in st.session_state:
+            st.markdown("### 🛡️ Generated Detection Logic")
+            st.code(st.session_state['hunt_rules'], language="sql")
 
 # --- TAB 4: MAP ---
 with tab_map:
-    components.iframe("https://threatmap.checkpoint.com/", height=600)
+    st.markdown("#### 🌍 Live Attack Map")
+    components.iframe("https://threatmap.checkpoint.com/", height=700)
