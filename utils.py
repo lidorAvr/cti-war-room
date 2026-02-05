@@ -9,6 +9,7 @@ import re
 import ipaddress
 import pytz
 import feedparser
+import base64
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
@@ -26,6 +27,9 @@ HEADERS = {
 # --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
     ioc = ioc.strip()
+    # Check for URL first (simple regex)
+    if re.match(r'^https?://', ioc) or re.match(r'^www\.', ioc):
+        return "url"
     try:
         ipaddress.ip_address(ioc)
         return "ip"
@@ -102,7 +106,6 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
-        # UPDATED PROMPT AND MODEL FOR BETTER HEBREW
         system_instruction = """
         You are an expert CTI Analyst.
         Task: Analyze cyber news items.
@@ -127,7 +130,7 @@ class AIBatchProcessor:
             batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:300]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
-            # SWITCHED TO 70B MODEL for better Hebrew generation
+            # 70B Model for high quality
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             chunk_map = {}
             try:
@@ -146,26 +149,31 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
+        # --- ENTERPRISE SOC PLAYBOOK PROMPT ---
         prompt = f"""
-        Act as a Senior Tier 3 CTI Analyst & Malware Researcher.
+        Act as a Senior Tier 3 SOC Analyst.
+        Your task is to provide an OPERATIONAL analysis for an Enterprise Environment.
+        
         Target IOC: {ioc} ({ioc_type})
-        Intelligence Sources Data: {json.dumps(data)}
+        Raw Intelligence Data: {json.dumps(data)}
         
-        Your Goal: Determine if this is TRULY malicious or a False Positive, and guide the next steps.
+        Output Structure (Markdown, English Only):
+        
+        ### 🛡️ Operational Verdict
+        * **Verdict**: [Malicious / Suspicious / Clean]
+        * **Confidence**: [High / Medium / Low]
+        * **Reasoning**: Briefly explain why based on the engines/data.
+        
+        ### 🏢 Enterprise Defense Playbook (Action Items)
+        * **Network (Firewall/Proxy)**: specific rule to apply (e.g., Block Domain, Drop Traffic).
+        * **Endpoint (EDR)**: What to hunt for? (e.g., "Search for process spawning cmd.exe connecting to this IP").
+        * **SIEM / Log Analysis**: Provide a specific search concept (e.g., "Look for HTTP GET requests to...").
+        * **Containment**: Immediate steps if traffic is seen.
 
-        Output Structure (Markdown, ENGLISH ONLY):
-        
-        ### 🛡️ Analyst Verdict
-        * **Verdict**: [Malicious / Suspicious / Clean / Unknown]
-        * **Confidence**: [High / Medium / Low] (Explain why)
-        * **False Positive Chance**: [High / Low]. Is it a legitimate service?
-        
-        ### 🔬 Technical Deep Dive
-        * Analyze the findings. Why did engines flag it? (e.g., Cobalt Strike Beacon? Phishing? Scanning?)
-        * Context: Which campaign or APT is this related to?
-        
-        ### 🕵️‍♂️ Actionable Next Steps
-        Provide 3-4 specific actions for the SOC team.
+        ### 🔬 Technical Context
+        * Analyze the available attributes (tags, categories, history).
+        * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
+        * If clean, confirm it's a False Positive risk.
         """
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
@@ -185,16 +193,28 @@ class ThreatLookup:
     def query_virustotal(self, ioc, ioc_type):
         if not self.vt_key: return None
         try:
-            endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
-            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}/{ioc}", headers={"x-apikey": self.vt_key}, timeout=10)
+            # VT API v3 logic for URLs requires Base64 ID
+            if ioc_type == "url":
+                url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
+                endpoint = f"urls/{url_id}"
+            else:
+                endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
+                endpoint = f"{endpoint}/{ioc}"
+                
+            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
+            # Returning full attributes to let AI analyze deep data
             return res.json().get('data', {}).get('attributes', {}) if res.status_code == 200 else None
         except: return None
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
-            return res.json().get('results', [{}])[0] if res.status_code == 200 else None
+            # URLScan search handles URLs/Domains/IPs via query string
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=15)
+            results = res.json().get('results', [])
+            if results:
+                return results[0] # Return the most recent scan
+            return None
         except: return None
 
     def query_abuseipdb(self, ip):
