@@ -5,7 +5,7 @@ import sqlite3
 import datetime
 import pytz
 import time
-import re # Added for HTML cleaning
+import re
 import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
@@ -54,7 +54,7 @@ def get_feed_card_html(row, date_str):
     align = 'right' if is_incd else 'left'
     dir = 'rtl' if is_incd else 'ltr'
     
-    # Critical Fix: Clean summary to prevent HTML breakage
+    # Clean summary to prevent HTML breakage
     clean_summary = clean_html(row['summary'])
     
     return f"""
@@ -80,7 +80,6 @@ def get_feed_card_html(row, date_str):
     """
 
 def get_dossier_html(actor):
-    # Fixed indentation and structure
     return f"""
     <div class="report-card" style="border-left: 4px solid #f59e0b; background: linear-gradient(180deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%);">
         <h2 style="margin-top:0; color: #ffffff; font-size: 2rem; letter-spacing: -1px;">{actor['name']}</h2>
@@ -327,12 +326,19 @@ with tab_tools:
                 
                 results_context = {"virustotal": vt_data, "urlscan": us_data, "abuseipdb": ab_data}
                 proc = AIBatchProcessor(GROQ_KEY)
-                ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
+                
+                # Added Safety Block for AI (Rate Limits)
+                try:
+                    ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
+                    if "Error" in str(ai_report) and "429" in str(ai_report):
+                        ai_report = "⚠️ **AI Rate Limit Reached:** Please wait a moment before the next scan."
+                except Exception as e:
+                     ai_report = f"⚠️ AI Analysis Unavailable: {str(e)}"
 
             c_left, c_right = st.columns([1, 1])
             with c_left:
                 st.markdown("##### 📊 TELEMETRY DATA")
-                # RESTORED DETAILED VIEW
+                # VirusTotal
                 if vt_data:
                     attrs = vt_data.get('attributes', {})
                     stats = attrs.get('last_analysis_stats', {})
@@ -347,11 +353,11 @@ with tab_tools:
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    with st.expander("🔍 Metadata & Tags", expanded=False):
-                        if attrs.get('country'): st.write(f"**Country:** {attrs.get('country')} 🌍")
-                        if attrs.get('as_owner'): st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
-                        st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
-                        st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
+                    with st.expander("🔍 Deep Dive (Metadata)", expanded=False):
+                         if attrs.get('country'): st.write(f"**Country:** {attrs.get('country')} 🌍")
+                         if attrs.get('as_owner'): st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
+                         st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
+                         st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
                     with st.expander("🕸️ Network Relations", expanded=False):
                         rels = vt_data.get('relationships', {})
                         if rels.get('resolutions'):
@@ -361,10 +367,27 @@ with tab_tools:
                              st.write("**Contacted URLs:**")
                              for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
 
-                if ab_data: st.info(f"Abuse Confidence: {ab_data.get('abuseConfidenceScore', 0)}% | ISP: {ab_data.get('isp')}")
+                # AbuseIPDB (RESTORED DETAILS)
+                if ab_data: 
+                     st.info(f"""
+                     **AbuseIPDB Profile**
+                     - Score: {ab_data.get('abuseConfidenceScore', 0)}%
+                     - ISP: {ab_data.get('isp', 'N/A')}
+                     - Usage: {ab_data.get('usageType', 'Unknown')}
+                     - Domain: {ab_data.get('domain', 'N/A')}
+                     """)
+
+                # URLScan (RESTORED DETAILS)
                 if us_data:
-                    st.info(f"URLScan Verdict: {us_data.get('verdict', {}).get('overall')}")
-                    if us_data.get('task', {}).get('screenshotURL'): st.image(us_data['task']['screenshotURL'])
+                    task = us_data.get('task', {})
+                    page = us_data.get('page', {})
+                    st.info(f"""
+                    **URLScan Verdict: {us_data.get('verdict', {}).get('overall')}**
+                    - Target: {task.get('url', 'N/A')}
+                    - Location: {page.get('country', 'Unknown')}
+                    - Server: {page.get('server', 'N/A')}
+                    """)
+                    if task.get('screenshotURL'): st.image(task['screenshotURL'])
             
             with c_right:
                 st.markdown("##### 🤖 AI ANALYST VERDICT")
@@ -387,8 +410,10 @@ with tab_strat:
                 try:
                     # Added Error Handling for Rate Limits
                     rules = asyncio.run(proc.generate_hunting_queries(actor))
-                    if "Error" in str(rules):
-                        st.warning(f"⚠️ AI Engine Busy: {rules}")
+                    if "Error" in str(rules) and "429" in str(rules):
+                        st.warning(f"⚠️ **AI Limit Reached:** {rules}")
+                    elif "Error" in str(rules):
+                        st.warning(f"⚠️ AI Busy: {rules}")
                     else:
                         st.session_state['hunt_rules'] = rules
                 except Exception as e:
