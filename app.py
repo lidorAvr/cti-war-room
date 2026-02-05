@@ -12,148 +12,207 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- UI STYLING (BALANCED PRO & VISIBILITY) ---
+# --- UI STYLING (THE "GLASS & STEEL" DESIGN SYSTEM) ---
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
     
-    /* 1. BALANCED TEXT SIZES */
-    html, body, [class*="css"] {
+    /* --- 1. RESET & BASE THEME --- */
+    .stApp {
+        background-color: #0b0f19; /* Deep Navy/Black */
+        background-image: radial-gradient(circle at 50% 0%, #1c2541 0%, #0b0f19 50%);
         font-family: 'Heebo', sans-serif;
-        font-size: 17px; /* Optimal size for readability without breaking layout */
     }
     
-    p, .stMarkdown, span, div {
-        color: #e6edf3;
-        line-height: 1.5;
+    h1, h2, h3 {
+        font-family: 'Inter', sans-serif;
+        font-weight: 600;
+        letter-spacing: -0.5px;
+        color: #ffffff !important;
+    }
+    
+    p, div, span {
+        color: #cbd5e1; /* Soft Grey-Blue for better readability than pure white */
+        line-height: 1.6;
     }
 
-    /* Headers */
-    h1 { font-size: 2.5rem !important; margin-bottom: 0 !important; }
-    h2 { font-size: 2rem !important; }
-    h3 { font-size: 1.5rem !important; }
-    
-    h1, h2, h3 { 
-        font-family: 'JetBrains Mono', monospace; 
-        color: #00f2ff !important; 
-        text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); 
+    /* --- 2. GLASSMORPHISM CARDS --- */
+    .report-card {
+        background: rgba(30, 41, 59, 0.4); /* Semi-transparent */
+        backdrop-filter: blur(12px); /* The Glass Effect */
+        -webkit-backdrop-filter: blur(12px);
+        border: 1px solid rgba(148, 163, 184, 0.1);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        border-radius: 12px;
+        padding: 24px;
+        margin-bottom: 20px;
+        transition: all 0.2s ease-in-out;
     }
     
-    /* 2. INPUT FIELDS & PLACEHOLDER FIX */
-    /* The Input Field Itself */
+    .report-card:hover {
+        border-color: rgba(56, 189, 248, 0.3); /* Light Blue Glow */
+        transform: translateY(-2px);
+        box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.2);
+    }
+
+    /* INCD Specifics */
+    .card-incd {
+        border-right: 4px solid #3b82f6; /* Vivid Blue */
+        direction: rtl; 
+        text-align: right;
+    }
+    
+    /* Global Specifics */
+    .card-global {
+        border-left: 4px solid #10b981; /* Emerald Green */
+        direction: ltr; 
+        text-align: left;
+    }
+
+    /* --- 3. TYPOGRAPHY HIERARCHY --- */
+    .card-title {
+        font-size: 1.25rem;
+        font-weight: 700;
+        color: #f1f5f9;
+        margin-bottom: 12px;
+    }
+    
+    .card-meta {
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 0.85rem;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 8px;
+    }
+
+    /* --- 4. BADGES & PILLS --- */
+    .badge {
+        display: inline-flex;
+        align-items: center;
+        padding: 4px 12px;
+        border-radius: 9999px; /* Pill shape */
+        font-size: 0.75rem;
+        font-weight: 600;
+        font-family: 'Inter', sans-serif;
+        letter-spacing: 0.5px;
+    }
+    
+    .badge-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        margin-right: 6px;
+        display: inline-block;
+    }
+    
+    .b-crit { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.2); }
+    .dot-crit { background-color: #ef4444; box-shadow: 0 0 8px #ef4444; }
+    
+    .b-high { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.2); }
+    .dot-high { background-color: #f59e0b; }
+    
+    .b-med { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.2); }
+    .dot-med { background-color: #3b82f6; }
+    
+    .b-low { background: rgba(100, 116, 139, 0.15); color: #cbd5e1; border: 1px solid rgba(100, 116, 139, 0.2); }
+    .dot-low { background-color: #94a3b8; }
+
+    /* --- 5. MODERN INPUT FIELDS --- */
     input[type="text"] {
-        background-color: #0d1117 !important;
-        color: #00f2ff !important; /* Text color when typing */
-        border: 1px solid #30363d !important;
+        background-color: #0f172a !important;
+        border: 1px solid #334155 !important;
+        color: #e2e8f0 !important;
+        border-radius: 8px;
+        padding: 12px 16px;
         font-family: 'JetBrains Mono', monospace;
+        font-size: 1rem;
+        transition: all 0.2s;
     }
-    
-    /* The Placeholder Text (The fix you asked for) */
-    input::placeholder {
-        color: #8b949e !important;
-        opacity: 1; /* Firefox */
+    input[type="text"]:focus {
+        border-color: #38bdf8 !important;
+        box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+        outline: none;
     }
-    input::-ms-input-placeholder { color: #8b949e !important; }
-    
-    /* 3. BUTTON STYLING */
+    /* Placeholder Styling */
+    ::placeholder { color: #64748b !important; opacity: 1; }
+
+    /* --- 6. BUTTONS --- */
     div.stButton > button {
-        background-color: transparent !important;
-        border: 1px solid #00f2ff !important;
-        color: #00f2ff !important;
-        border-radius: 6px;
-        font-family: 'JetBrains Mono', monospace;
-        transition: all 0.3s ease;
+        background-color: rgba(30, 41, 59, 0.5) !important;
+        color: #e2e8f0 !important;
+        border: 1px solid #475569 !important;
+        border-radius: 8px;
+        font-weight: 500;
+        padding: 0.5rem 1.5rem;
     }
     div.stButton > button:hover {
-        background-color: rgba(0, 242, 255, 0.1) !important;
-        box-shadow: 0 0 10px rgba(0, 242, 255, 0.4);
+        background-color: #1e293b !important;
+        border-color: #94a3b8 !important;
+        color: #ffffff !important;
     }
-    /* Primary Action Button */
+    /* Primary Button (Action) */
     div.stButton > button[kind="primary"] {
-        border-color: #ff7b72 !important;
-        color: #ff7b72 !important;
+        background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%) !important;
+        border: none !important;
+        color: white !important;
+        box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.3);
     }
     div.stButton > button[kind="primary"]:hover {
-        background-color: rgba(255, 123, 114, 0.1) !important;
-        box-shadow: 0 0 10px rgba(255, 123, 114, 0.4);
+        box-shadow: 0 10px 15px -3px rgba(2, 132, 199, 0.5);
+        transform: translateY(-1px);
     }
 
-    /* 4. TAGS & RADIO BUTTONS */
+    /* --- 7. RADIO BUTTONS AS SEGMENTED CONTROLS --- */
+    div[role="radiogroup"] {
+        background-color: #0f172a;
+        padding: 4px;
+        border-radius: 8px;
+        border: 1px solid #1e293b;
+        display: inline-flex;
+        gap: 0;
+    }
     div[role="radiogroup"] label {
-        background-color: #161b22 !important;
-        border: 1px solid #30363d !important;
-        color: #e6edf3 !important;
-        padding: 6px 14px !important;
+        background-color: transparent !important;
+        border: none !important;
+        color: #94a3b8 !important;
+        padding: 8px 16px !important;
+        margin: 0 !important;
         border-radius: 6px;
+        font-size: 0.9rem !important;
     }
     div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #1f6feb !important;
-        border-color: #1f6feb !important;
-        color: white !important;
+        background-color: #1e293b !important;
+        color: #38bdf8 !important; /* Sky Blue */
+        font-weight: 600;
+        box-shadow: 0 1px 3px rgba(0,0,0,0.1);
     }
 
-    /* 5. CARDS */
-    .report-card { 
-        background-color: #161b22; 
-        padding: 15px 20px; 
-        border-radius: 8px; 
-        border: 1px solid #30363d;
-        margin-bottom: 12px; 
-    }
-    
-    /* Metric Values */
-    div[data-testid="stMetricValue"] {
-        font-size: 2rem !important;
-        color: #00f2ff !important;
-        font-family: 'JetBrains Mono', monospace;
-    }
-
-    /* INCD/Global Styles */
-    .card-incd {
-        border-right: 4px solid #2f81f7;
-        direction: rtl; text-align: right;
-        background: linear-gradient(90deg, #161b22 0%, #1c2128 100%);
-    }
-    .incd-title { color: #a5d6ff !important; font-weight: bold; font-size: 1.2rem; }
-    
-    .card-global {
-        border-left: 4px solid #3fb950;
-        direction: ltr; text-align: left;
-    }
-    .global-title { color: #7ee787 !important; font-weight: bold; font-size: 1.2rem; }
-
-    /* Links */
-    a { color: #58a6ff !important; text-decoration: none; }
-    a:hover { text-decoration: underline; }
-    
-    /* 6. CREDITS FOOTER */
+    /* --- 8. FOOTER --- */
     .footer {
-        position: fixed;
-        left: 0;
-        bottom: 0;
-        width: 100%;
-        background-color: #0d1117;
-        color: #8b949e;
+        position: fixed; left: 0; bottom: 0; width: 100%;
+        background: rgba(15, 23, 42, 0.9);
+        backdrop-filter: blur(5px);
+        border-top: 1px solid #1e293b;
+        color: #64748b;
         text-align: center;
-        padding: 10px;
-        border-top: 1px solid #30363d;
-        font-family: 'JetBrains Mono', monospace;
-        font-size: 0.8rem;
-        z-index: 9999;
-    }
-    .footer a { color: #00f2ff !important; font-weight: bold; }
-    
-    /* CREDITS HEADER */
-    .header-credit {
-        text-align: center;
-        font-family: 'JetBrains Mono', monospace;
-        color: #484f58;
+        padding: 12px;
         font-size: 0.75rem;
-        margin-top: -15px;
-        margin-bottom: 20px;
-        letter-spacing: 2px;
-        text-transform: uppercase;
+        font-family: 'Inter', sans-serif;
+        letter-spacing: 1px;
+        z-index: 100;
     }
+    .footer a { color: #94a3b8 !important; text-decoration: none; font-weight: 600; transition: color 0.2s; }
+    .footer a:hover { color: #38bdf8 !important; }
+
+    /* METRICS */
+    div[data-testid="stMetricValue"] {
+        font-family: 'Inter', sans-serif;
+        font-weight: 700;
+        color: #f8fafc !important;
+    }
+    div[data-testid="stMetricLabel"] { color: #64748b !important; }
+
 </style>
 """, unsafe_allow_html=True)
 
@@ -177,34 +236,39 @@ async def perform_update():
         return save_reports(raw, analyzed)
     return 0
 
-# --- AUTO-LOAD CHECK ---
+# --- AUTO-LOAD ---
 if "last_run" not in st.session_state:
     st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-    with st.spinner("📡 ESTABLISHING UPLINK..."):
-        asyncio.run(perform_update())
+    asyncio.run(perform_update())
 else:
     now = datetime.datetime.now(IL_TZ)
     last_run = st.session_state["last_run"]
     if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
-        with st.empty():
-            st.info("🔄 SYNCING INTEL FEEDS...")
-            asyncio.run(perform_update())
-            st.session_state["last_run"] = now
+        asyncio.run(perform_update())
+        st.session_state["last_run"] = now
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=70)
-    st.title("CTI WAR ROOM")
-    st.markdown("`v4.0 | CLASSIFIED`")
+    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=60)
+    st.markdown("<h2 style='font-size: 1.5rem; margin-bottom: 0;'>CTI WAR ROOM</h2>", unsafe_allow_html=True)
+    st.caption("OPERATIONAL INTELLIGENCE SUITE")
     
     st.markdown("---")
-    st.markdown("### 🛰️ System Status")
+    
+    # System Status with clean indicators
+    st.markdown("##### SYSTEM STATUS")
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
-    col_s1, col_s2 = st.columns([1, 4])
-    with col_s1: st.markdown("🟢" if ok else "🔴")
-    with col_s2: st.caption(f"AI Engine: {msg}")
+    
+    # Custom status row
+    st.markdown(f"""
+    <div style="display: flex; align-items: center; justify-content: space-between; background: #1e293b; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
+        <span style="font-size: 0.9rem; color: #cbd5e1;">AI Engine</span>
+        <span style="font-size: 0.8rem; color: {'#4ade80' if ok else '#f87171'}; font-weight: bold;">{'ONLINE' if ok else 'OFFLINE'}</span>
+    </div>
+    """, unsafe_allow_html=True)
     
     st.markdown("---")
+    
     if st.button("⚡ FORCE SYNC", type="primary", use_container_width=True):
         with st.status("Executing Global Scan...", expanded=True):
             count = asyncio.run(perform_update())
@@ -212,18 +276,14 @@ with st.sidebar:
             st.success(f"Intel Updated: {count} new items")
             st.rerun()
 
-    st.markdown("### 🛡️ Defcon Level")
+    st.markdown("### 🛡️ DEFCON")
     st.progress(70) 
-    st.caption("Current Alert Level: ELEVATED")
+    st.caption("THREAT LEVEL: ELEVATED")
 
-# --- MAIN LAYOUT ---
+# --- HEADER & METRICS ---
+st.title("OPERATIONAL DASHBOARD")
+st.markdown("<div style='margin-bottom: 30px; margin-top: -15px; color: #64748b;'>REAL-TIME THREAT INTELLIGENCE FEED</div>", unsafe_allow_html=True)
 
-# 1. HEADER CREDIT
-st.markdown('<div class="header-credit">SYSTEM ARCHITECT: LIDOR AVRAHAMY</div>', unsafe_allow_html=True)
-
-st.title("📟 OPERATIONAL DASHBOARD")
-
-# Top Metrics
 conn = sqlite3.connect(DB_NAME)
 c = conn.cursor()
 c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-24 hours')")
@@ -232,15 +292,17 @@ c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' A
 count_crit = c.fetchone()[0]
 conn.close()
 
+# Modern Metrics
 m1, m2, m3, m4 = st.columns(4)
-with m1: st.metric("New Reports (24h)", count_24h)
-with m2: st.metric("Critical Threats", count_crit, delta=f"+{count_crit}" if count_crit > 0 else "0", delta_color="inverse")
-with m3: st.metric("Active Sources", "7", "Online")
-with m4: st.metric("System Uptime", "99.9%", "Stable")
+m1.metric("INTEL REPORTS (24H)", count_24h)
+m2.metric("CRITICAL THREATS", count_crit, delta=count_crit, delta_color="inverse")
+m3.metric("ACTIVE FEEDS", "7", "ALL SYSTEMS GO")
+m4.metric("UPTIME", "99.9%", "STABLE")
 
 st.markdown("---")
 
-tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ INVESTIGATION LAB", "🧠 THREAT PROFILER", "🌍 GLOBAL HEATMAP"])
+# --- TABS ---
+tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ FORENSIC LAB", "🧠 ADVERSARY PROFILE", "🌍 HEATMAP"])
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
@@ -251,86 +313,97 @@ with tab_feed:
     
     df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
-    if df_final.empty:
-        st.info("No active threats found. Systems Clear.")
-    else:
-        c_filter1, c_filter2 = st.columns([1, 1])
-        with c_filter1:
-            st.markdown("##### 🕵️ Data Source")
-            filter_source = st.radio("Source", ["All Sources", "🇮🇱 INCD Only", "🌍 Global Only"], horizontal=True, label_visibility="collapsed")
-        with c_filter2:
-            st.markdown("##### 🚨 Severity Level")
-            filter_sev = st.radio("Severity", ["All Levels", "🔥 Critical/High", "⚠️ Medium", "ℹ️ Info/Low"], horizontal=True, label_visibility="collapsed")
+    # Filters Row
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        st.caption("DATA SOURCE")
+        filter_source = st.radio("S1", ["All Sources", "🇮🇱 INCD Only", "🌍 Global Only"], horizontal=True, label_visibility="collapsed", key="f_src")
+    with c2:
+        st.caption("SEVERITY FILTER")
+        filter_sev = st.radio("S2", ["All Levels", "🔥 Critical/High", "⚠️ Medium", "ℹ️ Info/Low"], horizontal=True, label_visibility="collapsed", key="f_sev")
 
-        df_display = df_final.copy()
-        if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
-        elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
+    # Apply Filters
+    df_display = df_final.copy()
+    if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
+    elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
+    
+    if "Critical" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
+    elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
+    elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
+
+    st.write("") # Spacer
+
+    if df_display.empty:
+        st.info("NO THREATS DETECTED MATCHING CRITERIA.")
+    
+    for _, row in df_display.iterrows():
+        try:
+            dt = date_parser.parse(row['published_at'])
+            if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
+            else: dt = dt.astimezone(IL_TZ)
+            date_str = dt.strftime('%H:%M | %d/%m')
+        except: date_str = "--:--"
+
+        is_incd = row['source'] == "INCD"
+        card_class = "card-incd" if is_incd else "card-global"
         
-        if "Critical" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Critical|High', case=False, na=False)]
-        elif "Medium" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Medium', case=False, na=False)]
-        elif "Info" in filter_sev: df_display = df_display[df_display['severity'].str.contains('Low|Info|News', case=False, na=False)]
+        # Severity Styling
+        sev = row['severity'].lower()
+        if "critical" in sev or "high" in sev: 
+            badge_class = "b-crit"
+            dot_class = "dot-crit"
+        elif "medium" in sev: 
+            badge_class = "b-med"
+            dot_class = "dot-med"
+        else: 
+            badge_class = "b-low"
+            dot_class = "dot-low"
 
-        st.write("")
+        source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
         
-        for _, row in df_display.iterrows():
-            try:
-                dt = date_parser.parse(row['published_at'])
-                if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
-                else: dt = dt.astimezone(IL_TZ)
-                date_str = dt.strftime('%H:%M | %d/%m')
-            except: date_str = "--:--"
-
-            is_incd = row['source'] == "INCD"
-            card_class = "card-incd" if is_incd else "card-global"
-            title_class = "incd-title" if is_incd else "global-title"
-            
-            # Severity Tag logic inline styling
-            sev_tag_style = "background: rgba(88, 166, 255, 0.15); color: #58a6ff;"
-            if "Critical" in row['severity'] or "High" in row['severity']:
-                sev_tag_style = "background: rgba(255, 123, 114, 0.15); color: #ff7b72; border: 1px solid #ff7b72;"
-            
-            source_badge = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
-            
-            st.markdown(f"""
-            <div class="report-card {card_class}">
-                <div style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-                    <div>
-                        <span style="padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: bold; {sev_tag_style}">{row['severity'].upper()}</span>
-                        <span style="font-size: 0.8rem; color: #8b949e; margin: 0 5px;">{row['category']}</span>
-                    </div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: #8b949e;">
-                        {date_str} • <b>{source_badge}</b>
-                    </div>
+        # CARD RENDER
+        st.markdown(f"""
+        <div class="report-card {card_class}">
+            <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
+                <div class="card-meta">
+                    {date_str} • <b>{source_display}</b>
                 </div>
-                <div class="{title_class}">{row['title']}</div>
-                <div style="margin-top: 8px; color: #c9d1d9; font-size: 0.95rem; line-height: 1.5;">
-                    {row['summary']}
-                </div>
-                <div style="margin-top: 12px; text-align: {'left' if not is_incd else 'right'};">
-                    <a href="{row['url']}" target="_blank">🔗 SOURCE LINK</a>
+                <div class="badge {badge_class}">
+                    <span class="badge-dot {dot_class}"></span>
+                    {row['severity'].upper()}
                 </div>
             </div>
-            """, unsafe_allow_html=True)
+            <div class="card-title" style="margin-bottom: 10px;">{row['title']}</div>
+            <div style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 20px;">
+                {row['summary']}
+            </div>
+            <div style="text-align: {'left' if not is_incd else 'right'};">
+                <a href="{row['url']}" target="_blank" style="font-size: 0.85rem; font-weight: 600; color: #38bdf8; text-decoration: none;">
+                    OPEN SOURCE REPORT &rarr;
+                </a>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-# --- TAB 2: SOC TOOLBOX ---
+# --- TAB 2: FORENSIC LAB ---
 with tab_tools:
-    st.markdown("#### 🔬 IOC Forensic Analysis")
+    st.markdown("#### 🔬 IOC INVESTIGATION")
+    st.caption("Enter an Indicator of Compromise (IP, Domain, URL, Hash) to initiate analysis.")
     
-    col_input, col_action = st.columns([3, 1])
-    with col_input:
-        ioc_input = st.text_input("IOC Input", placeholder="IP, Domain, Hash, or URL...", label_visibility="collapsed")
-    with col_action:
-        btn_scan = st.button("🔍 INITIATE SCAN", type="primary", use_container_width=True)
+    c_in, c_btn = st.columns([4, 1])
+    with c_in:
+        ioc_input = st.text_input("IOC", placeholder="e.g. 192.168.1.1, malicious.com...", label_visibility="collapsed")
+    with c_btn:
+        btn_scan = st.button("INITIATE SCAN", type="primary", use_container_width=True)
 
     if btn_scan and ioc_input:
         ioc_type = identify_ioc_type(ioc_input)
         if not ioc_type:
-            st.error("❌ INVALID FORMAT DETECTED")
+            st.error("❌ INVALID IOC FORMAT")
         else:
-            st.success(f"TARGET ACQUIRED: {ioc_type.upper()}")
             tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
             
-            with st.spinner("⚡ Querying Threat Intelligence Engines..."):
+            with st.spinner(f"ANALYZING {ioc_type.upper()}..."):
                 vt_data = tl.query_virustotal(ioc_input, ioc_type)
                 us_data = tl.query_urlscan(ioc_input) if ioc_type in ["domain", "url", "ip"] else None
                 ab_data = tl.query_abuseipdb(ioc_input) if ioc_type == "ip" else None
@@ -339,91 +412,99 @@ with tab_tools:
                 proc = AIBatchProcessor(GROQ_KEY)
                 ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
 
-            c_res, c_ai = st.columns([1, 1])
-            with c_res:
-                st.markdown("### 📊 Raw Telemetry")
-                with st.expander("🦠 VirusTotal Data", expanded=True):
-                    if vt_data:
-                        stats = vt_data.get('attributes', {}).get('last_analysis_stats', {})
-                        mal = stats.get('malicious', 0)
-                        color = "red" if mal > 0 else "green"
-                        st.markdown(f":{color}[**Detections: {mal}/{sum(stats.values())}**]")
-                        st.json(stats)
-                    else: st.write("No Data Available")
+            c_left, c_right = st.columns([1, 1])
+            
+            with c_left:
+                st.markdown("##### 📊 TELEMETRY DATA")
+                # VirusTotal Card
+                if vt_data:
+                    stats = vt_data.get('attributes', {}).get('last_analysis_stats', {})
+                    mal = stats.get('malicious', 0)
+                    bg_color = "rgba(239, 68, 68, 0.1)" if mal > 0 else "rgba(16, 185, 129, 0.1)"
+                    border = "#ef4444" if mal > 0 else "#10b981"
+                    
+                    st.markdown(f"""
+                    <div style="background: {bg_color}; border: 1px solid {border}; border-radius: 8px; padding: 15px; margin-bottom: 10px;">
+                        <div style="font-weight: bold; color: #f8fafc;">VIRUSTOTAL DETECTION</div>
+                        <div style="font-size: 1.5rem; font-family: 'JetBrains Mono'; color: #f8fafc;">{mal} / {sum(stats.values())}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
-                with st.expander("🛑 AbuseIPDB / URLScan"):
-                    if ab_data: 
-                        st.metric("Abuse Confidence", f"{ab_data.get('abuseConfidenceScore', 0)}%")
-                        st.write(f"ISP: {ab_data.get('isp')}")
-                    if us_data:
-                        st.write(f"Verdict: {us_data.get('verdict', {}).get('overall')}")
-                        if us_data.get('task', {}).get('screenshotURL'):
+                # AbuseIPDB / URLScan
+                if ab_data:
+                     st.info(f"Abuse Confidence: {ab_data.get('abuseConfidenceScore', 0)}% | ISP: {ab_data.get('isp')}")
+                if us_data:
+                     st.info(f"URLScan Verdict: {us_data.get('verdict', {}).get('overall')}")
+                     if us_data.get('task', {}).get('screenshotURL'):
                             st.image(us_data['task']['screenshotURL'])
-
-            with c_ai:
-                st.markdown("### 🤖 AI Analyst Verdict")
+            
+            with c_right:
+                st.markdown("##### 🤖 AI ANALYST VERDICT")
                 st.markdown(f"""
-                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 8px; font-family: 'Heebo'; color: #e6edf3;">
+                <div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 20px;">
                     {ai_report}
                 </div>
                 """, unsafe_allow_html=True)
 
-# --- TAB 3: STRATEGIC INTEL ---
+# --- TAB 3: THREAT PROFILER ---
 with tab_strat:
-    st.markdown("#### 🏴‍☠️ Adversary Profiling")
+    st.markdown("#### 🏴‍☠️ ADVERSARY DOSSIER")
     
     threats = APTSheetCollector().fetch_threats()
     names = [t['name'] for t in threats]
     
-    col_sel, col_info = st.columns([1, 3])
-    with col_sel:
-        st.markdown("**Select Target:**")
-        selected = st.radio("APT Group", names, label_visibility="collapsed")
+    c_sel, c_detail = st.columns([1, 3])
+    
+    with c_sel:
+        st.caption("SELECT TARGET")
+        selected = st.radio("APT", names, label_visibility="collapsed")
         actor = next(t for t in threats if t['name'] == selected)
         
         st.markdown("---")
-        if st.button("🏹 Gen. Hunting Rules"):
-            with st.spinner("Generating XQL/YARA..."):
+        if st.button("GENERATE HUNTING RULES", use_container_width=True):
+            with st.spinner("Compiling Detection Logic..."):
                 proc = AIBatchProcessor(GROQ_KEY)
                 rules = asyncio.run(proc.generate_hunting_queries(actor))
                 st.session_state['hunt_rules'] = rules
 
-    with col_info:
+    with c_detail:
+        # DOSSIER CARD
         st.markdown(f"""
-        <div style="border: 1px solid #30363d; border-radius: 8px; padding: 20px; background: #161b22;">
-            <h2 style="margin-top:0; color: #f0f6fc !important; font-size: 2rem;">{actor['name']}</h2>
-            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
-                <span style="background: rgba(88, 166, 255, 0.15); color: #58a6ff; padding: 4px 10px; border-radius: 4px;">ORIGIN: {actor['origin']}</span>
-                <span style="background: rgba(210, 153, 34, 0.15); color: #d29922; padding: 4px 10px; border-radius: 4px;">TARGET: {actor['target']}</span>
+        <div class="report-card" style="border-left: 4px solid #f59e0b;">
+            <h2 style="margin-top:0; color: #ffffff;">{actor['name']}</h2>
+            <div style="margin-bottom: 20px; display: flex; gap: 10px;">
+                <span class="badge b-med">ORIGIN: {actor['origin']}</span>
+                <span class="badge b-high">TARGET: {actor['target']}</span>
+                <span class="badge b-low">TYPE: {actor['type']}</span>
             </div>
-            <p style="color: #e6edf3; font-size: 1.1rem; line-height: 1.5;">{actor['desc']}</p>
-            <hr style="border-color: #30363d;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-                <div>
-                    <h5 style="color: #58a6ff !important;">🛠️ Toolset</h5>
-                    <code style="background: #0d1117; color: #ff7b72; display: block; padding: 8px;">{actor['tools']}</code>
+            <p style="font-size: 1.1rem; color: #e2e8f0;">{actor['desc']}</p>
+            
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 30px;">
+                <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
+                    <h5 style="color: #94a3b8; margin-top: 0;">🛠️ KNOWN TOOLS</h5>
+                    <code style="color: #fca5a5;">{actor['tools']}</code>
                 </div>
-                <div>
-                    <h5 style="color: #58a6ff !important;">📚 MITRE TTPs</h5>
-                    <code style="background: #0d1117; color: #d29922; display: block; padding: 8px;">{actor['mitre']}</code>
+                <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
+                    <h5 style="color: #94a3b8; margin-top: 0;">📚 MITRE ATT&CK</h5>
+                    <code style="color: #fcd34d;">{actor['mitre']}</code>
                 </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
         if 'hunt_rules' in st.session_state:
-            st.markdown("### 🛡️ Generated Detection Logic")
+            st.markdown("##### 🛡️ DETECTION LOGIC (XQL / YARA)")
             st.code(st.session_state['hunt_rules'], language="sql")
 
 # --- TAB 4: MAP ---
 with tab_map:
-    st.markdown("#### 🌍 Live Attack Map")
+    st.markdown("#### 🌍 GLOBAL CYBER ATTACK MAP")
     components.iframe("https://threatmap.checkpoint.com/", height=700)
 
-# --- FOOTER CREDIT ---
+# --- FOOTER ---
 st.markdown("""
 <div class="footer">
-    DESIGNED & BUILT BY LIDOR AVRAHAMY | 
-    <a href="https://www.linkedin.com/in/lidoravrahamy/" target="_blank">LINKEDIN PROFILE 🔗</a>
+    SYSTEM ARCHITECT: <b>LIDOR AVRAHAMY</b> &nbsp;|&nbsp; 
+    <a href="https://www.linkedin.com/in/lidoravrahamy/" target="_blank">LINKEDIN PROFILE</a>
 </div>
 """, unsafe_allow_html=True)
