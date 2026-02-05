@@ -101,17 +101,14 @@ class AIBatchProcessor:
         self.key = key
         
     def _prune_data(self, data, max_list_items=5):
-        """Helper to trim massive JSONs for AI context window"""
         if isinstance(data, dict):
             new_data = {}
             for k, v in data.items():
-                # Remove heavy fields irrelevant to high-level analysis
                 if k in ['icon', 'favicon', 'html', 'screenshot', 'raw_response', 'response_headers']:
                     continue
                 new_data[k] = self._prune_data(v, max_list_items)
             return new_data
         elif isinstance(data, list):
-            # Limit lists to top N items
             return [self._prune_data(i, max_list_items) for i in data[:max_list_items]]
         else:
             return data
@@ -119,13 +116,10 @@ class AIBatchProcessor:
     def _extract_key_intel(self, raw_data):
         """Creates a SUPER lean summary for AI to save tokens and prevent 413 Errors"""
         summary = {}
-        
-        # 1. VirusTotal Optimization
         if 'virustotal' in raw_data and isinstance(raw_data['virustotal'], dict):
             vt = raw_data['virustotal']
             attrs = vt.get('attributes', {})
             rels = vt.get('relationships', {})
-            
             summary['virustotal'] = {
                 'reputation': attrs.get('reputation'),
                 'stats': attrs.get('last_analysis_stats'),
@@ -133,12 +127,9 @@ class AIBatchProcessor:
                 'country': attrs.get('country'),
                 'asn': attrs.get('asn'),
                 'as_owner': attrs.get('as_owner'),
-                # Extract only hostnames from resolutions (Crucial for token saving!)
                 'passive_dns': [r.get('attributes', {}).get('host_name') for r in rels.get('resolutions', {}).get('data', [])[:10]],
                 'contacted_urls': [u.get('context_attributes', {}).get('url') for u in rels.get('contacted_urls', {}).get('data', [])[:5]]
             }
-            
-        # 2. URLScan Optimization
         if 'urlscan' in raw_data and isinstance(raw_data['urlscan'], dict):
             us = raw_data['urlscan']
             summary['urlscan'] = {
@@ -146,8 +137,6 @@ class AIBatchProcessor:
                 'country': us.get('page', {}).get('country'),
                 'target': us.get('task', {}).get('url')
             }
-
-        # 3. AbuseIPDB Optimization
         if 'abuseipdb' in raw_data and isinstance(raw_data['abuseipdb'], dict):
             ab = raw_data['abuseipdb']
             summary['abuseipdb'] = {
@@ -155,7 +144,6 @@ class AIBatchProcessor:
                 'isp': ab.get('isp'),
                 'usage': ab.get('usageType')
             }
-            
         return summary
 
     async def analyze_batch(self, items):
@@ -205,8 +193,6 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        # NEW: Use Smart Extraction instead of Blind Pruning
-        # This reduces token count from ~30k to ~500!
         lean_data = self._extract_key_intel(data)
         
         prompt = f"""
@@ -234,14 +220,9 @@ class AIBatchProcessor:
         * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
         * If clean, confirm it's a False Positive risk.
         """
-        
-        # Priority 1: Try High-Tier Model (70b)
         res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
-        
-        # Priority 2: Fallback to Fast Model (8b) if Rate Limit or Error
         if "Error" in res:
             return await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=False)
-            
         return res
 
     async def generate_hunting_queries(self, actor):
@@ -261,59 +242,42 @@ class ThreatLookup:
         if not self.vt_key: return None
         try:
             if ioc_type == "url":
-                # Ensure correct URL ID calculation for VT v3
                 url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=")
                 endpoint = f"urls/{url_id}"
             else:
                 endpoint = "ip_addresses" if ioc_type == "ip" else "domains" if ioc_type == "domain" else "files"
                 endpoint = f"{endpoint}/{ioc}"
             
-            # Request Relationships (Include 'resolutions' for IPs!)
             params = {}
             if ioc_type in ['file', 'domain', 'ip', 'url']:
                 params['relationships'] = 'contacted_urls,contacted_ips,contacted_domains,resolutions'
             
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=15)
-            
-            if res.status_code == 200:
-                return res.json().get('data', {})
-            
-            # Fallback WITHOUT relationships (if 400/403/500/504)
+            if res.status_code == 200: return res.json().get('data', {})
             if res.status_code in [400, 403, 500, 504]:
                 res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
-                if res.status_code == 200:
-                     return res.json().get('data', {})
-                
+                if res.status_code == 200: return res.json().get('data', {})
             return None
         except: return None
 
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # Fix: Pivot to domain for more robust results
             search_query = ioc
             try:
                 if "://" in ioc:
                     parsed = urlparse(ioc)
-                    if parsed.netloc:
-                         search_query = f"domain:{parsed.netloc}"
+                    if parsed.netloc: search_query = f"domain:{parsed.netloc}"
             except: pass
             
-            # Step 1: Search
             res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=15)
             data = res.json()
-            
             if data.get('results'):
-                # Step 2: Extract UUID from the first result
                 first_hit = data['results'][0]
                 scan_uuid = first_hit.get('_id')
-                
                 if scan_uuid:
-                    # Step 3: Fetch FULL result
                     full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_uuid}/", headers={"API-Key": self.urlscan_key}, timeout=15)
-                    if full_res.status_code == 200:
-                        return full_res.json()
-                    
+                    if full_res.status_code == 200: return full_res.json()
             return None
         except: return None
 
@@ -324,17 +288,82 @@ class ThreatLookup:
             return res.json().get('data', {})
         except: return None
 
-# --- STRATEGIC INTEL ---
+# --- STRATEGIC INTEL & TOOLS ---
+class AnalystToolkit:
+    """Curated list of tools from 'Awesome Threat Intelligence'"""
+    @staticmethod
+    def get_tools():
+        return {
+            "Analysis & Sandboxing": [
+                {"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "The Swiss Army Knife of data decoding."},
+                {"name": "Any.Run", "url": "https://app.any.run/", "desc": "Interactive Malware Sandbox."},
+                {"name": "UnpacMe", "url": "https://www.unpac.me/", "desc": "Automated Malware Unpacking."},
+                {"name": "Hybrid Analysis", "url": "https://www.hybrid-analysis.com/", "desc": "Free malware analysis service."}
+            ],
+            "Lookup & Reputation": [
+                {"name": "VirusTotal", "url": "https://www.virustotal.com/", "desc": "Analyze suspicious files/URLs."},
+                {"name": "AbuseIPDB", "url": "https://www.abuseipdb.com/", "desc": "Check IP reputation."},
+                {"name": "URLScan.io", "url": "https://urlscan.io/", "desc": "Website scanner for suspicious URLs."},
+                {"name": "Talos Reputation", "url": "https://talosintelligence.com/reputation_center", "desc": "Cisco Talos IP/Domain check."}
+            ],
+            "Intelligence & Frameworks": [
+                {"name": "MITRE ATT&CK", "url": "https://attack.mitre.org/", "desc": "Knowledge base of adversary tactics."},
+                {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/", "desc": "Resource for rapid identification of malware."},
+                {"name": "LOLBAS", "url": "https://lolbas-project.github.io/", "desc": "Living Off The Land Binaries and Scripts."},
+                {"name": "AlienVault OTX", "url": "https://otx.alienvault.com/", "desc": "Open Threat Exchange community."}
+            ]
+        }
+
 class APTSheetCollector:
     def fetch_threats(self): 
+        # Expanded with links and better context
         return [
-            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure.", "mitre": "T1059, T1105"},
-            {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel / Middle East", "type": "Espionage", "tools": "DNS Tunneling, SideTwist", "desc": "Sophisticated espionage targeting critical sectors.", "mitre": "T1071.004, T1048"},
-            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers (BiBiWiper)", "desc": "Destructive attacks masquerading as ransomware.", "mitre": "T1485, T1486"},
-            {"name": "Imperial Kitten", "origin": "Iran", "target": "Israel", "type": "Espionage/Cyber-Enabled Influence", "tools": "IMAPLoader, Standard Python Backdoors", "desc": "IRGC affiliated. Focus on transportation and logistics.", "mitre": "T1566, T1071"}
+            {
+                "name": "MuddyWater", 
+                "origin": "Iran", 
+                "target": "Israel", 
+                "type": "Espionage", 
+                "tools": "PowerShell, ScreenConnect, Ligolo", 
+                "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure. Known for social engineering.", 
+                "mitre": "T1059, T1105, T1566",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/muddywater",
+                "et_tags": "muddywater, static_kitten, mercury"
+            },
+            {
+                "name": "OilRig (APT34)", 
+                "origin": "Iran", 
+                "target": "Israel / Middle East", 
+                "type": "Espionage", 
+                "tools": "DNS Tunneling, SideTwist, Karkoff", 
+                "desc": "Sophisticated espionage targeting critical sectors (Finance, Energy, Gov).", 
+                "mitre": "T1071.004, T1048, T1132",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/oilrig",
+                "et_tags": "oilrig, helix_kitten, cobalt_gypsy"
+            },
+            {
+                "name": "Agonizing Serpens", 
+                "origin": "Iran", 
+                "target": "Israel", 
+                "type": "Destructive", 
+                "tools": "Wipers (BiBiWiper), SQL Injection", 
+                "desc": "Destructive attacks masquerading as ransomware. Targeted Israeli education and tech sectors.", 
+                "mitre": "T1485, T1486, T1190",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/agonizing_serpens",
+                "et_tags": "agonizing_serpens, agrius"
+            },
+            {
+                "name": "Imperial Kitten", 
+                "origin": "Iran", 
+                "target": "Israel", 
+                "type": "Espionage/Cyber-Enabled Influence", 
+                "tools": "IMAPLoader, Standard Python Backdoors", 
+                "desc": "IRGC affiliated. Focus on transportation, logistics, and maritime.", 
+                "mitre": "T1566, T1071, T1021",
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/imperial_kitten",
+                "et_tags": "imperial_kitten, tortoise_shell"
+            }
         ]
 
-# --- DATA COLLECTION ---
 class CTICollector:
     SOURCES = [
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
