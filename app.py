@@ -4,14 +4,52 @@ import pandas as pd
 import sqlite3
 import datetime
 import pytz
-import textwrap # FIXED: Added to handle HTML indentation
+import time
+import textwrap
 import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
-from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
+
+# --- CYBER BOOT SEQUENCE (LOADING BAR) ---
+if 'booted' not in st.session_state:
+    st.markdown("""
+    <style>
+        .stApp { background-color: #0b0f19; }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.write("")
+        st.write("")
+        st.write("")
+        st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=100)
+        st.markdown("<h3 style='text-align: center; color: #00f2ff; font-family: monospace;'>INITIALIZING CTI WAR ROOM...</h3>", unsafe_allow_html=True)
+        
+        my_bar = st.progress(0)
+        status_text = st.empty()
+        
+        steps = [
+            "Encrypting Connection...",
+            "Loading Threat Intelligence Feeds...",
+            "Syncing with Israel National Cyber Directorate...",
+            "Calibrating AI Analyst Models...",
+            "Establishing Secure Uplink..."
+        ]
+        
+        for i, step in enumerate(steps):
+            status_text.markdown(f"<p style='text-align: center; color: #64748b; font-family: monospace;'>{step}</p>", unsafe_allow_html=True)
+            for p in range(20):
+                time.sleep(0.01)
+                my_bar.progress((i * 20) + p)
+        
+        my_bar.progress(100)
+        time.sleep(0.5)
+        st.session_state['booted'] = True
+        st.rerun()
 
 # --- UI STYLING (THE "GLASS & STEEL" DESIGN SYSTEM) ---
 st.markdown("""
@@ -166,21 +204,23 @@ st.markdown("""
     /* TOOLBOX BUTTONS */
     .tool-link {
         display: block;
-        padding: 8px 12px;
+        padding: 10px 14px;
         background: rgba(30, 41, 59, 0.6);
         border: 1px solid rgba(148, 163, 184, 0.1);
         border-radius: 6px;
-        color: #94a3b8 !important;
+        color: #cbd5e1 !important;
         text-decoration: none;
-        font-size: 0.85rem;
+        font-size: 0.9rem;
         font-weight: 600;
         text-align: center;
         transition: all 0.2s;
+        margin: 5px;
     }
     .tool-link:hover {
         background: rgba(56, 189, 248, 0.1);
         color: #38bdf8 !important;
         border-color: #38bdf8;
+        transform: translateY(-2px);
     }
 
     /* --- 7. RADIO BUTTONS --- */
@@ -224,6 +264,17 @@ st.markdown("""
     }
     .footer a { color: #94a3b8 !important; text-decoration: none; font-weight: 600; transition: color 0.2s; }
     .footer a:hover { color: #38bdf8 !important; }
+    
+    .header-credit {
+        text-align: center;
+        font-family: 'JetBrains Mono', monospace;
+        color: #484f58;
+        font-size: 0.75rem;
+        margin-top: -15px;
+        margin-bottom: 20px;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+    }
 
     /* METRICS */
     div[data-testid="stMetricValue"] {
@@ -240,7 +291,8 @@ st.markdown("""
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 REFRESH_MINUTES = 10
-st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
+# REMOVED AUTO REFRESH COMPONENT TO PREVENT ERRORS
+# We will use manual refresh or implicit page reloads
 
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
@@ -263,6 +315,7 @@ if "last_run" not in st.session_state:
 else:
     now = datetime.datetime.now(IL_TZ)
     last_run = st.session_state["last_run"]
+    # Manual check for time-based refresh instead of using the broken component
     if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
         asyncio.run(perform_update())
         st.session_state["last_run"] = now
@@ -279,12 +332,12 @@ with st.sidebar:
     st.markdown("##### SYSTEM STATUS")
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
     
-    st.markdown(f"""
+    st.markdown(textwrap.dedent(f"""
     <div style="display: flex; align-items: center; justify-content: space-between; background: #1e293b; padding: 10px; border-radius: 8px; margin-bottom: 10px;">
         <span style="font-size: 0.9rem; color: #cbd5e1;">AI Engine</span>
         <span style="font-size: 0.8rem; color: {'#4ade80' if ok else '#f87171'}; font-weight: bold;">{'ONLINE' if ok else 'OFFLINE'}</span>
     </div>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
     
     st.markdown("---")
     
@@ -293,6 +346,7 @@ with st.sidebar:
             count = asyncio.run(perform_update())
             st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
             st.success(f"Intel Updated: {count} new items")
+            time.sleep(1)
             st.rerun()
 
     st.markdown("### 🛡️ DEFCON")
@@ -300,6 +354,7 @@ with st.sidebar:
     st.caption("THREAT LEVEL: ELEVATED")
 
 # --- HEADER & METRICS ---
+st.markdown('<div class="header-credit">SYSTEM ARCHITECT: LIDOR AVRAHAMY</div>', unsafe_allow_html=True)
 st.title("OPERATIONAL DASHBOARD")
 st.markdown("<div style='margin-bottom: 30px; margin-top: -15px; color: #64748b;'>REAL-TIME THREAT INTELLIGENCE FEED</div>", unsafe_allow_html=True)
 
@@ -320,7 +375,7 @@ m4.metric("UPTIME", "99.9%", "STABLE")
 st.markdown("---")
 
 # --- TABS ---
-tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ FORENSIC LAB", "🧠 ADVERSARY PROFILE", "🌍 HEATMAP"])
+tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ INVESTIGATION LAB", "🧠 THREAT PROFILER", "🌍 HEATMAP"])
 
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
@@ -374,7 +429,7 @@ with tab_feed:
         source_display = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
         align = 'right' if is_incd else 'left'
         
-        # CARD RENDER (FIXED HTML INDENTATION)
+        # CARD RENDER (USING TEXTWRAP TO FIX HTML BUG)
         st.markdown(textwrap.dedent(f"""
         <div class="report-card {card_class}">
             <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 15px;">
@@ -405,17 +460,21 @@ with tab_tools:
     # --- RESTORED ANALYST TOOLKIT ---
     with st.expander("🧰 ANALYST QUICK ACCESS TOOLKIT", expanded=True):
         toolkit = AnalystToolkit.get_tools()
-        cols = st.columns(4)
-        idx = 0
-        for category, tools in toolkit.items():
+        cols = st.columns(3)
+        # Flatten the toolkit dictionary
+        all_tools = []
+        for cat, tools in toolkit.items():
             for tool in tools:
-                with cols[idx % 4]:
-                    st.markdown(f"""
-                    <a href="{tool['url']}" target="_blank" class="tool-link">
-                        {tool['name']}
-                    </a>
-                    """, unsafe_allow_html=True)
-                idx += 1
+                all_tools.append(tool)
+        
+        # Display tools in grid
+        for idx, tool in enumerate(all_tools):
+            with cols[idx % 3]:
+                st.markdown(f"""
+                <a href="{tool['url']}" target="_blank" class="tool-link">
+                    {tool['name']} <span style="font-size: 0.8em; opacity: 0.7;">| {tool['desc']}</span>
+                </a>
+                """, unsafe_allow_html=True)
     
     st.markdown("---")
     st.caption("Enter an Indicator of Compromise (IP, Domain, URL, Hash) to initiate analysis.")
@@ -498,7 +557,7 @@ with tab_strat:
                 st.session_state['hunt_rules'] = rules
 
     with c_detail:
-        # DOSSIER CARD (FIXED HTML INDENTATION)
+        # DOSSIER CARD (USING TEXTWRAP FOR HTML FIX)
         st.markdown(textwrap.dedent(f"""
         <div class="report-card" style="border-left: 4px solid #f59e0b;">
             <h2 style="margin-top:0; color: #ffffff;">{actor['name']}</h2>
