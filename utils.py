@@ -81,7 +81,6 @@ class DeepWebScanner:
         """Searches the deep web for recent mentions of the actor"""
         results = []
         try:
-            # Using specific query to reduce noise
             query = f'"{actor_name}" cyber threat intelligence malware analysis report'
             with DDGS() as ddgs:
                 ddg_results = list(ddgs.text(query, max_results=limit))
@@ -178,21 +177,24 @@ class AIBatchProcessor:
         chunk_size = 10
         results = []
         
+        # --- PROMPT: SPECIFIC LOGIC FOR MALPEDIA SCRAPED CONTENT ---
         system_instruction = """
         You are an expert CTI Analyst.
-        Task: Analyze cyber news items and extract key metadata.
+        Task: Analyze cyber news and extract intelligence.
         
         OUTPUT RULES:
-        1. IF Source is 'INCD' (Israel National Cyber Directorate):
-           - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-        2. IF Source is 'Malpedia' OR 'DeepWeb':
-           - SUMMARY: Synthesize the text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets.
-        3. DATE EXTRACTION (CRITICAL):
-           - Identify the **original publication time** from the text (e.g., "Published: 2 hours ago", "Date: 2024-02-01").
-           - Return it in 'published_at' field in ISO 8601 format (YYYY-MM-DDTHH:MM:SS). 
-           - If no specific date is found in text, omit the field.
-        4. GENERAL:
-           - TITLE: Short, informative (Max 8 words).
+        1. IF Source is 'Malpedia' (content marked as [SCRAPED_CONTENT]):
+           - **TITLE**: GENERATE a new, descriptive title based on the scraped text (Ignore the original RSS title).
+           - **SUMMARY**: Create a 4-5 sentence Executive Summary. Focus on: Attribution, Malware Family, Capabilities, and Targets.
+           - **DATE**: Extract the original publication date from the text.
+           - **SEVERITY**: Determine based on the threat (APT/Ransomware = High/Critical).
+           - **CATEGORY**: Classify correctly.
+
+        2. IF Source is 'INCD':
+           - TITLE & SUMMARY: Must be in **Hebrew**.
+        
+        3. GENERAL (All other sources):
+           - DATE EXTRACTION: Identify original publication time. Return 'published_at' in ISO 8601.
            - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
            - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
         
@@ -204,7 +206,7 @@ class AIBatchProcessor:
             
             batch_lines = []
             for idx, x in enumerate(chunk):
-                # Larger limit for Malpedia to include more context
+                # Allow more context for Malpedia scraped content
                 limit = 4000 if x['source'] in ['Malpedia', 'DeepWeb'] else 500
                 clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
                 batch_lines.append(f"ID:{idx}|Src:{x['source']}|RawDate:{x['date']}|Content:{x['title']} - {clean_sum}")
@@ -233,9 +235,8 @@ class AIBatchProcessor:
                 results.append({
                     "category": final_cat, 
                     "severity": final_sev, 
-                    "title": ai.get('title', chunk[j]['title']),
+                    "title": ai.get('title', chunk[j]['title']), # AI generates new title for Malpedia
                     "summary": ai.get('summary', chunk[j]['summary'][:350]),
-                    # Prefer AI date, fallback to scraper date (which might be updated by Malpedia scraper)
                     "published_at": ai.get('published_at', chunk[j]['date'])
                 })
         return results
@@ -450,76 +451,68 @@ class CTICollector:
                         if _is_url_processed(entry.link): continue
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
-                        
-                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER & DATE FIX ---
+                        final_url = entry.link
+
+                        # --- 🚨 MALPEDIA INTELLIGENT SCRAPER ---
                         if source['name'] == 'Malpedia':
                             try:
-                                # Hop 1: Malpedia Profile Page
+                                # Step 1: Fetch the Malpedia Profile/Entry Page
                                 async with session.get(entry.link, headers=HEADERS, timeout=10) as mal_resp:
                                     if mal_resp.status == 200:
                                         mal_html = await mal_resp.text()
                                         mal_soup = BeautifulSoup(mal_html, 'html.parser')
                                         
-                                        # Hop 2: Find external "Open article" link
                                         target_link = None
+                                        
+                                        # Strategy A: Look for "Open article" / "Direct link"
                                         for a in mal_soup.find_all('a', href=True):
-                                            link_text = a.get_text().lower()
-                                            if "open article" in link_text or "read report" in link_text or "original source" in link_text:
+                                            txt = a.get_text().lower()
+                                            if any(x in txt for x in ["open article", "read report", "original source", "direct link"]):
                                                 target_link = a['href']
                                                 break
                                         
-                                        # Hop 3: Fetch & Scrape REAL Content & DATE
+                                        # Strategy B: Fallback - Pick first link from "Related Articles" table/list
+                                        if not target_link:
+                                            # Assuming references are in a table or list
+                                            # We look for the first external link in the main content area
+                                            main_content = mal_soup.find('div', class_='content') or mal_soup.body
+                                            for a in main_content.find_all('a', href=True):
+                                                href = a['href']
+                                                # Filter out internal links, social shares, etc.
+                                                if "malpedia" not in href and "google" not in href and "twitter" not in href and "facebook" not in href and href.startswith("http"):
+                                                    target_link = href
+                                                    break
+
+                                        # Step 2: Fetch the External Report (The "Real" Source)
                                         if target_link:
+                                            final_url = target_link # Update URL to point to real report
+                                            
                                             async with session.get(target_link, headers=HEADERS, timeout=15) as ext_resp:
                                                 if ext_resp.status == 200:
                                                     ext_html = await ext_resp.text()
                                                     ext_soup = BeautifulSoup(ext_html, 'html.parser')
                                                     
-                                                    # --- A. DATE HUNTING ---
-                                                    found_date = None
-                                                    # Try Meta Tags
-                                                    date_metas = ['article:published_time', 'og:article:published_time', 'date', 'pubdate', 'citation_date']
-                                                    for m in ext_soup.find_all('meta'):
-                                                        m_name = m.get('name', '') or m.get('property', '')
-                                                        if any(dm in m_name.lower() for dm in date_metas):
-                                                            found_date = m.get('content')
-                                                            break
-                                                    
-                                                    # Try Time Tag
-                                                    if not found_date:
-                                                        t_tag = ext_soup.find('time')
-                                                        if t_tag: found_date = t_tag.get('datetime') or t_tag.get_text()
-
-                                                    # If Found, Update pub_date
-                                                    if found_date:
-                                                        try:
-                                                            parsed_dt = date_parser.parse(found_date)
-                                                            if not parsed_dt.tzinfo: parsed_dt = pytz.utc.localize(parsed_dt)
-                                                            pub_date = parsed_dt.astimezone(IL_TZ)
-                                                        except: pass
-
-                                                    # --- B. CONTENT EXTRACTION ---
-                                                    # Cleanup
+                                                    # Remove noise
                                                     for noise in ext_soup(["script", "style", "nav", "footer", "header", "form", "iframe", "ads"]):
                                                         noise.decompose()
                                                     
-                                                    # Extract Header (Context) and Body
+                                                    # Extract Text
                                                     texts = []
                                                     h1 = ext_soup.find('h1')
                                                     if h1: texts.append(f"TITLE: {h1.get_text().strip()}")
                                                     
-                                                    # Get significant paragraphs/divs
                                                     for p in ext_soup.find_all(['p', 'div', 'h2']):
-                                                        txt = p.get_text().strip()
-                                                        if len(txt) > 50: texts.append(txt)
+                                                        t = p.get_text().strip()
+                                                        if len(t) > 60: texts.append(t)
                                                     
                                                     scraped_text = ' '.join(texts)
                                                     
-                                                    if len(scraped_text) > 100:
-                                                        sum_text = f"[Source Scraped] {scraped_text[:3500]}"
+                                                    if len(scraped_text) > 200:
+                                                        # Mark content so AI knows to regenerate title/summary
+                                                        sum_text = f"[SCRAPED_CONTENT] {scraped_text[:3500]}"
                             except Exception: pass 
 
-                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
+                        items.append({"title": entry.title, "url": final_url, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
                 elif source['type'] == 'json':
                      data = json.loads(content)
@@ -580,7 +573,6 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            # Use AI extracted date if valid, otherwise scraper date (which might be updated by Malpedia scrape)
             final_date = a.get('published_at', item['date'])
             try:
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
