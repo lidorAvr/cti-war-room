@@ -422,8 +422,9 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ IN
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 15", conn)
-    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
+    # STRICT FILTER: Last 48h AND EXCLUDE DeepWeb from main feed
+    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 15", conn)
+    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
     df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
@@ -449,7 +450,6 @@ with tab_feed:
     
     for _, row in df_display.iterrows():
         try:
-            # Safe Parsing of the date (AI ISO format or Fallback)
             dt = date_parser.parse(row['published_at'])
             if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
             else: dt = dt.astimezone(IL_TZ)
@@ -528,7 +528,7 @@ with tab_tools:
                              st.write("**Contacted URLs:**")
                              for u in rels['contacted_urls'].get('data', [])[:5]: st.code(u.get('context_attributes', {}).get('url', u.get('id', '')))
 
-                # AbuseIPDB
+                # AbuseIPDB (FIXED: Display logic updated)
                 if ab_data: 
                      st.markdown(f"""
                      <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid #3b82f6; border-radius: 8px; padding: 10px; margin-top: 10px;">
@@ -556,7 +556,7 @@ with tab_tools:
                 st.markdown("##### 🤖 AI ANALYST VERDICT")
                 with st.container(): st.markdown(ai_report)
 
-# --- TAB 3: THREAT PROFILER ---
+# --- TAB 3: THREAT PROFILER (RESTORED CAMPAIGN RADAR) ---
 with tab_strat:
     st.markdown("#### 🏴‍☠️ ADVERSARY DOSSIER")
     threats = APTSheetCollector().fetch_threats()
@@ -593,10 +593,10 @@ with tab_strat:
 
     st.markdown("---")
     
-    # --- CAMPAIGN RADAR ---
+    # --- CAMPAIGN RADAR (RESTORED & IMPROVED) ---
     st.markdown("##### 📡 LATEST INTEL FEED (LIVE DB SEARCH)")
     
-    # Perform Search in DB for Actor (No time limit, top 5)
+    # Perform Search in DB for Actor (All history, top 5, INCLUDING DeepWeb)
     conn = sqlite3.connect(DB_NAME)
     keywords = actor.get('keywords', []) + [actor['name']]
     query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
@@ -609,35 +609,12 @@ with tab_strat:
         for _, row in df_hits.iterrows():
             try: dt = date_parser.parse(row['published_at']).strftime('%d/%m/%Y')
             except: dt = "?"
+            # Using the existing card style for consistency
             st.markdown(get_feed_card_html(row, dt), unsafe_allow_html=True)
     else:
         st.info(f"No specific mentions of {actor['name']} found in the collected feeds.")
         
-    # --- DEEP WEB SCAN BUTTON ---
-    st.markdown("---")
-    c_scan_txt, c_scan_btn = st.columns([3, 1])
-    with c_scan_txt:
-        st.caption("Missing critical intel? Initiate a Deep Web Scan to hunt for recent mentions of this actor across the open web.")
-    with c_scan_btn:
-        if st.button("⚡ DEEP SCAN & IMPORT", use_container_width=True):
-            scanner = DeepWebScanner()
-            proc = AIBatchProcessor(GROQ_KEY)
-            with st.status(f"Hunting for {actor['name']} artifacts...", expanded=True) as status:
-                status.write("🔍 Scanning Deep Web sources...")
-                raw_hits = scanner.scan_actor(actor['name'])
-                
-                if raw_hits:
-                    status.write(f"🧠 Analyzing {len(raw_hits)} findings with AI...")
-                    analyzed_hits = asyncio.run(proc.analyze_batch(raw_hits))
-                    
-                    status.write("💾 Saving intelligence to database...")
-                    count = save_reports(raw_hits, analyzed_hits)
-                    
-                    status.update(label=f"Scan Complete! Imported {count} new items.", state="complete", expanded=False)
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    status.update(label="No new intelligence found.", state="error", expanded=False)
+    st.caption(f"This feed automatically scans open sources for '{actor['name']}' every 15 minutes.")
 
 # --- TAB 4: MAP ---
 with tab_map:
