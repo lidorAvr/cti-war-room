@@ -273,13 +273,25 @@ with tab_tools:
                     
                     # 1. Metadata
                     with st.expander("🔍 Metadata & Tags", expanded=False):
+                        if attrs.get('country'):
+                            st.write(f"**Country:** {attrs.get('country')} 🌍")
+                        if attrs.get('as_owner'):
+                            st.write(f"**AS Owner:** {attrs.get('as_owner')} ({attrs.get('asn', '')})")
+
                         st.write(f"**Reputation:** {attrs.get('reputation', 0)}")
                         st.write(f"**Categories:** {', '.join(attrs.get('categories', {}).values())}")
                         st.write(f"**Tags:** {', '.join(attrs.get('tags', []))}")
-                        st.write(f"**Created:** {attrs.get('creation_date', 'N/A')}")
+                        if attrs.get('creation_date'):
+                            st.write(f"**Created:** {datetime.datetime.fromtimestamp(attrs['creation_date']).strftime('%Y-%m-%d')}")
                     
                     # 2. Relations (Network)
                     with st.expander("🕸️ Network Relations", expanded=False):
+                         # Resolutions (Passive DNS)
+                         if rels.get('resolutions'):
+                             st.write("**Passive DNS (Domains on this IP):**")
+                             for r in rels['resolutions'].get('data', [])[:8]:
+                                 st.code(r.get('attributes', {}).get('host_name', 'Unknown'))
+                                 
                          if rels.get('contacted_urls'):
                              st.write("**Contacted URLs:**")
                              for u in rels['contacted_urls'].get('data', [])[:5]:
