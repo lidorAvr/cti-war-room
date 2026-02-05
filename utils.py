@@ -158,7 +158,8 @@ class AIBatchProcessor:
         1. IF Source is 'INCD' (Israel National Cyber Directorate):
            - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
         2. IF Source is 'Malpedia':
-           - SUMMARY: Synthesize the technical description into 2 clear sentences. Explain what this malware family DOES.
+           - INPUT is RAW TEXT scraped from a report.
+           - SUMMARY: Synthesize the raw text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets. Do NOT just copy the text.
            - SEVERITY: If 'APT' or 'Ransomware' -> 'High' or 'Critical'.
         3. GENERAL:
            - TITLE: Short, informative (Max 8 words).
@@ -170,8 +171,17 @@ class AIBatchProcessor:
         
         for i in range(0, len(items), chunk_size):
             chunk = items[i:i+chunk_size]
-            # Use a slightly larger context window for the scraped content
-            batch_text = "\n".join([f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {x['summary'][:800]}" for idx, x in enumerate(chunk)])
+            
+            # --- FIX: SMART CONTEXT WINDOW ---
+            # If source is Malpedia, we give the AI much more text (2500 chars) to work with
+            # If it's regular RSS, 400 chars is enough.
+            batch_lines = []
+            for idx, x in enumerate(chunk):
+                limit = 2500 if x['source'] == 'Malpedia' else 400
+                clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
+                batch_lines.append(f"ID:{idx}|Src:{x['source']}|Original:{x['title']} - {clean_sum}")
+
+            batch_text = "\n".join(batch_lines)
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
@@ -188,6 +198,7 @@ class AIBatchProcessor:
                 final_cat = ai.get('category', 'News')
                 
                 if chunk[j]['source'] == 'Malpedia':
+                    # Fallback logic if AI misses severity
                     txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
                     if 'apt' in txt or 'ransomware' in txt or 'wiper' in txt:
                         final_sev = 'High'
@@ -412,44 +423,41 @@ class CTICollector:
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
                         
-                        # --- 🚨 MALPEDIA "DOUBLE HOP" LOGIC ---
+                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER ---
                         if source['name'] == 'Malpedia':
                             try:
-                                # Hop 1: Get the Malpedia 'wrapper' page
+                                # Hop 1: Malpedia Profile Page
                                 async with session.get(entry.link, headers=HEADERS, timeout=10) as mal_resp:
                                     if mal_resp.status == 200:
                                         mal_html = await mal_resp.text()
                                         mal_soup = BeautifulSoup(mal_html, 'html.parser')
                                         
-                                        # Hop 2: Find the real external link (usually "Open article" or similar)
+                                        # Hop 2: Find external "Open article" link
                                         target_link = None
-                                        # Look for links containing keywords
                                         for a in mal_soup.find_all('a', href=True):
                                             link_text = a.get_text().lower()
                                             if "open article" in link_text or "read report" in link_text or "original source" in link_text:
                                                 target_link = a['href']
                                                 break
                                         
-                                        # Hop 3: Fetch the REAL content
+                                        # Hop 3: Fetch & Scrape REAL Content
                                         if target_link:
                                             async with session.get(target_link, headers=HEADERS, timeout=10) as ext_resp:
-                                                # Ensure it's HTML (skip PDFs to avoid crash)
                                                 if ext_resp.status == 200 and "text/html" in ext_resp.headers.get("Content-Type", ""):
                                                     ext_html = await ext_resp.text()
                                                     ext_soup = BeautifulSoup(ext_html, 'html.parser')
                                                     
-                                                    # Clean typical garbage
-                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "aside", "form"]):
+                                                    # Cleanup
+                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "form"]):
                                                         noise.decompose()
                                                     
-                                                    # Grab paragraphs
+                                                    # Extract Text (First 3000 chars)
                                                     paras = ext_soup.find_all('p')
-                                                    # Take first ~2000 chars which usually contain the executive summary
                                                     scraped_text = ' '.join([p.get_text().strip() for p in paras if len(p.get_text()) > 20])
                                                     
                                                     if len(scraped_text) > 100:
-                                                        sum_text = f"[Source Scraped] {scraped_text[:1500]}"
-                            except Exception: pass # If deep fetch fails, fallback to original summary
+                                                        sum_text = f"[Source Scraped] {scraped_text[:3000]}"
+                            except Exception: pass 
 
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
@@ -520,3 +528,4 @@ def save_reports(raw, analyzed):
     conn.commit()
     conn.close()
     return cnt
+    
