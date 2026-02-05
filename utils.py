@@ -59,8 +59,9 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
-    # Logic: Keep standard feeds for 48h, but keep DeepWeb/INCD longer for history tabs
+    # CLEANUP: Keep items fresh
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
+    # Delete old RSS items, but keep DeepWeb/INCD items longer for history tracking
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
     conn.close()
@@ -77,7 +78,7 @@ def _is_url_processed(url):
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
-    def scan_actor(self, actor_name, limit=3):
+    def scan_actor(self, actor_name, limit=2):
         """Scans for Actor Activity with Date Parsing"""
         results = []
         now = datetime.datetime.now(IL_TZ)
@@ -94,7 +95,7 @@ class DeepWebScanner:
                     body = res.get('body', '')
                     title = res.get('title', '')
                     
-                    # Try to find a date in the text, otherwise default to Now
+                    # Try to extract date from text
                     pub_date = now
                     try:
                         snippet_start = body[:100]
@@ -202,7 +203,8 @@ class AIBatchProcessor:
         Task: Analyze cyber news items.
         OUTPUT RULES:
         1. IF Source is 'INCD' -> Hebrew.
-        2. GENERAL -> JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
+        2. IF DeepWeb/Malpedia -> Check for OLD dates in text. If old, prefix title with [ARCHIVE].
+        3. GENERAL -> JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "..."}]}
         """
         
         for i in range(0, len(items), chunk_size):
@@ -230,14 +232,12 @@ class AIBatchProcessor:
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        # 1. Extract Technical Data
         lean_data = self._extract_key_intel(data)
         
-        # 2. RUN ACTIVE DEEP WEB SCAN (OSINT) - THE FIX
+        # ACTIVE OSINT SCAN
         scanner = DeepWebScanner()
         osint_hits = scanner.scan_ioc(ioc, limit=4)
         
-        # 3. Construct Smart Prompt
         prompt = f"""
         You are a Senior Cyber Threat Intelligence Analyst.
         Your goal: Provide an accurate operational verdict for this IOC by CROSS-REFERENCING Technical Data with Open Source Intelligence (OSINT).
@@ -267,7 +267,7 @@ class AIBatchProcessor:
         ### 🛡️ Operational Verdict
         * **Verdict**: [Malicious / Suspicious / Clean]
         * **Confidence**: [High / Medium / Low]
-        * **Reasoning**: <Explain using the OSINT findings. E.g., "Identified as official site of X via web search, confirmed by 0 VT detections.">
+        * **Reasoning**: <Explain using the OSINT findings.>
 
         ### 🏢 Enterprise Defense Playbook
         * **Action**: <Block / Monitor / Whitelist>
@@ -337,7 +337,7 @@ class AnalystToolkit:
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell", "keywords": ["muddywater"], "mitre": "T1059", "malpedia": "#"},
+            {"name": "MuddyWater", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "PowerShell, ScreenConnect", "keywords": ["muddywater"], "mitre": "T1059", "malpedia": "#"},
             {"name": "OilRig (APT34)", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "DNS Tunneling", "keywords": ["oilrig"], "mitre": "T1071", "malpedia": "#"},
             {"name": "Imperial Kitten", "origin": "Iran", "target": "Israel", "type": "Espionage", "tools": "IMAPLoader", "keywords": ["imperial kitten"], "mitre": "T1566", "malpedia": "#"},
             {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Destructive", "tools": "Wipers", "keywords": ["agonizing serpens"], "mitre": "T1485", "malpedia": "#"}
@@ -355,8 +355,6 @@ class CTICollector:
     ]
 
     async def fetch_item(self, session, source):
-        # ... (fetch logic same as before, simplified here for brevity but assuming fully implemented) ...
-        # NOTE: In production, include the full fetch_item logic provided in previous turns.
         items = []
         try:
             async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
@@ -364,11 +362,39 @@ class CTICollector:
                 content = await resp.text()
                 now = datetime.datetime.now(IL_TZ)
                 
+                is_incd = source['name'] == 'INCD'
+                
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    for entry in feed.entries[:10]:
-                        items.append({"title": entry.title, "url": entry.link, "date": now.isoformat(), "source": source['name'], "summary": "RSS Item"})
-                # (Include JSON/Telegram parsers here)
+                    entries = feed.entries[:4] if is_incd else feed.entries[:10]
+                    for entry in entries:
+                        pub_date = now
+                        if hasattr(entry, 'published_parsed') and entry.published_parsed:
+                            pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                        
+                        if not is_incd and (now - pub_date).total_seconds() > (48 * 3600): continue
+                        if _is_url_processed(entry.link): continue
+                        
+                        sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
+                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
+
+                elif source['type'] == 'json':
+                     data = json.loads(content)
+                     for v in data.get('vulnerabilities', [])[:10]:
+                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
+                         if _is_url_processed(url): continue
+                         items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": now.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
+
+                elif source['type'] == 'telegram':
+                    soup = BeautifulSoup(content, 'html.parser')
+                    msgs = soup.find_all('div', class_='tgme_widget_message_wrap')[-5:]
+                    for msg in msgs:
+                        try:
+                            txt = msg.find('div', class_='tgme_widget_message_text').get_text()
+                            link = msg.find('a', class_='tgme_widget_message_date')['href']
+                            if not _is_url_processed(link):
+                                items.append({"title": "INCD Alert", "url": link, "date": now.isoformat(), "source": "INCD", "summary": txt[:800]})
+                        except: pass
         except: pass
         return items
 
@@ -379,14 +405,11 @@ class CTICollector:
             results = await asyncio.gather(*tasks)
             all_items = [i for sub in results for i in sub]
             
-            # 2. AUTOMATED DEEP WEB SCAN FOR ALL ACTORS
-            # Runs automatically on every refresh!
+            # 2. AUTOMATED DEEP WEB SCAN
             scanner = DeepWebScanner()
             actors = APTSheetCollector().fetch_threats()
             for actor in actors:
-                # Limit to 2 results per actor per run
-                actor_hits = scanner.scan_actor(actor['name'], limit=2) 
-                if actor_hits:
-                    all_items.extend(actor_hits)
+                hits = scanner.scan_actor(actor['name'], limit=2) 
+                if hits: all_items.extend(hits)
             
             return all_items
