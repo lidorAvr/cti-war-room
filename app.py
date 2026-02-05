@@ -422,9 +422,9 @@ tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ IN
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    # STRICT FILTER: Show only last 48 hours for Live Feed
+    # STRICT FILTER: Last 48h AND EXCLUDE DeepWeb from main feed
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 15", conn)
-    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
+    df_others = pd.read_sql_query("SELECT * FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
     df_final = pd.concat([df_incd, df_others]).sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
@@ -596,7 +596,7 @@ with tab_strat:
     # --- CAMPAIGN RADAR (RESTORED & IMPROVED) ---
     st.markdown("##### 📡 LATEST INTEL FEED (LIVE DB SEARCH)")
     
-    # Perform Search in DB for Actor (All history, top 5)
+    # Perform Search in DB for Actor (All history, top 5, INCLUDING DeepWeb)
     conn = sqlite3.connect(DB_NAME)
     keywords = actor.get('keywords', []) + [actor['name']]
     query_parts = [f"title LIKE '%{k}%' OR summary LIKE '%{k}%'" for k in keywords]
