@@ -6,8 +6,10 @@ import datetime
 import pytz
 import time
 import textwrap
+import streamlit.components.v1 as components  # FIX: Added missing import
 from utils import *
 from dateutil import parser as date_parser
+from streamlit_autorefresh import st_autorefresh # FIX: Added for auto-refresh
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
@@ -318,12 +320,16 @@ st.markdown("""
 # --- INITIALIZATION ---
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
-REFRESH_MINUTES = 10
+REFRESH_MINUTES = 15 # FIX: Changed to 15 minutes
 
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
+
+# --- AUTO-REFRESH COMPONENT ---
+# FIX: Restored auto-refresh logic
+st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
 
 # --- UPDATE LOGIC ---
 async def perform_update():
@@ -341,6 +347,7 @@ if "last_run" not in st.session_state:
 else:
     now = datetime.datetime.now(IL_TZ)
     last_run = st.session_state["last_run"]
+    # We still keep this check for manual re-runs or page loads that happen after the interval
     if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
         asyncio.run(perform_update())
         st.session_state["last_run"] = now
@@ -384,11 +391,16 @@ c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' A
 count_crit = c.fetchone()[0]
 conn.close()
 
+# FIX: Added Last Update / Next Update Display
+last_run_display = st.session_state["last_run"]
+next_run_display = last_run_display + datetime.timedelta(minutes=REFRESH_MINUTES)
+
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("INTEL REPORTS (24H)", count_24h)
 m2.metric("CRITICAL THREATS", count_crit, delta=count_crit, delta_color="inverse")
-m3.metric("ACTIVE FEEDS", "7", "ALL SYSTEMS GO")
-m4.metric("UPTIME", "99.9%", "STABLE")
+# FIX: Changed static metrics to dynamic update timers
+m3.metric("LAST UPDATE", last_run_display.strftime('%H:%M'), "IL Time")
+m4.metric("NEXT UPDATE", next_run_display.strftime('%H:%M'), f"in {REFRESH_MINUTES}m")
 
 st.markdown("---")
 
@@ -542,6 +554,7 @@ with tab_strat:
 # --- TAB 4: MAP ---
 with tab_map:
     st.markdown("#### 🌍 GLOBAL CYBER ATTACK MAP")
+    # FIX: This now works because 'components' is imported
     components.iframe("https://threatmap.checkpoint.com/", height=700)
 
 # --- FOOTER ---
