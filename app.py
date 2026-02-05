@@ -7,6 +7,7 @@ import pytz
 import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
+from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI War Room", layout="wide", page_icon="🛡️")
@@ -79,23 +80,42 @@ init_db()
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 REFRESH_MINUTES = 15
 
+# --- AUTO-REFRESH COMPONENT (TRIGGERS RERUN EVERY X MIN) ---
+# This forces the script to rerun every 15 minutes, allowing us to check if update is needed
+st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
+
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-# --- AUTO-LOAD & UPDATE LOGIC ---
+# --- UPDATE LOGIC FUNCTION ---
+async def perform_update():
+    col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
+    raw = await col.get_all_data()
+    if raw:
+        analyzed = await proc.analyze_batch(raw)
+        return save_reports(raw, analyzed)
+    return 0
+
+# --- AUTO-LOAD & UPDATE CHECK ---
 if "last_run" not in st.session_state:
+    # First Load
     st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
-    # First time load
     with st.spinner("🚀 Initializing CTI Feeds..."):
-        async def startup_update():
-            col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-            raw = await col.get_all_data()
-            if raw:
-                analyzed = await proc.analyze_batch(raw)
-                save_reports(raw, analyzed)
-        asyncio.run(startup_update())
+        asyncio.run(perform_update())
+
+else:
+    # Check if interval passed
+    now = datetime.datetime.now(IL_TZ)
+    last_run = st.session_state["last_run"]
+    if (now - last_run).total_seconds() > (REFRESH_MINUTES * 60):
+        # Time to update!
+        with st.spinner("🔄 Auto-updating feeds..."):
+            asyncio.run(perform_update())
+            st.session_state["last_run"] = now
+            st.toast("Feeds updated automatically!", icon="🔄")
+
 
 # --- SIDEBAR ---
 with st.sidebar:
@@ -107,18 +127,7 @@ with st.sidebar:
     
     if st.button("🚀 Force Global Update", type="primary"):
         with st.status("Fetching New Intelligence...", expanded=True):
-            async def run_update():
-                col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-                st.write("Connecting to Sources...")
-                raw = await col.get_all_data()
-                if not raw: 
-                    st.warning("No new data found.")
-                    return 0
-                st.write(f"Analyzing {len(raw)} items...")
-                analyzed = await proc.analyze_batch(raw)
-                cnt = save_reports(raw, analyzed)
-                return cnt
-            count = asyncio.run(run_update())
+            count = asyncio.run(perform_update())
             st.session_state["last_run"] = datetime.datetime.now(IL_TZ)
             st.success(f"Discovered {count} new items.")
             st.rerun()
@@ -410,7 +419,6 @@ with tab_strat:
                     
         st.write("")
         st.markdown("### 📰 Recent Activity (Simulated)")
-        # In a real app, query the SQL DB here for title LIKE %muddywater%
         st.caption("Latest reports linked to this actor:")
         st.markdown(f"""
         * 12/2025: [{actor_data['name']} New Phishing Campaign targeting Finance](https://www.gov.il/he/departments/topics/cyber-attack-network)
