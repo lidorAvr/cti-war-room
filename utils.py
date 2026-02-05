@@ -114,7 +114,6 @@ class AIBatchProcessor:
             return data
 
     def _extract_key_intel(self, raw_data):
-        """Creates a SUPER lean summary for AI to save tokens and prevent 413 Errors"""
         summary = {}
         if 'virustotal' in raw_data and isinstance(raw_data['virustotal'], dict):
             vt = raw_data['virustotal']
@@ -316,7 +315,7 @@ class AnalystToolkit:
 
 class APTSheetCollector:
     def fetch_threats(self): 
-        # Expanded with links and better context
+        # Added 'keywords' for automatic DB hunting
         return [
             {
                 "name": "MuddyWater", 
@@ -324,10 +323,10 @@ class APTSheetCollector:
                 "target": "Israel", 
                 "type": "Espionage", 
                 "tools": "PowerShell, ScreenConnect, Ligolo", 
+                "keywords": ["muddywater", "static_kitten", "mercury", "ligolo", "screenconnect"],
                 "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure. Known for social engineering.", 
                 "mitre": "T1059, T1105, T1566",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/muddywater",
-                "et_tags": "muddywater, static_kitten, mercury"
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/muddywater"
             },
             {
                 "name": "OilRig (APT34)", 
@@ -335,10 +334,10 @@ class APTSheetCollector:
                 "target": "Israel / Middle East", 
                 "type": "Espionage", 
                 "tools": "DNS Tunneling, SideTwist, Karkoff", 
+                "keywords": ["oilrig", "apt34", "helix_kitten", "cobalt_gypsy", "sidetwist", "karkoff"],
                 "desc": "Sophisticated espionage targeting critical sectors (Finance, Energy, Gov).", 
                 "mitre": "T1071.004, T1048, T1132",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/oilrig",
-                "et_tags": "oilrig, helix_kitten, cobalt_gypsy"
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/oilrig"
             },
             {
                 "name": "Agonizing Serpens", 
@@ -346,10 +345,10 @@ class APTSheetCollector:
                 "target": "Israel", 
                 "type": "Destructive", 
                 "tools": "Wipers (BiBiWiper), SQL Injection", 
+                "keywords": ["agonizing serpens", "agrius", "bibiwiper", "bibi-linux", "moneybird"],
                 "desc": "Destructive attacks masquerading as ransomware. Targeted Israeli education and tech sectors.", 
                 "mitre": "T1485, T1486, T1190",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/agonizing_serpens",
-                "et_tags": "agonizing_serpens, agrius"
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/agonizing_serpens"
             },
             {
                 "name": "Imperial Kitten", 
@@ -357,10 +356,10 @@ class APTSheetCollector:
                 "target": "Israel", 
                 "type": "Espionage/Cyber-Enabled Influence", 
                 "tools": "IMAPLoader, Standard Python Backdoors", 
+                "keywords": ["imperial kitten", "tortoise shell", "imaploader", "yellow liderc"],
                 "desc": "IRGC affiliated. Focus on transportation, logistics, and maritime.", 
                 "mitre": "T1566, T1071, T1021",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/imperial_kitten",
-                "et_tags": "imperial_kitten, tortoise_shell"
+                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/imperial_kitten"
             }
         ]
 
