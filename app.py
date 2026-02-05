@@ -245,13 +245,13 @@ with tab_tools:
             
             with st.status("Scanning External Sources...", expanded=True):
                 st.write("Querying VirusTotal...")
-                vt = tl.query_virustotal(ioc_input, ioc_type)
-                results['virustotal'] = vt if vt else "No Data"
+                vt_data = tl.query_virustotal(ioc_input, ioc_type)
+                results['virustotal'] = vt_data if vt_data else "No Data"
                 
                 if ioc_type in ["domain", "url", "ip"]:
                     st.write("Querying URLScan.io...")
-                    us = tl.query_urlscan(ioc_input)
-                    results['urlscan'] = us if us else "No Data"
+                    us_data = tl.query_urlscan(ioc_input)
+                    results['urlscan'] = us_data if us_data else "No Data"
                 
                 if ioc_type == "ip":
                     st.write("Querying AbuseIPDB...")
@@ -262,23 +262,31 @@ with tab_tools:
             with c1:
                 st.markdown("### 🦠 VirusTotal")
                 if isinstance(results.get('virustotal'), dict):
-                    stats = results['virustotal'].get('last_analysis_stats', {})
+                    # NOTE: VT Data now includes 'attributes' and 'relationships' keys at root
+                    # We need to access 'attributes' for the stats
+                    attrs = results['virustotal'].get('attributes', {})
+                    stats = attrs.get('last_analysis_stats', {})
                     malicious = stats.get('malicious', 0)
                     color = "red" if malicious > 0 else "green"
                     st.markdown(f":{color}[**Detections: {malicious}**]")
-                    if 'last_analysis_stats' in results['virustotal']:
-                         st.json(results['virustotal']['last_analysis_stats'])
+                    if stats:
+                         st.json(stats)
                     else:
-                         # For URL we might get different structure or just analysis ID if not scanned before
-                         st.write("Analysis Data Retrieved")
+                         st.write("See Full Report")
                 else: st.write("N/A")
                 
             with c2:
                 st.markdown("### 🌐 URLScan")
                 if isinstance(results.get('urlscan'), dict):
+                    # NOTE: Full Result JSON structure is different from Search Summary
+                    # Verdict is often at top level or task
                     verdict = results['urlscan'].get('verdict', {}).get('overall', 'Unknown')
                     st.write(f"Verdict: **{verdict}**")
-                    if results['urlscan'].get('screenshot'): st.image(results['urlscan']['screenshot'])
+                    
+                    # Screenshot in full result is usually in task.screenshotURL
+                    task = results['urlscan'].get('task', {})
+                    screen_url = task.get('screenshotURL')
+                    if screen_url: st.image(screen_url)
                 else: st.write("N/A")
                 
             with c3:
