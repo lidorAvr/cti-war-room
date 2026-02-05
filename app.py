@@ -12,137 +12,138 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- UI STYLING (HIGH CONTRAST CYBER MODE) ---
+# --- UI STYLING (LARGE TEXT & HIGH CONTRAST) ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Heebo:wght@300;400;700&display=swap');
     
-    /* GLOBAL THEME & HIGH CONTRAST TEXT */
-    .stApp {
-        background-color: #0d1117;
+    /* 1. GLOBAL TEXT SIZE INCREASE (+2 Sizes) */
+    html, body, [class*="css"] {
         font-family: 'Heebo', sans-serif;
+        font-size: 20px !important; /* BUMPING BASE SIZE */
     }
     
-    /* Force all main text to be bright off-white */
     p, .stMarkdown, span, div {
-        color: #e6edf3; 
+        color: #e6edf3;
+        line-height: 1.6;
     }
 
-    h1, h2, h3 { font-family: 'JetBrains Mono', monospace; color: #00f2ff !important; text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); }
-    h4, h5, h6 { color: #d0d7de !important; font-weight: 700; }
+    /* Headers Scale */
+    h1 { font-size: 3rem !important; }
+    h2 { font-size: 2.2rem !important; }
+    h3 { font-size: 1.8rem !important; }
     
-    /* CUSTOM SCROLLBAR */
-    ::-webkit-scrollbar { width: 10px; }
-    ::-webkit-scrollbar-track { background: #0e1117; }
-    ::-webkit-scrollbar-thumb { background: #333; border-radius: 5px; }
-    ::-webkit-scrollbar-thumb:hover { background: #00f2ff; }
-
-    /* METRIC CARDS */
-    div[data-testid="stMetricValue"] {
+    h1, h2, h3 { 
+        font-family: 'JetBrains Mono', monospace; 
+        color: #00f2ff !important; 
+        text-shadow: 0 0 10px rgba(0, 242, 255, 0.3); 
+    }
+    
+    /* 2. BUTTON STYLING (CYBER OUTLINE STYLE) */
+    div.stButton > button {
+        background-color: transparent !important;
+        border: 2px solid #00f2ff !important;
         color: #00f2ff !important;
+        border-radius: 8px;
         font-family: 'JetBrains Mono', monospace;
-        text-shadow: 0 0 5px rgba(0, 242, 255, 0.5);
+        font-size: 1.1rem !important;
+        font-weight: bold;
+        transition: all 0.3s ease;
+        padding: 0.5rem 1rem;
+    }
+    
+    div.stButton > button:hover {
+        background-color: #00f2ff !important;
+        color: #000 !important;
+        box-shadow: 0 0 15px rgba(0, 242, 255, 0.7);
+    }
+
+    /* Primary Button override (Red/Orange actions) */
+    div.stButton > button[kind="primary"] {
+        border-color: #ff7b72 !important;
+        color: #ff7b72 !important;
+    }
+    div.stButton > button[kind="primary"]:hover {
+        background-color: #ff7b72 !important;
+        color: white !important;
+        box-shadow: 0 0 15px rgba(255, 123, 114, 0.7);
+    }
+
+    /* 3. RADIO BUTTONS / TAGS - BETTER VISIBILITY */
+    div[role="radiogroup"] label {
+        background-color: #161b22 !important;
+        border: 1px solid #58a6ff !important; /* Blue border for visibility */
+        color: #a5d6ff !important; /* Light blue text */
+        padding: 10px 20px !important; /* Larger touch target */
+        font-size: 1.1rem !important;
+        border-radius: 8px;
+    }
+    
+    div[role="radiogroup"] label[data-checked="true"] {
+        background-color: #1f6feb !important;
+        border-color: #1f6feb !important;
+        color: white !important;
+        box-shadow: 0 0 15px rgba(31, 111, 235, 0.5);
+    }
+
+    /* 4. INPUT FIELDS (DARK MODE) */
+    input[type="text"] {
+        background-color: #0d1117 !important;
+        color: #00f2ff !important;
+        border: 1px solid #30363d !important;
+        font-size: 1.2rem !important;
+        padding: 10px;
+    }
+
+    /* 5. CARDS & METRICS */
+    .stApp { background-color: #0d1117; }
+    
+    .report-card { 
+        background-color: #161b22; 
+        padding: 22px; 
+        border-radius: 10px; 
+        border: 1px solid #30363d;
+        margin-bottom: 20px; 
+    }
+    
+    /* Metrics Text Size */
+    div[data-testid="stMetricValue"] {
+        font-size: 2.5rem !important;
+        color: #00f2ff !important;
     }
     div[data-testid="stMetricLabel"] {
+        font-size: 1.1rem !important;
         color: #8b949e !important;
     }
 
-    /* REPORT CARDS (General) */
-    .report-card { 
-        background-color: #161b22; 
-        padding: 18px; 
-        border-radius: 8px; 
-        border: 1px solid #30363d;
-        margin-bottom: 15px; 
-        transition: transform 0.2s, box-shadow 0.2s;
-    }
-    .report-card:hover {
-        border-color: #58a6ff;
-        box-shadow: 0 4px 20px rgba(88, 166, 255, 0.15);
-    }
-
-    /* INCD CARDS (Hebrew / RTL) */
+    /* INCD/Global Card Styles */
     .card-incd {
-        border-right: 4px solid #2f81f7; /* Blue accent */
-        direction: rtl;
-        text-align: right;
+        border-right: 5px solid #2f81f7;
+        direction: rtl; text-align: right;
         background: linear-gradient(90deg, #161b22 0%, #1f242c 100%);
     }
-    .incd-title { color: #a5d6ff !important; font-weight: bold; font-size: 1.15rem; margin-bottom: 5px; }
+    .incd-title { color: #a5d6ff !important; font-weight: bold; font-size: 1.4rem; margin-bottom: 8px; }
     
-    /* GLOBAL CARDS (English / LTR) */
     .card-global {
-        border-left: 4px solid #3fb950; /* Green accent */
-        direction: ltr;
-        text-align: left;
+        border-left: 5px solid #3fb950;
+        direction: ltr; text-align: left;
     }
-    .global-title { color: #7ee787 !important; font-weight: bold; font-size: 1.15rem; margin-bottom: 5px; }
-    
-    /* CARD SUMMARY TEXT FIX */
-    .card-summary {
-        color: #ffffff !important;
-        font-size: 1rem;
-        line-height: 1.6;
-        font-weight: 400;
-        opacity: 0.95;
-    }
+    .global-title { color: #7ee787 !important; font-weight: bold; font-size: 1.4rem; margin-bottom: 8px; }
 
-    /* SEVERITY TAGS & ANIMATION */
+    /* Severity Tags */
     .sev-tag {
-        display: inline-block; padding: 3px 10px; border-radius: 4px; 
-        font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; font-weight: bold;
-        margin: 0 5px; letter-spacing: 0.5px;
+        padding: 4px 12px; border-radius: 4px; 
+        font-size: 0.9rem; font-weight: bold;
+        margin: 0 6px; letter-spacing: 1px;
     }
-    
-    .sev-critical { 
-        background: rgba(255, 123, 114, 0.15); color: #ff7b72 !important; border: 1px solid #ff7b72;
-        animation: pulse 2s infinite;
-    }
-    
-    @keyframes pulse {
-        0% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0.4); }
-        70% { box-shadow: 0 0 0 10px rgba(255, 123, 114, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0); }
-    }
-
+    .sev-critical { background: rgba(255, 123, 114, 0.15); color: #ff7b72 !important; border: 1px solid #ff7b72; animation: pulse 2s infinite; }
     .sev-high { background: rgba(210, 153, 34, 0.15); color: #d29922 !important; border: 1px solid #d29922; }
     .sev-med { background: rgba(88, 166, 255, 0.15); color: #58a6ff !important; border: 1px solid #58a6ff; }
     .sev-info { background: rgba(139, 148, 158, 0.15); color: #8b949e !important; border: 1px solid #30363d; }
 
-    /* LINKS */
-    a { text-decoration: none; color: #58a6ff !important; transition: color 0.2s; font-weight: bold; }
-    a:hover { color: #a5d6ff !important; text-decoration: underline; }
+    @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(255, 123, 114, 0); } 100% { box-shadow: 0 0 0 0 rgba(255, 123, 114, 0); } }
 
-    /* RADIO BUTTONS AS TAGS - IMPROVED VISIBILITY */
-    div[role="radiogroup"] { display: flex; gap: 10px; flex-wrap: wrap; }
-    div[role="radiogroup"] label {
-        background-color: #21262d !important; /* Lighter grey for better contrast */
-        border: 1px solid #30363d;
-        color: #ffffff !important; /* Pure white text */
-        border-radius: 20px;
-        padding: 6px 16px;
-        font-size: 0.95rem;
-        font-weight: 500;
-        transition: all 0.2s;
-    }
-    div[role="radiogroup"] label[data-checked="true"] {
-        background-color: #1f6feb !important;
-        border-color: #1f6feb;
-        color: white !important;
-        box-shadow: 0 0 15px rgba(31, 111, 235, 0.6);
-        font-weight: bold;
-    }
-    div[role="radiogroup"] label:hover {
-        border-color: #8b949e;
-        background-color: #30363d !important;
-    }
-    
-    /* INPUT FIELDS VISIBILITY */
-    input[type="text"] {
-        background-color: #0d1117 !important;
-        color: #ffffff !important;
-        border: 1px solid #30363d !important;
-    }
+    a { font-size: 1.1rem; font-weight: bold; color: #58a6ff !important; text-decoration: none; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -150,8 +151,6 @@ st.markdown("""
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 REFRESH_MINUTES = 10
-
-# --- AUTO-REFRESH COMPONENT ---
 st_autorefresh(interval=REFRESH_MINUTES * 60 * 1000, key="data_refresh")
 
 GROQ_KEY = st.secrets.get("groq_key", "")
@@ -182,16 +181,14 @@ else:
             asyncio.run(perform_update())
             st.session_state["last_run"] = now
 
-# --- SIDEBAR (COMMAND CENTER) ---
+# --- SIDEBAR ---
 with st.sidebar:
-    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=70)
+    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=80)
     st.title("CTI WAR ROOM")
-    st.markdown("`v2.1 | CLASSIFIED`")
+    st.markdown("`v3.0 | CLASSIFIED`")
     
     st.markdown("---")
     st.markdown("### 🛰️ System Status")
-    
-    # Live Status Indicators
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
     col_s1, col_s2 = st.columns([1, 4])
     with col_s1: st.markdown("🟢" if ok else "🔴")
@@ -212,7 +209,6 @@ with st.sidebar:
 # --- MAIN LAYOUT ---
 st.title("📟 OPERATIONAL DASHBOARD")
 
-# Top Metrics
 conn = sqlite3.connect(DB_NAME)
 c = conn.cursor()
 c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-24 hours')")
@@ -229,7 +225,6 @@ with m4: st.metric("System Uptime", "99.9%", "Stable")
 
 st.markdown("---")
 
-# Tabs
 tab_feed, tab_tools, tab_strat, tab_map = st.tabs(["🔴 LIVE FEED", "🛠️ INVESTIGATION LAB", "🧠 THREAT PROFILER", "🌍 GLOBAL HEATMAP"])
 
 # --- TAB 1: LIVE FEED ---
@@ -244,7 +239,6 @@ with tab_feed:
     if df_final.empty:
         st.info("No active threats found. Systems Clear.")
     else:
-        # Filters
         c_filter1, c_filter2 = st.columns([1, 1])
         with c_filter1:
             st.markdown("##### 🕵️ Data Source")
@@ -253,7 +247,6 @@ with tab_feed:
             st.markdown("##### 🚨 Severity Level")
             filter_sev = st.radio("Severity", ["All Levels", "🔥 Critical/High", "⚠️ Medium", "ℹ️ Info/Low"], horizontal=True, label_visibility="collapsed")
 
-        # Apply Logic
         df_display = df_final.copy()
         if "INCD" in filter_source: df_display = df_display[df_display['source'] == 'INCD']
         elif "Global" in filter_source: df_display = df_display[df_display['source'] != 'INCD']
@@ -264,9 +257,7 @@ with tab_feed:
 
         st.write("")
         
-        # Render Feed
         for _, row in df_display.iterrows():
-            # Date Parsing
             try:
                 dt = date_parser.parse(row['published_at'])
                 if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
@@ -274,7 +265,6 @@ with tab_feed:
                 date_str = dt.strftime('%H:%M | %d/%m')
             except: date_str = "--:--"
 
-            # Classes
             is_incd = row['source'] == "INCD"
             card_class = "card-incd" if is_incd else "card-global"
             title_class = "incd-title" if is_incd else "global-title"
@@ -285,26 +275,24 @@ with tab_feed:
             elif "low" in sev_lower or "info" in sev_lower: sev_class = "sev-info"
             else: sev_class = "sev-high"
 
-            # Content Logic
             source_badge = "🇮🇱 מ. הסייבר" if is_incd else f"📡 {row['source']}"
             
-            # HTML Card
             st.markdown(f"""
             <div class="report-card {card_class}">
-                <div style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+                <div style="margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
                     <div>
                         <span class="sev-tag {sev_class}">{row['severity'].upper()}</span>
-                        <span style="font-size: 0.8rem; color: #8b949e; margin: 0 5px;">{row['category']}</span>
+                        <span style="font-size: 1rem; color: #8b949e; margin: 0 8px;">{row['category']}</span>
                     </div>
-                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: #8b949e;">
+                    <div style="font-family: 'JetBrains Mono', monospace; font-size: 1rem; color: #8b949e;">
                         {date_str} • <b>{source_badge}</b>
                     </div>
                 </div>
                 <div class="{title_class}">{row['title']}</div>
-                <div class="card-summary">
+                <div style="margin-top: 8px; color: #e6edf3; font-size: 1.15rem; line-height: 1.6;">
                     {row['summary']}
                 </div>
-                <div style="margin-top: 12px; text-align: {'left' if not is_incd else 'right'};">
+                <div style="margin-top: 15px; text-align: {'left' if not is_incd else 'right'};">
                     <a href="{row['url']}" target="_blank">🔗 SOURCE LINK</a>
                 </div>
             </div>
@@ -318,7 +306,8 @@ with tab_tools:
     with col_input:
         ioc_input = st.text_input("IOC Input", placeholder="IP, Domain, Hash, or URL...", label_visibility="collapsed")
     with col_action:
-        btn_scan = st.button("🔍 INITIATE SCAN", use_container_width=True, type="primary")
+        # Custom Primary Button
+        btn_scan = st.button("🔍 INITIATE SCAN", type="primary", use_container_width=True)
 
     if btn_scan and ioc_input:
         ioc_type = identify_ioc_type(ioc_input)
@@ -337,9 +326,7 @@ with tab_tools:
                 proc = AIBatchProcessor(GROQ_KEY)
                 ai_report = asyncio.run(proc.analyze_single_ioc(ioc_input, ioc_type, results_context))
 
-            # Display Results
             c_res, c_ai = st.columns([1, 1])
-            
             with c_res:
                 st.markdown("### 📊 Raw Telemetry")
                 with st.expander("🦠 VirusTotal Data", expanded=True):
@@ -363,7 +350,7 @@ with tab_tools:
             with c_ai:
                 st.markdown("### 🤖 AI Analyst Verdict")
                 st.markdown(f"""
-                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 20px; border-radius: 8px; font-family: 'Heebo'; color: #e6edf3;">
+                <div style="background-color: #0d1117; border: 1px solid #30363d; padding: 25px; border-radius: 8px; font-family: 'Heebo'; color: #e6edf3; font-size: 1.1rem;">
                     {ai_report}
                 </div>
                 """, unsafe_allow_html=True)
@@ -376,7 +363,6 @@ with tab_strat:
     names = [t['name'] for t in threats]
     
     col_sel, col_info = st.columns([1, 3])
-    
     with col_sel:
         st.markdown("**Select Target:**")
         selected = st.radio("APT Group", names, label_visibility="collapsed")
@@ -390,31 +376,29 @@ with tab_strat:
                 st.session_state['hunt_rules'] = rules
 
     with col_info:
-        # DOSSIER UI
         st.markdown(f"""
-        <div style="border: 1px solid #30363d; border-radius: 8px; padding: 20px; background: #161b22;">
-            <h2 style="margin-top:0; color: #f0f6fc !important;">{actor['name']}</h2>
-            <div style="display: flex; gap: 10px; margin-bottom: 15px;">
+        <div style="border: 1px solid #30363d; border-radius: 10px; padding: 30px; background: #161b22;">
+            <h2 style="margin-top:0; color: #f0f6fc !important; font-size: 2.5rem;">{actor['name']}</h2>
+            <div style="display: flex; gap: 15px; margin-bottom: 20px;">
                 <span class="sev-tag sev-med">ORIGIN: {actor['origin']}</span>
                 <span class="sev-tag sev-high">TARGET: {actor['target']}</span>
                 <span class="sev-tag sev-info">TYPE: {actor['type']}</span>
             </div>
-            <p style="color: #e6edf3; font-size: 1.1rem; line-height: 1.5;">{actor['desc']}</p>
+            <p style="color: #e6edf3; font-size: 1.3rem; line-height: 1.6;">{actor['desc']}</p>
             <hr style="border-color: #30363d;">
-            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 30px;">
                 <div>
-                    <h5 style="color: #58a6ff !important;">🛠️ Toolset</h5>
-                    <code style="background: #0d1117; color: #ff7b72; font-size: 0.9rem;">{actor['tools']}</code>
+                    <h5 style="color: #58a6ff !important; font-size: 1.3rem;">🛠️ Toolset</h5>
+                    <code style="background: #0d1117; color: #ff7b72; font-size: 1rem; padding: 10px; display: block;">{actor['tools']}</code>
                 </div>
                 <div>
-                    <h5 style="color: #58a6ff !important;">📚 MITRE TTPs</h5>
-                    <code style="background: #0d1117; color: #d29922; font-size: 0.9rem;">{actor['mitre']}</code>
+                    <h5 style="color: #58a6ff !important; font-size: 1.3rem;">📚 MITRE TTPs</h5>
+                    <code style="background: #0d1117; color: #d29922; font-size: 1rem; padding: 10px; display: block;">{actor['mitre']}</code>
                 </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # SHOW RULES IF GENERATED
         if 'hunt_rules' in st.session_state:
             st.markdown("### 🛡️ Generated Detection Logic")
             st.code(st.session_state['hunt_rules'], language="sql")
