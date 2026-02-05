@@ -8,3 +8,4 @@ pytz
 aiohttp
 feedparser
 lxml
+duckduckgo-search
