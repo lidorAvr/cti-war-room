@@ -17,7 +17,7 @@ from dateutil import parser as date_parser
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
-# --- HTTP HEADERS (Anti-Bot & Localization) ---
+# --- HTTP HEADERS ---
 HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -25,7 +25,7 @@ HEADERS = {
     'Referer': 'https://www.google.com/'
 }
 
-# --- IOC VALIDATION (Existing) ---
+# --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
     ioc = ioc.strip()
     if re.match(r'^https?://', ioc) or re.match(r'^www\.', ioc): return "url"
@@ -37,7 +37,7 @@ def identify_ioc_type(ioc):
     if re.match(r'^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$', ioc): return "domain"
     return None
 
-# --- DATABASE MANAGEMENT (Existing) ---
+# --- DATABASE MANAGEMENT ---
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
@@ -83,15 +83,26 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mod
     payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
     if json_mode: payload["response_format"] = {"type": "json_object"}
     
-    async with aiohttp.ClientSession() as session:
-        try:
-            async with session.post(url, json=payload, headers=headers, timeout=60) as resp:
-                data = await resp.json()
-                if resp.status == 200: return data['choices'][0]['message']['content']
-                return f"Error {resp.status}: {data.get('error', {}).get('message', 'Unknown Error')}"
-        except Exception as e: return f"Connection Error: {e}"
+    # Retry mechanism (3 attempts)
+    for attempt in range(3):
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        return data['choices'][0]['message']['content']
+                    elif resp.status == 429: # Rate Limit
+                        await asyncio.sleep(2 * (attempt + 1)) # Backoff
+                        continue
+                    else:
+                        data = await resp.json()
+                        return f"Error {resp.status}: {data.get('error', {}).get('message', 'Unknown')}"
+            except Exception as e:
+                if attempt == 2: return f"Error: {str(e)}"
+                await asyncio.sleep(1)
+    return "Error: Timeout"
 
-# --- THE BRAIN: AI PROCESSING & LOGIC ---
+# --- THE BRAIN: ROBUST AI PROCESSING ---
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
@@ -130,74 +141,66 @@ class AIBatchProcessor:
 
     async def analyze_batch(self, items):
         if not items: return []
-        # FIX 1: Reduced Chunk Size to prevent Rate Limits
-        chunk_size = 3 
         results = []
         
         system_instruction = """
-        You are a Senior CTI Analyst. Standardize intelligence.
-        
-        INPUT: Enriched raw content (ID, Source, Date, Text).
-        
-        OUTPUT RULES (JSON):
-        1. **Title**: Professional CTI header (Max 8 words). IF INCD/Telegram -> HEBREW. ELSE -> ENGLISH.
-        2. **Summary**: 3-4 bullet points. Focus on: **Target, Impact, IOCs**. IF INCD/Telegram -> HEBREW. ELSE -> ENGLISH.
-        3. **Category**: "Phishing", "Malware", "Vulnerabilities", "Ransomware", "Data Leak", "Israel", "General".
-        4. **Severity**: Critical (Active Exploit), High (Ransomware/Breach), Medium (Patches), Low (Info).
-        5. **corrected_date**: 
-           - Compare 'suspected_date' with the text.
-           - IF text says "Published: YYYY-MM-DD" or "Yesterday" and differs, output ISO date.
-           - OTHERWISE, omit field.
-        
-        JSON Structure: {"items": [{"id": 0, "title": "...", "summary": "...", "category": "...", "severity": "...", "corrected_date": "OPTIONAL"}]}
+        You are a Senior CTI Analyst.
+        INPUT: Raw intelligence text.
+        OUTPUT (JSON):
+        {
+            "title": "Short Header",
+            "summary": "3 bullet points",
+            "category": "Phishing/Malware/Vulnerability/Israel/General",
+            "severity": "Critical/High/Medium/Low",
+            "corrected_date": "ISO-8601 or null"
+        }
+        Lang: Hebrew for IL sources, English for others.
         """
         
-        for i in range(0, len(items), chunk_size):
-            chunk = items[i:i+chunk_size]
-            batch_text = ""
-            for idx, x in enumerate(chunk):
-                # FIX 2: Limit text per item to save tokens
-                clean_text = x['raw_text'][:1200].replace("\n", " ") 
-                batch_text += f"\n[ID: {idx}] | Source: {x['source']} | Suspected Date: {x['date']} | Content: {clean_text}"
+        # PROCESS ITEM BY ITEM (Safer than Batching)
+        for item in items:
+            clean_text = item['raw_text'][:1000].replace("\n", " ")
+            prompt = f"{system_instruction}\n\nITEM:\nSource: {item['source']}\nDate: {item['date']}\nContent: {clean_text}"
             
-            prompt = f"{system_instruction}\n\nRAW DATA:{batch_text}"
-            
-            # FIX 3: Switched to 'llama-3.1-8b-instant' (Faster, higher limits)
             res = await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=True)
             
-            chunk_map = {}
-            try:
-                data = json.loads(res)
-                for item in data.get("items", []): chunk_map[item.get('id')] = item
-            except Exception as e:
-                # FIX 4: Explicit Error Logging
-                print(f"⚠️ AI ANALYSIS FAILED for Batch {i}. Reason: {res}")
-                print(f"DEBUG: Exception: {e}")
+            ai_data = {}
+            error_msg = None
             
-            for j in range(len(chunk)):
-                ai_res = chunk_map.get(j, {})
-                final_date = ai_res.get('corrected_date') if ai_res.get('corrected_date') else chunk[j]['date']
-                
-                temp_item = {
-                    "title": ai_res.get('title', chunk[j].get('title', '')),
-                    "raw_text": chunk[j]['raw_text'],
-                    "source": chunk[j]['source'],
-                    "severity": ai_res.get('severity', 'Low')
-                }
-                final_severity = self._calculate_deterministic_severity(temp_item)
-                
-                # If analysis failed, show it clearly in summary but keep original data
-                summary_text = ai_res.get('summary', 'Analysis Failed - See Logs')
-                
-                results.append({
-                    "title": temp_item['title'],
-                    "summary": summary_text,
-                    "category": ai_res.get('category', 'General'),
-                    "severity": final_severity,
-                    "url": chunk[j]['url'],
-                    "source": chunk[j]['source'],
-                    "date": final_date
-                })
+            # Check for Errors
+            if res.startswith("Error"):
+                error_msg = res
+                ai_data = {"title": item['title'], "summary": f"⚠️ AI Failed: {error_msg}", "severity": "Low", "category": "General"}
+            else:
+                try:
+                    ai_data = json.loads(res)
+                except:
+                    ai_data = {"title": item['title'], "summary": "⚠️ JSON Parse Error", "severity": "Low", "category": "General"}
+
+            # Logic
+            final_date = ai_data.get('corrected_date') if ai_data.get('corrected_date') else item['date']
+            
+            temp_item = {
+                "title": ai_data.get('title', item.get('title', '')),
+                "raw_text": item['raw_text'],
+                "source": item['source'],
+                "severity": ai_data.get('severity', 'Low')
+            }
+            final_severity = self._calculate_deterministic_severity(temp_item)
+            
+            results.append({
+                "title": temp_item['title'],
+                "summary": ai_data.get('summary', 'No Summary'),
+                "category": ai_data.get('category', 'General'),
+                "severity": final_severity,
+                "url": item['url'],
+                "source": item['source'],
+                "date": final_date
+            })
+            
+            # Small delay to respect rate limits
+            await asyncio.sleep(0.5)
+
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
