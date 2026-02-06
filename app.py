@@ -14,7 +14,7 @@ from streamlit_autorefresh import st_autorefresh
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- HTML STYLES & RTL ---
+# --- CSS STYLING ---
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;600&family=Heebo:wght@300;400;700&display=swap');
@@ -22,22 +22,36 @@ st.markdown("""
     .stApp { direction: rtl; text-align: right; background-color: #0b0f19; font-family: 'Heebo', sans-serif; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, .stMarkdown { text-align: right; font-family: 'Heebo', sans-serif; }
     
-    /* RTL Fixes */
+    /* Input & Widgets RTL */
     .stTextInput input, .stSelectbox, .stMultiSelect { direction: rtl; text-align: right; }
-    .stButton button { width: 100%; font-family: 'Rubik', sans-serif; }
+    .stButton button { width: 100%; font-family: 'Rubik', sans-serif; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { justify-content: flex-end; gap: 15px; }
     
-    /* Live Feed Card */
+    /* Tool Cards */
+    .tool-card {
+        background: rgba(30, 41, 59, 0.6);
+        border: 1px solid rgba(56, 189, 248, 0.2);
+        border-radius: 10px;
+        padding: 15px;
+        text-align: center;
+        transition: all 0.2s;
+        margin-bottom: 10px;
+        height: 100%;
+    }
+    .tool-card:hover {
+        background: rgba(56, 189, 248, 0.15);
+        border-color: #38bdf8;
+        transform: translateY(-2px);
+    }
+    .tool-icon { font-size: 24px; margin-bottom: 5px; display: block; }
+    .tool-name { font-weight: bold; color: #e2e8f0; display: block; margin-bottom: 5px; }
+    .tool-desc { font-size: 0.8rem; color: #94a3b8; display: block; }
+    a { text-decoration: none; }
+
+    /* Report Cards */
     .report-card {
         background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1); border-radius: 12px; padding: 24px; margin-bottom: 20px;
-    }
-    
-    /* Dossier Rich Card */
-    .dossier-card {
-        border-left: 4px solid #f59e0b; 
-        background: linear-gradient(180deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%);
-        padding: 24px; border-radius: 12px; margin-bottom: 20px; direction: ltr; /* English text for Dossier */
     }
     
     /* Footer */
@@ -91,26 +105,22 @@ def get_feed_card_html(row, date_str):
     """
 
 def get_dossier_html(actor):
-    # Richer Design Restored
     return f"""
-    <div class="dossier-card">
-        <h2 style="margin-top:0; color: #ffffff; font-size: 2rem; letter-spacing: -1px; text-align: left;">{actor['name']}</h2>
-        <div style="margin-bottom: 25px; display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-start;">
+    <div class="report-card" style="border-left: 4px solid #f59e0b; background: linear-gradient(180deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%); direction: ltr;">
+        <h2 style="margin-top:0; color: #ffffff; text-align: left;">{actor['name']}</h2>
+        <div style="margin-bottom: 25px; display: flex; gap: 10px; justify-content: flex-start;">
             <span style="background: rgba(59, 130, 246, 0.15); color: #93c5fd; padding: 4px 12px; border-radius: 99px; font-size: 0.8rem; border: 1px solid rgba(59, 130, 246, 0.3);">ORIGIN: {actor['origin']}</span>
             <span style="background: rgba(245, 158, 11, 0.15); color: #fcd34d; padding: 4px 12px; border-radius: 99px; font-size: 0.8rem; border: 1px solid rgba(245, 158, 11, 0.3);">TARGET: {actor['target']}</span>
-            <span style="background: rgba(236, 72, 153, 0.15); color: #fbcfe8; padding: 4px 12px; border-radius: 99px; font-size: 0.8rem; border: 1px solid rgba(236, 72, 153, 0.3);">TYPE: {actor['type']}</span>
         </div>
-        <p style="font-size: 1.1rem; color: #e2e8f0; margin-bottom: 30px; line-height: 1.6; border-bottom: 1px solid #334155; padding-bottom: 20px; text-align: left;">
-            {actor['desc']}
-        </p>
+        <p style="font-size: 1.1rem; color: #e2e8f0; margin-bottom: 30px; text-align: left; padding-bottom: 20px; border-bottom: 1px solid #334155;">{actor['desc']}</p>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; text-align: left;">
-            <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px; border: 1px solid #334155;">
-                <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem; text-transform: uppercase;">🛠️ Known Tools</h5>
-                <code style="color: #fca5a5; background: transparent;">{actor['tools']}</code>
+            <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
+                <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem;">🛠️ Known Tools</h5>
+                <code style="color: #fca5a5;">{actor['tools']}</code>
             </div>
-            <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px; border: 1px solid #334155;">
-                <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem; text-transform: uppercase;">📚 MITRE TTPs</h5>
-                <code style="color: #fcd34d; background: transparent;">{actor['mitre']}</code>
+             <div style="background: rgba(15, 23, 42, 0.5); padding: 15px; border-radius: 8px;">
+                <h5 style="color: #94a3b8; margin-top: 0; font-size: 0.85rem;">📚 MITRE TTPs</h5>
+                <code style="color: #fcd34d;">{actor['mitre']}</code>
             </div>
         </div>
     </div>
@@ -134,24 +144,19 @@ async def perform_update():
         return save_reports(raw, analyzed)
     return 0
 
-# --- AUTO BOOT SEQUENCE ---
 if "booted" not in st.session_state:
-    st.markdown("<h3 style='text-align:center;'>🚀 מערכת עולה... מבצע סריקת מודיעין ראשונית</h3>", unsafe_allow_html=True)
-    
-    # Run Standard Feeds
+    st.markdown("<h3 style='text-align:center;'>🚀 אתחול מערכת...</h3>", unsafe_allow_html=True)
     asyncio.run(perform_update())
     
-    # Auto Run Deep Scan for ALL actors (Background)
+    # Auto Run Deep Scan
     threats = APTSheetCollector().fetch_threats()
     scanner = DeepWebScanner()
     proc = AIBatchProcessor(GROQ_KEY)
     for threat in threats:
-        # Quick scan 2 items per actor to populate
         res = scanner.scan_actor(threat['name'], limit=2)
         if res:
              analyzed = asyncio.run(proc.analyze_batch(res))
              save_reports(res, analyzed)
-             
     st.session_state['booted'] = True
     st.rerun()
 
@@ -189,9 +194,9 @@ tab_feed, tab_strat, tab_tools, tab_map = st.tabs(["🔴 עדכונים שוטפ
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    # 1. Fetch Top 4 INCD (Always)
+    # INCD: Top 4 ALWAYS
     df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 4", conn)
-    # 2. Fetch Others (Time restricted)
+    # Others: Top 50 recent
     df_rest = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND source != 'DeepWeb' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
@@ -199,27 +204,19 @@ with tab_feed:
     
     c1, c2 = st.columns(2)
     with c1: 
-        # TAG FILTER
         all_tags = ['הכל', 'פיישינג', 'נוזקה', 'פגיעויות', 'ישראל', 'מחקר', 'כללי']
         f_tag = st.radio("סינון לפי תגיות", all_tags, horizontal=True)
     with c2: 
-        # SEVERITY FILTER (4 Levels)
         f_sev = st.radio("חומרה", ["הכל", "קריטי/גבוה", "בינוני", "נמוך/מידע"], horizontal=True)
     
-    # Apply Tag Filter
-    if f_tag != 'הכל':
-        df = df[df['tags'] == f_tag]
-    
-    # Apply Severity Filter
+    if f_tag != 'הכל': df = df[df['tags'] == f_tag]
     if "גבוה" in f_sev: df = df[df['severity'].str.contains('Critical|High', case=False)]
     elif "בינוני" in f_sev: df = df[df['severity'].str.contains('Medium', case=False)]
     elif "נמוך" in f_sev: df = df[df['severity'].str.contains('Low|Info', case=False)]
 
-    if df.empty:
-        st.info("לא נמצאו ידיעות התואמות את הסינון.")
+    if df.empty: st.info("לא נמצאו ידיעות התואמות את הסינון.")
     
     for _, row in df.iterrows():
-        # Clean Date Format
         try:
             dt_obj = date_parser.parse(row['published_at'])
             if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj).astimezone(IL_TZ)
@@ -237,8 +234,6 @@ with tab_strat:
     
     st.markdown("---")
     st.markdown(f"##### 🕵️ תוצאות סריקת עומק (Deep Scan) - {actor['name']}")
-    
-    # Fetch Deep Web Results for this Actor
     conn = sqlite3.connect(DB_NAME)
     df_deep = pd.read_sql_query(f"SELECT * FROM intel_reports WHERE source = 'DeepWeb' AND actor_tag = '{actor['name']}' ORDER BY published_at DESC LIMIT 10", conn)
     conn.close()
@@ -247,21 +242,30 @@ with tab_strat:
         for _, row in df_deep.iterrows():
             st.markdown(get_feed_card_html(row, "Deep Web Hit"), unsafe_allow_html=True)
     else:
-        st.info("לא נמצאו ממצאים חדשים בסריקה האחרונה.")
+        st.info("לא נמצאו ממצאים חדשים.")
 
 with tab_tools:
     st.markdown("#### 🛠️ קיצורי דרך לאנליסטים")
-    # RESTORED TOOLKIT SHORTCUTS
     toolkit = AnalystToolkit.get_tools()
-    cols = st.columns(3)
-    i = 0
-    for category, tools in toolkit.items():
-        with cols[i % 3]:
+    
+    # NEW TOOLKIT UI
+    c1, c2, c3 = st.columns(3)
+    cols = [c1, c2, c3]
+    
+    for i, (category, tools) in enumerate(toolkit.items()):
+        with cols[i]:
             st.markdown(f"**{category}**")
             for tool in tools:
-                st.markdown(f"• [{tool['name']}]({tool['url']}) - {tool['desc']}")
-        i += 1
-        
+                st.markdown(f"""
+                <a href="{tool['url']}" target="_blank">
+                    <div class="tool-card">
+                        <span class="tool-icon">{tool['icon']}</span>
+                        <span class="tool-name">{tool['name']}</span>
+                        <span class="tool-desc">{tool['desc']}</span>
+                    </div>
+                </a>
+                """, unsafe_allow_html=True)
+
     st.markdown("---")
     st.markdown("#### 🔬 חקירת IOC")
     ioc_in = st.text_input("הזן אינדיקטור (IP/URL/Hash)")
@@ -274,22 +278,22 @@ with tab_tools:
                 us = tl.query_urlscan(ioc_in)
                 ab = tl.query_abuseipdb(ioc_in)
                 
-                # RESTORED 3-COLUMN METRICS
+                # METRICS UI FIXED
                 c1, c2, c3 = st.columns(3)
                 if vt: 
                     mal = vt.get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0)
                     c1.metric("VirusTotal", f"{mal} Hits", delta="Suspicious" if mal > 0 else "Clean", delta_color="inverse")
-                else: c1.metric("VirusTotal", "N/A")
+                else: c1.metric("VirusTotal", "ממתין...")
                 
-                if ab:
+                if ab and isinstance(ab, dict) and 'abuseConfidenceScore' in ab:
                     c2.metric("AbuseIPDB", f"{ab.get('abuseConfidenceScore', 0)}%", "Confidence")
-                else: c2.metric("AbuseIPDB", "N/A")
+                else: c2.metric("AbuseIPDB", "---")
                 
                 if us:
                     c3.metric("URLScan", "Completed", "View Report")
-                else: c3.metric("URLScan", "N/A")
+                else: c3.metric("URLScan", "---")
                 
-                # AI Analysis
+                # AI Analysis HEBREW
                 ai_res = asyncio.run(AIBatchProcessor(GROQ_KEY).analyze_single_ioc(ioc_in, itype, {'virustotal': vt}))
                 st.markdown(ai_res)
 
