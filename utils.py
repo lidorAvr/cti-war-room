@@ -48,6 +48,7 @@ def identify_ioc_type(ioc):
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     c = conn.cursor()
+    # Added 'tags' column
     c.execute('''CREATE TABLE IF NOT EXISTS intel_reports (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         timestamp TEXT,
@@ -58,7 +59,8 @@ def init_db():
         category TEXT,
         severity TEXT,
         summary TEXT,
-        actor_tag TEXT
+        actor_tag TEXT,
+        tags TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
@@ -66,7 +68,10 @@ def init_db():
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     
+    # Migrations
     try: c.execute("ALTER TABLE intel_reports ADD COLUMN actor_tag TEXT")
+    except: pass
+    try: c.execute("ALTER TABLE intel_reports ADD COLUMN tags TEXT")
     except: pass
 
     conn.commit()
@@ -93,6 +98,7 @@ class DeepWebScanner:
                 for res in ddg_results:
                     url = res.get('href')
                     if _is_url_processed(url): continue
+                    
                     results.append({
                         "title": res.get('title'),
                         "url": url,
@@ -130,26 +136,26 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mod
 
 def translate_with_gemini_hebrew(text_content):
     """
-    Translates technical cyber content to Hebrew using Gemini.
+    Translates to Hebrew using Gemini. Fallback to input if key missing.
     """
     try:
-        # FIX: Changed 'google_key' to 'gemini_key' to match user config
+        # Check for 'gemini_key' specifically
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key:
-            return text_content + " (Gemini Key Missing - Check secrets.toml)"
+            return text_content + " (Gemini Key Missing)"
         
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
         
         prompt = f"""
-        You are an expert translator for the Israeli National Cyber Directorate.
-        TASK: Translate the following Cyber Threat Intelligence summary to **Hebrew**.
-        RULES:
-        1. **Style**: Formal, military/official tone.
-        2. **Terminology**: DO NOT translate technical terms (Ransomware, Exploit, CVE, Phishing).
-        3. **Formatting**: Return ONLY the translated text.
+        Translate the following Cyber Security text to Hebrew.
+        Target Audience: Israeli SOC Analysts.
+        Rules:
+        1. Keep technical terms in English (e.g. Ransomware, C2, Phishing, CVE).
+        2. Tone: Professional, informative.
+        3. Output ONLY the translation.
         
-        INPUT TEXT:
+        Text:
         {text_content}
         """
         response = model.generate_content(prompt)
@@ -166,25 +172,31 @@ class AIBatchProcessor:
         chunk_size = 5 
         results = []
         
+        # PROMPT: Extract Tags, Severity, Date
         system_instruction = """
-        You are an elite Cyber Threat Intelligence Analyst.
-        TASK: Analyze cyber security news items.
-        OUTPUT FORMAT (JSON):
+        You are a CTI Analyst. Analyze these news items.
+        
+        OUTPUT JSON format:
         {
             "items": [
                 {
                     "id": 0,
-                    "title": "Formal Title",
-                    "summary": "Technical summary (3 sentences).",
+                    "title": "Concise Title",
+                    "summary": "Technical summary (3 sentences). Mention Actor/Malware.",
                     "severity": "Critical/High/Medium/Low",
-                    "category": "Malware/Vulnerability/News",
-                    "published_at": "ISO8601 Date"
+                    "tag": "Select ONE: Phishing, Malware, Vulnerabilities, Israel, Research, General",
+                    "published_at": "ISO8601 Date (Extract from text context or use raw date)"
                 }
             ]
         }
-        INSTRUCTIONS:
-        1. Severity: If Exploited in Wild / Ransomware / APT / CVSS > 9 -> 'High' or 'Critical'.
-        2. Date: Extract exact published date from context.
+        
+        RULES:
+        1. **Severity**: If Ransomware / Active Exploitation / APT -> High/Critical.
+        2. **Tags**:
+           - 'Israel': If mentions Israel, INCD, or Israeli targets.
+           - 'Vulnerabilities': If mentions CVE, Patch, Exploit.
+           - 'Phishing': If mentions Social Engineering, Credentials.
+           - 'Malware': If mentions Trojans, Backdoors, Rats.
         """
         
         for i in range(0, len(items), chunk_size):
@@ -204,35 +216,49 @@ class AIBatchProcessor:
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
                 
-                # --- LOGIC FIX: SEVERITY BOOST ---
+                # Severity Boost Logic
                 sev = ai.get('severity', 'Medium')
-                raw_text = (chunk[j]['title'] + chunk[j]['summary']).lower()
-                if 'exploited' in raw_text or 'zero-day' in raw_text or 'ransomware' in raw_text or 'critical' in raw_text:
+                raw_txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
+                if 'ransomware' in raw_txt or 'exploited' in raw_txt or 'zero-day' in raw_txt:
                     if sev in ['Medium', 'Low']: sev = 'High'
                 
+                # Tag Translation Mapping
+                eng_tag = ai.get('tag', 'General')
+                tag_map = {
+                    'Phishing': 'פיישינג',
+                    'Malware': 'נוזקה',
+                    'Vulnerabilities': 'פגיעויות',
+                    'Israel': 'ישראל',
+                    'Research': 'מחקר',
+                    'General': 'כללי'
+                }
+                final_tag = tag_map.get(eng_tag, 'כללי')
+                if chunk[j]['source'] == 'INCD': final_tag = 'ישראל'
+
+                # Translation
                 eng_title = ai.get('title', chunk[j]['title'])
-                eng_sum = ai.get('summary', chunk[j]['summary'][:350])
+                eng_sum = ai.get('summary', chunk[j]['summary'][:400])
                 
-                heb_sum = translate_with_gemini_hebrew(eng_sum)
                 heb_title = translate_with_gemini_hebrew(eng_title)
+                heb_sum = translate_with_gemini_hebrew(eng_sum)
 
                 results.append({
-                    "category": ai.get('category', 'News'), 
+                    "category": "News", 
                     "severity": sev, 
                     "title": heb_title,
                     "summary": heb_sum,
                     "published_at": ai.get('published_at', chunk[j]['date']),
-                    "actor_tag": chunk[j].get('actor_tag', None)
+                    "actor_tag": chunk[j].get('actor_tag', None),
+                    "tags": final_tag
                 })
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
         lean_data = self._extract_key_intel(data)
         prompt = f"""
-        Act as a Senior SOC Analyst.
-        Target IOC: {ioc} ({ioc_type})
+        Act as Senior SOC Analyst. Target IOC: {ioc} ({ioc_type}).
         Data: {json.dumps(lean_data)}
-        Output Markdown:
+        Output Markdown (English):
         ### 🛡️ Operational Verdict
         * **Verdict**: [Malicious/Suspicious/Clean]
         * **Confidence**: [High/Medium/Low]
@@ -293,18 +319,18 @@ class AnalystToolkit:
     @staticmethod
     def get_tools():
         return {
-            "ארגז חול": [
-                {"name": "Any.Run", "url": "https://app.any.run/", "desc": "Interactive Sandbox"},
-                {"name": "Hybrid Analysis", "url": "https://www.hybrid-analysis.com/", "desc": "Malware Analysis"}
+            "Analysis": [
+                {"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "Decoding"},
+                {"name": "Any.Run", "url": "https://app.any.run/", "desc": "Sandbox"}
             ],
-            "מודיעין וסריקה": [
+            "Lookup": [
                 {"name": "VirusTotal", "url": "https://www.virustotal.com/", "desc": "IOC Scanner"},
                 {"name": "AbuseIPDB", "url": "https://www.abuseipdb.com/", "desc": "IP Reputation"},
-                {"name": "Talos", "url": "https://talosintelligence.com/", "desc": "Threat Intel"}
+                {"name": "Talos", "url": "https://talosintelligence.com/", "desc": "Intel"}
             ],
-            "כלים טכניים": [
-                {"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "Decoding Tool"},
-                {"name": "MxToolbox", "url": "https://mxtoolbox.com/", "desc": "Network Tools"}
+            "Tools": [
+                {"name": "MxToolbox", "url": "https://mxtoolbox.com/", "desc": "Network Tools"},
+                {"name": "URLScan", "url": "https://urlscan.io/", "desc": "Web Scanner"}
             ]
         }
 
@@ -335,12 +361,17 @@ class CTICollector:
                 
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    for entry in feed.entries[:5]:
+                    # INCD: Take top 4 always. Others: Top 5
+                    limit = 4 if source['name'] == 'INCD' else 5
+                    
+                    for entry in feed.entries[:limit]:
                         pub_date = now
                         try:
-                            if hasattr(entry, 'published_parsed'): pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
+                            if hasattr(entry, 'published_parsed'): 
+                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
                         except: pass
                         
+                        # Only apply 48h filter to NON-INCD sources
                         if source['name'] != 'INCD' and (now - pub_date).total_seconds() > 172800: continue
                         if _is_url_processed(entry.link): continue
                         
@@ -349,7 +380,8 @@ class CTICollector:
                 elif source['type'] == 'json':
                      data = json.loads(content)
                      for v in data.get('vulnerabilities', [])[:5]:
-                         url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
+                         # FIX: Use NVD URL instead of CISA direct link to avoid Access Denied
+                         url = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
                          if _is_url_processed(url): continue
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": now.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
         except: pass
@@ -369,8 +401,8 @@ def save_reports(raw, analyzed):
             a = analyzed[i]
             final_date = a.get('published_at', item['date'])
             try:
-                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag')))
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag'), a.get('tags')))
                 if c.rowcount > 0: cnt += 1
             except: pass
     conn.commit()
