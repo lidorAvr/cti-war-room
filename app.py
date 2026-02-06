@@ -34,6 +34,35 @@ st.markdown("""
     .stButton button { width: 100%; font-family: 'Rubik', sans-serif; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { justify-content: flex-end; gap: 15px; }
     
+    /* Tool Cards */
+    .tool-card {
+        background: rgba(30, 41, 59, 0.7);
+        border: 1px solid rgba(56, 189, 248, 0.3);
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        margin-bottom: 15px;
+        height: 100%;
+        color: white;
+        cursor: pointer;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    .tool-card:hover {
+        background: rgba(56, 189, 248, 0.2);
+        border-color: #38bdf8;
+        transform: translateY(-4px);
+        box-shadow: 0 10px 15px -3px rgba(56, 189, 248, 0.2), 0 4px 6px -2px rgba(56, 189, 248, 0.1);
+    }
+    .tool-icon { font-size: 32px; margin-bottom: 10px; display: block; filter: drop-shadow(0 0 5px rgba(255,255,255,0.3)); }
+    .tool-name { font-weight: 700; color: #f1f5f9; display: block; margin-bottom: 5px; font-size: 1.1rem; }
+    .tool-desc { font-size: 0.85rem; color: #cbd5e1; display: block; line-height: 1.4; }
+    a { text-decoration: none; }
+
     /* Report Cards */
     .report-card {
         background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px);
@@ -51,6 +80,13 @@ st.markdown("""
     .ioc-title { font-size: 0.9rem; font-weight: bold; opacity: 0.9; }
     .ioc-value { font-size: 1.8rem; font-weight: bold; margin: 5px 0; }
     .ioc-sub { font-size: 0.8rem; opacity: 0.8; }
+    
+    /* Redirect Alert */
+    .redirect-alert {
+        background: rgba(245, 158, 11, 0.2); border: 1px solid #f59e0b; color: #fcd34d;
+        padding: 15px; border-radius: 8px; margin-bottom: 15px;
+        display: flex; align-items: center; gap: 10px; font-weight: bold;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -117,7 +153,6 @@ async def perform_update():
 if "booted" not in st.session_state:
     st.markdown("<h3 style='text-align:center;'>🚀 טוען מערכת מודיעין...</h3>", unsafe_allow_html=True)
     asyncio.run(perform_update())
-    # Deep Scan Background
     threats = APTSheetCollector().fetch_threats()
     scanner = DeepWebScanner()
     proc = AIBatchProcessor(GROQ_KEY)
@@ -163,11 +198,10 @@ tab_feed, tab_strat, tab_tools, tab_map = st.tabs(["🔴 עדכונים שוטפ
 # --- TAB 1: LIVE FEED ---
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 4", conn)
+    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 10", conn)
     df_rest = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND source != 'DeepWeb' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
-    # SORT BY DATE
     df = pd.concat([df_incd, df_rest])
     df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
     df = df.sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
@@ -222,22 +256,35 @@ with tab_strat:
     if not df_deep.empty:
         for _, row in df_deep.iterrows():
             st.markdown(get_feed_card_html(row, "Deep Web Hit"), unsafe_allow_html=True)
+    else:
+        st.info("לא נמצאו ממצאים חדשים בסריקה האחרונה.")
 
 # --- TAB 3: TOOLS & LAB ---
 with tab_tools:
-    st.markdown("#### 🔬 מעבדת חקירות (IOC Analysis)")
+    st.markdown("#### 🛠️ ארגז כלים")
+    toolkit = AnalystToolkit.get_tools()
     
-    # Tool Shortcuts
-    with st.expander("🛠️ ארגז כלים מהיר", expanded=False):
-        toolkit = AnalystToolkit.get_tools()
-        c1, c2, c3 = st.columns(3)
-        cols = [c1, c2, c3]
-        for i, (category, tools) in enumerate(toolkit.items()):
-            with cols[i]:
-                st.markdown(f"**{category}**")
-                for tool in tools:
-                    st.markdown(f"[{tool['icon']} {tool['name']}]({tool['url']})")
+    c1, c2, c3 = st.columns(3)
+    cols = [c1, c2, c3]
+    for i, (category, tools) in enumerate(toolkit.items()):
+        with cols[i]:
+            st.markdown(f"**{category}**")
+            for tool in tools:
+                st.markdown(f"""
+                <a href="{tool['url']}" target="_blank">
+                    <div class="tool-card">
+                        <span class="tool-icon">{tool['icon']}</span>
+                        <span class="tool-name">{tool['name']}</span>
+                        <span class="tool-desc">{tool['desc']}</span>
+                    </div>
+                </a>
+                """, unsafe_allow_html=True)
 
+    st.markdown("---")
+    st.markdown("#### 🔬 חקירת IOC")
+    
+    if 'scan_res' not in st.session_state: st.session_state['scan_res'] = None
+    
     ioc_in = st.text_input("הזן אינדיקטור (IP/URL/Hash)", key="ioc_input")
     if st.button("בצע חקירה"):
         st.session_state['scan_res'] = None 
@@ -252,12 +299,25 @@ with tab_tools:
                 
                 st.session_state['scan_res'] = {'vt': vt, 'us': us, 'ab': ab, 'ai': ai_res, 'type': itype}
 
-    # VISUAL RESULTS
+    # RESULTS
     res = st.session_state.get('scan_res')
     if res:
         vt, us, ab = res['vt'], res['us'], res['ab']
         
-        # SCORE CARDS
+        # --- REDIRECT ALERT ---
+        if us and us.get('task') and us.get('page'):
+            input_url = us['task'].get('url', '')
+            final_url = us['page'].get('url', '')
+            if input_url != final_url:
+                st.markdown(f"""
+                <div class="redirect-alert">
+                    ⚠️ זוהתה הפנייה (Redirect)!
+                    <br>מקור: {input_url}
+                    <br>יעד סופי: {final_url}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # 1. SCORE CARDS
         c1, c2, c3 = st.columns(3)
         
         # VT CARD
@@ -294,14 +354,43 @@ with tab_tools:
         else:
              c3.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">URLScan</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
 
-        # DETAILS TABS
-        t1, t2, t3 = st.tabs(["🤖 ניתוח AI", "🦠 נתונים טכניים", "📷 צילום מסך"])
+        # 2. DETAILS TABS
+        t1, t2, t3, t4 = st.tabs(["🤖 ניתוח AI", "🦠 נתונים טכניים (VT)", "📷 URLScan", "🚫 AbuseIPDB"])
+        
         with t1:
              st.markdown(f'<div style="direction:rtl; text-align:right;">{res["ai"]}</div>', unsafe_allow_html=True)
+        
         with t2:
-             if vt: st.json(vt.get('attributes', {}).get('last_analysis_stats'))
+             if vt:
+                attr = vt.get('attributes', {})
+                st.write("**HTTP Response:**", attr.get('last_http_response_code'))
+                st.write("**Last Analysis:**", datetime.datetime.fromtimestamp(attr.get('last_analysis_date', 0)).strftime('%Y-%m-%d'))
+                st.write("**Categories:**", attr.get('categories'))
+                st.write("**Tags:**", attr.get('tags'))
+                st.json(attr.get('last_analysis_stats'))
+             else: st.info("אין נתונים.")
+
         with t3:
-             if us: st.image(us.get('task', {}).get('screenshotURL'))
+             if us:
+                task = us.get('task', {})
+                page = us.get('page', {})
+                st.image(task.get('screenshotURL'), caption="Screenshot")
+                st.write(f"**Final URL:** {page.get('url')}")
+                st.write(f"**Server:** {page.get('server')}")
+                st.write(f"**Country:** {page.get('country')}")
+                st.write(f"**IP:** {page.get('ip')}")
+                with st.expander("Redirect Chain"):
+                    st.json(us.get('data', {}).get('requests', []))
+             else: st.info("אין נתונים.")
+
+        with t4:
+            if ab:
+                st.write(f"**ISP:** {ab.get('isp')}")
+                st.write(f"**Domain:** {ab.get('domain')}")
+                st.write(f"**Usage Type:** {ab.get('usageType')}")
+                st.write(f"**Country:** {ab.get('countryCode')}")
+                st.metric("Total Reports", ab.get('totalReports'))
+            else: st.info("רלוונטי ל-IP בלבד.")
 
 with tab_map:
     components.iframe("https://threatmap.checkpoint.com/", height=700)
