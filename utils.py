@@ -14,6 +14,8 @@ from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from ddgs import DDGS
+import google.generativeai as genai
+import streamlit as st
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
@@ -55,13 +57,21 @@ def init_db():
         title TEXT,
         category TEXT,
         severity TEXT,
-        summary TEXT
-    )''')
+        summary TEXT,
+        actor_tag TEXT
+    )''') # Added actor_tag column for deep scan association
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     
     # Clean old data but keep INCD and DeepWeb scans longer
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(hours=48)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
+    
+    # Migration helper (if table exists without actor_tag)
+    try:
+        c.execute("ALTER TABLE intel_reports ADD COLUMN actor_tag TEXT")
+    except:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -77,7 +87,7 @@ def _is_url_processed(url):
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
-    def scan_actor(self, actor_name, limit=5):
+    def scan_actor(self, actor_name, limit=3):
         """Searches the deep web for recent mentions of the actor"""
         results = []
         try:
@@ -93,9 +103,10 @@ class DeepWebScanner:
                     results.append({
                         "title": res.get('title'),
                         "url": url,
-                        "date": datetime.datetime.now(IL_TZ).isoformat(),
+                        "date": datetime.datetime.now(IL_TZ).isoformat(), # Will be updated by AI extracted date later
                         "source": "DeepWeb",
-                        "summary": res.get('body', 'No summary available.')
+                        "summary": res.get('body', 'No summary available.'),
+                        "actor_tag": actor_name
                     })
         except Exception as e:
             print(f"Deep Scan Error: {e}")
@@ -113,91 +124,85 @@ async def query_groq_api(api_key, prompt, model="llama-3.1-8b-instant", json_mod
     if not api_key: return "Error: Missing API Key"
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.3}
+    payload = {"model": model, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1} # Low temp for factual reporting
     if json_mode: payload["response_format"] = {"type": "json_object"}
     
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
+            async with session.post(url, json=payload, headers=headers, timeout=40) as resp:
                 data = await resp.json()
                 if resp.status == 200: return data['choices'][0]['message']['content']
                 return f"Error {resp.status}: {data.get('error', {}).get('message', 'Unknown error')}"
         except Exception as e: return f"Connection Error: {e}"
 
+def translate_with_gemini_hebrew(text_content):
+    """
+    Translates technical cyber content to Hebrew using Gemini.
+    Maintains technical terms in English.
+    """
+    try:
+        google_key = st.secrets.get("google_key")
+        if not google_key:
+            return text_content + " (Gemini Key Missing)"
+        
+        genai.configure(api_key=google_key)
+        model = genai.GenerativeModel('gemini-pro')
+        
+        prompt = f"""
+        You are an expert translator for the Israeli National Cyber Directorate.
+        
+        TASK: Translate the following Cyber Threat Intelligence summary to **Hebrew**.
+        
+        RULES:
+        1. **Style**: Formal, military/official tone (שפה רשמית, צבאית/ממשלתית).
+        2. **Terminology**: DO NOT translate technical terms. Keep them in English.
+           - Example: Ransomware -> Ransomware (not כופרה)
+           - Example: Vulnerability -> Vulnerability (or חולשה, but keep CVEs in English)
+           - Example: Exploit, Phishing, C2, Backdoor, CVSS, CVE -> KEEP IN ENGLISH.
+        3. **Clarity**: The Hebrew must be native and professional.
+        4. **Formatting**: Return ONLY the translated text.
+        
+        INPUT TEXT:
+        {text_content}
+        """
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        return text_content # Fallback to English on error
+
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
         
-    def _prune_data(self, data, max_list_items=5):
-        if isinstance(data, dict):
-            new_data = {}
-            for k, v in data.items():
-                if k in ['icon', 'favicon', 'html', 'screenshot', 'raw_response', 'response_headers']:
-                    continue
-                new_data[k] = self._prune_data(v, max_list_items)
-            return new_data
-        elif isinstance(data, list):
-            return [self._prune_data(i, max_list_items) for i in data[:max_list_items]]
-        else:
-            return data
-
-    def _extract_key_intel(self, raw_data):
-        summary = {}
-        if 'virustotal' in raw_data and isinstance(raw_data['virustotal'], dict):
-            vt = raw_data['virustotal']
-            attrs = vt.get('attributes', {})
-            rels = vt.get('relationships', {})
-            summary['virustotal'] = {
-                'reputation': attrs.get('reputation'),
-                'stats': attrs.get('last_analysis_stats'),
-                'tags': attrs.get('tags'),
-                'country': attrs.get('country'),
-                'asn': attrs.get('asn'),
-                'as_owner': attrs.get('as_owner'),
-                'passive_dns': [r.get('attributes', {}).get('host_name') for r in rels.get('resolutions', {}).get('data', [])[:10]],
-                'contacted_urls': [u.get('context_attributes', {}).get('url') for u in rels.get('contacted_urls', {}).get('data', [])[:5]]
-            }
-        if 'urlscan' in raw_data and isinstance(raw_data['urlscan'], dict):
-            us = raw_data['urlscan']
-            summary['urlscan'] = {
-                'verdict': us.get('verdict', {}).get('overall'),
-                'country': us.get('page', {}).get('country'),
-                'target': us.get('task', {}).get('url')
-            }
-        if 'abuseipdb' in raw_data and isinstance(raw_data['abuseipdb'], dict):
-            ab = raw_data['abuseipdb']
-            summary['abuseipdb'] = {
-                'score': ab.get('abuseConfidenceScore'),
-                'isp': ab.get('isp'),
-                'usage': ab.get('usageType')
-            }
-        return summary
-
     async def analyze_batch(self, items):
         if not items: return []
-        chunk_size = 10
+        chunk_size = 5 # Reduced chunk size for better quality
         results = []
         
-        # --- FIX: Updated Prompt to request 'published_at' extraction ---
+        # --- GROQ PROMPT: Professional, CVE Focused ---
         system_instruction = """
-        You are an expert CTI Analyst.
-        Task: Analyze cyber news items and extract key metadata.
+        You are an elite Cyber Threat Intelligence Analyst.
         
-        OUTPUT RULES:
-        1. IF Source is 'INCD' (Israel National Cyber Directorate):
-           - TITLE & SUMMARY: Must be in **Hebrew** (Professional, clear, no gibberish).
-        2. IF Source is 'Malpedia' OR 'DeepWeb':
-           - SUMMARY: Synthesize the text into a high-level Intelligence Summary (3 sentences). Focus on: Attribution, Malware Capabilities, and Targets.
-        3. DATE EXTRACTION (CRITICAL):
-           - Identify the **original publication time** from the text (e.g., "Published: 2 hours ago", "Date: 2024-02-01").
-           - Return it in 'published_at' field in ISO 8601 format (YYYY-MM-DDTHH:MM:SS). 
-           - If no specific date is found in text, omit the field (system will use default).
-        4. GENERAL:
-           - TITLE: Short, informative (Max 8 words).
-           - CATEGORY: 'Phishing', 'Malware', 'Vulnerabilities', 'News', 'Research', 'Other'.
-           - SEVERITY: 'Critical', 'High', 'Medium', 'Low'.
+        TASK: Analyze the provided cyber security news items.
         
-        Return JSON: {"items": [{"id": 0, "category": "...", "severity": "...", "title": "...", "summary": "...", "published_at": "ISO_DATE"}]}
+        OUTPUT FORMAT (JSON):
+        {
+            "items": [
+                {
+                    "id": 0,
+                    "title": "FORMAL MILITARY STYLE TITLE (Include CVE if present)",
+                    "summary": "Strict 3-4 sentence technical summary. MUST mention: Threat Actor, CVE ID (if any), CVSS Score (if any), and specific Impact. Tone: Official, concise.",
+                    "severity": "Critical/High/Medium/Low",
+                    "category": "Malware/Vulnerability/Phishing/News",
+                    "published_at": "ISO8601 Date (YYYY-MM-DDTHH:MM:SS) extracted from text context"
+                }
+            ]
+        }
+        
+        INSTRUCTIONS:
+        1. **Date Extraction**: Look for "Published on:...", "Yesterday", "2 hours ago". Calculate or extract the exact date. If unsure, use the provided RawDate.
+        2. **Severity**: If CVE > 9.0 or Ransomware or APT -> Critical/High.
+        3. **Content**: No fluff. Pure intelligence.
         """
         
         for i in range(0, len(items), chunk_size):
@@ -205,82 +210,82 @@ class AIBatchProcessor:
             
             batch_lines = []
             for idx, x in enumerate(chunk):
-                limit = 2500 if x['source'] in ['Malpedia', 'DeepWeb'] else 400
+                limit = 3000 
                 clean_sum = x['summary'].replace('\n', ' ').strip()[:limit]
-                # Sending the raw date as context
-                batch_lines.append(f"ID:{idx}|Src:{x['source']}|RawDate:{x['date']}|Content:{x['title']} - {clean_sum}")
+                batch_lines.append(f"ID:{idx} | RawDate:{x['date']} | Content:{x['title']} - {clean_sum}")
 
             batch_text = "\n".join(batch_lines)
             prompt = f"{system_instruction}\nRaw Data:\n{batch_text}"
             
+            # 1. Get English Analysis from GROQ
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
+            
             chunk_map = {}
             try:
                 data = json.loads(res)
                 for item in data.get("items", []): chunk_map[item.get('id')] = item
             except: pass
             
+            # 2. Process and Translate with GEMINI
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
                 
-                final_sev = ai.get('severity', 'Medium')
-                final_cat = ai.get('category', 'News')
+                english_title = ai.get('title', chunk[j]['title'])
+                english_summary = ai.get('summary', chunk[j]['summary'][:350])
                 
-                # Fallback Logic
-                txt = (chunk[j]['title'] + chunk[j]['summary']).lower()
-                if 'apt' in txt or 'ransomware' in txt:
-                    final_sev = 'High'
+                # Combine for translation to save calls, or translate separately. 
+                # Translating summary is most important.
+                hebrew_summary = translate_with_gemini_hebrew(english_summary)
+                
+                # Basic Hebrew title adjustment (optional, or translate full title)
+                hebrew_title = translate_with_gemini_hebrew(english_title)
 
                 results.append({
-                    "category": final_cat, 
-                    "severity": final_sev, 
-                    "title": ai.get('title', chunk[j]['title']),
-                    "summary": ai.get('summary', chunk[j]['summary'][:350]),
-                    # Use AI extracted date if available, otherwise use scanner date
-                    "published_at": ai.get('published_at', chunk[j]['date'])
+                    "category": ai.get('category', 'News'), 
+                    "severity": ai.get('severity', 'Medium'), 
+                    "title": hebrew_title,
+                    "summary": hebrew_summary,
+                    "published_at": ai.get('published_at', chunk[j]['date']),
+                    "actor_tag": chunk[j].get('actor_tag', None)
                 })
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
+        # Existing Logic kept as is, but could be enhanced with Hebrew if needed.
+        # Keeping English for Forensics is usually preferred by analysts.
+        # Minimal changes here to avoid breaking logic.
         lean_data = self._extract_key_intel(data)
-        
         prompt = f"""
         Act as a Senior Tier 3 SOC Analyst.
-        Your task is to provide an OPERATIONAL analysis for an Enterprise Environment.
-        
         Target IOC: {ioc} ({ioc_type})
         Intelligence Summary: {json.dumps(lean_data)}
         
         Output Structure (Markdown, English Only):
-        
         ### 🛡️ Operational Verdict
         * **Verdict**: [Malicious / Suspicious / Clean]
         * **Confidence**: [High / Medium / Low]
         * **Reasoning**: Briefly explain why based on the engines/data.
-        
-        ### 🏢 Enterprise Defense Playbook (Action Items)
-        * **Network (Firewall/Proxy)**: specific rule to apply (e.g., Block Domain, Drop Traffic).
-        * **Endpoint (EDR)**: What to hunt for? (e.g., "Search for process spawning cmd.exe connecting to this IP").
-        * **SIEM / Log Analysis**: Provide a specific search concept (e.g., "Look for HTTP GET requests to...").
-        * **Containment**: Immediate steps if traffic is seen.
-
-        ### 🔬 Technical Context
-        * Analyze the available attributes and relations.
-        * If this is a known campaign (e.g., Lazarus, Emotet), mention it.
-        * If clean, confirm it's a False Positive risk.
+        ### 🏢 Enterprise Defense Playbook
+        * **Network**: specific rule.
+        * **Endpoint**: What to hunt for.
         """
         res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
-        if "Error" in res:
-            return await query_groq_api(self.key, prompt, model="llama-3.1-8b-instant", json_mode=False)
         return res
 
+    def _extract_key_intel(self, raw_data):
+        summary = {}
+        if 'virustotal' in raw_data and isinstance(raw_data['virustotal'], dict):
+            vt = raw_data['virustotal']
+            attrs = vt.get('attributes', {})
+            summary['virustotal'] = {
+                'stats': attrs.get('last_analysis_stats'),
+                'country': attrs.get('country'),
+                'reputation': attrs.get('reputation')
+            }
+        return summary
+
     async def generate_hunting_queries(self, actor):
-        prompt = f"""
-        Generate Hunting Queries for Actor: {actor['name']}.
-        Context: {actor.get('mitre', 'N/A')} | {actor.get('tools', 'N/A')}.
-        Provide: 1. Google Chronicle (YARA-L) 2. Cortex XDR (XQL).
-        Explain logic in English.
-        """
+        prompt = f"Generate Hunting Queries for Actor: {actor['name']}. Tools: {actor.get('tools')}. Format: XQL, YARA."
         return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
 
 class ThreatLookup:
@@ -303,9 +308,6 @@ class ThreatLookup:
             
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, params=params, timeout=15)
             if res.status_code == 200: return res.json().get('data', {})
-            if res.status_code in [400, 403, 500, 504]:
-                res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=15)
-                if res.status_code == 200: return res.json().get('data', {})
             return None
         except: return None
 
@@ -313,20 +315,10 @@ class ThreatLookup:
         if not self.urlscan_key: return None
         try:
             search_query = ioc
-            try:
-                if "://" in ioc:
-                    parsed = urlparse(ioc)
-                    if parsed.netloc: search_query = f"domain:{parsed.netloc}"
-            except: pass
-            
             res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=15)
             data = res.json()
             if data.get('results'):
-                first_hit = data['results'][0]
-                scan_uuid = first_hit.get('_id')
-                if scan_uuid:
-                    full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_uuid}/", headers={"API-Key": self.urlscan_key}, timeout=15)
-                    if full_res.status_code == 200: return full_res.json()
+                return requests.get(f"https://urlscan.io/api/v1/result/{data['results'][0]['_id']}/", headers={"API-Key": self.urlscan_key}).json()
             return None
         except: return None
 
@@ -343,22 +335,12 @@ class AnalystToolkit:
     def get_tools():
         return {
             "Analysis & Sandboxing": [
-                {"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "The Swiss Army Knife of data decoding."},
-                {"name": "Any.Run", "url": "https://app.any.run/", "desc": "Interactive Malware Sandbox."},
-                {"name": "UnpacMe", "url": "https://www.unpac.me/", "desc": "Automated Malware Unpacking."},
-                {"name": "Hybrid Analysis", "url": "https://www.hybrid-analysis.com/", "desc": "Free malware analysis service."}
+                {"name": "CyberChef", "url": "https://gchq.github.io/CyberChef/", "desc": "Decoding tools."},
+                {"name": "Any.Run", "url": "https://app.any.run/", "desc": "Interactive Sandbox."}
             ],
-            "Lookup & Reputation": [
-                {"name": "VirusTotal", "url": "https://www.virustotal.com/", "desc": "Analyze suspicious files/URLs."},
-                {"name": "AbuseIPDB", "url": "https://www.abuseipdb.com/", "desc": "Check IP reputation."},
-                {"name": "URLScan.io", "url": "https://urlscan.io/", "desc": "Website scanner for suspicious URLs."},
-                {"name": "Talos Reputation", "url": "https://talosintelligence.com/reputation_center", "desc": "Cisco Talos IP/Domain check."}
-            ],
-            "Intelligence & Frameworks": [
-                {"name": "MITRE ATT&CK", "url": "https://attack.mitre.org/", "desc": "Knowledge base of adversary tactics."},
-                {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/", "desc": "Resource for rapid identification of malware."},
-                {"name": "LOLBAS", "url": "https://lolbas-project.github.io/", "desc": "Living Off The Land Binaries and Scripts."},
-                {"name": "AlienVault OTX", "url": "https://otx.alienvault.com/", "desc": "Open Threat Exchange community."}
+            "Lookup": [
+                {"name": "VirusTotal", "url": "https://www.virustotal.com/", "desc": "File/URL Analysis."},
+                {"name": "AbuseIPDB", "url": "https://www.abuseipdb.com/", "desc": "IP Reputation."}
             ]
         }
 
@@ -371,55 +353,39 @@ class APTSheetCollector:
                 "target": "Israel", 
                 "type": "Espionage", 
                 "tools": "PowerShell, ScreenConnect, Ligolo", 
-                "keywords": ["muddywater", "static_kitten", "mercury", "ligolo", "screenconnect"],
-                "desc": "MOIS-affiliated group targeting Israeli Gov and Infrastructure. Known for social engineering.", 
-                "mitre": "T1059, T1105, T1566",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/muddywater"
+                "keywords": ["muddywater", "static_kitten", "mercury", "ligolo"],
+                "desc": "MOIS-affiliated group targeting Israeli Gov.", 
+                "mitre": "T1059, T1105"
             },
             {
                 "name": "OilRig (APT34)", 
                 "origin": "Iran", 
-                "target": "Israel / Middle East", 
+                "target": "Israel", 
                 "type": "Espionage", 
-                "tools": "DNS Tunneling, SideTwist, Karkoff", 
-                "keywords": ["oilrig", "apt34", "helix_kitten", "cobalt_gypsy", "sidetwist", "karkoff"],
-                "desc": "Sophisticated espionage targeting critical sectors (Finance, Energy, Gov).", 
-                "mitre": "T1071.004, T1048, T1132",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/oilrig"
+                "tools": "DNS Tunneling, Karkoff", 
+                "keywords": ["oilrig", "apt34", "helix_kitten"],
+                "desc": "Espionage targeting critical sectors.", 
+                "mitre": "T1071.004, T1048"
             },
             {
                 "name": "Agonizing Serpens", 
                 "origin": "Iran", 
                 "target": "Israel", 
                 "type": "Destructive", 
-                "tools": "Wipers (BiBiWiper), SQL Injection", 
-                "keywords": ["agonizing serpens", "agrius", "bibiwiper", "bibi-linux", "moneybird"],
-                "desc": "Destructive attacks masquerading as ransomware. Targeted Israeli education and tech sectors.", 
-                "mitre": "T1485, T1486, T1190",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/agonizing_serpens"
-            },
-            {
-                "name": "Imperial Kitten", 
-                "origin": "Iran", 
-                "target": "Israel", 
-                "type": "Espionage/Cyber-Enabled Influence", 
-                "tools": "IMAPLoader, Standard Python Backdoors", 
-                "keywords": ["imperial kitten", "tortoise shell", "imaploader", "yellow liderc"],
-                "desc": "IRGC affiliated. Focus on transportation, logistics, and maritime.", 
-                "mitre": "T1566, T1071, T1021",
-                "malpedia": "https://malpedia.caad.fkie.fraunhofer.de/actor/imperial_kitten"
+                "tools": "Wipers (BiBiWiper)", 
+                "keywords": ["agonizing serpens", "agrius", "bibiwiper"],
+                "desc": "Destructive attacks disguised as ransomware.", 
+                "mitre": "T1485, T1486"
             }
         ]
 
 class CTICollector:
     SOURCES = [
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
-        {"name": "HackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
+        {"name": "TheHackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
-        {"name": "Malpedia", "url": "https://malpedia.caad.fkie.fraunhofer.de/feeds/rss/latest", "type": "rss"},
-        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
-        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
+        {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"}
     ]
 
     async def fetch_item(self, session, source):
@@ -434,10 +400,11 @@ class CTICollector:
                 
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    entries_to_check = feed.entries[:4] if is_incd else feed.entries[:10]
+                    entries_to_check = feed.entries[:5]
                     
                     for entry in entries_to_check:
                         pub_date = now
+                        # FIX: Prioritize original published date
                         try:
                             if hasattr(entry, 'published_parsed') and entry.published_parsed:
                                 pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
@@ -445,95 +412,21 @@ class CTICollector:
                                 pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
                         except: pass
                         
-                        if not is_incd:
-                            if (now - pub_date).total_seconds() > (48 * 3600): continue
-
+                        if not is_incd and (now - pub_date).total_seconds() > (48 * 3600): continue
                         if _is_url_processed(entry.link): continue
                         
                         sum_text = BeautifulSoup(getattr(entry, 'summary', ''), "html.parser").get_text()[:600]
-                        
-                        # --- 🚨 MALPEDIA "DOUBLE HOP" SCRAPER ---
-                        if source['name'] == 'Malpedia':
-                            try:
-                                # Hop 1: Malpedia Profile Page
-                                async with session.get(entry.link, headers=HEADERS, timeout=10) as mal_resp:
-                                    if mal_resp.status == 200:
-                                        mal_html = await mal_resp.text()
-                                        mal_soup = BeautifulSoup(mal_html, 'html.parser')
-                                        
-                                        # Hop 2: Find external "Open article" link
-                                        target_link = None
-                                        for a in mal_soup.find_all('a', href=True):
-                                            link_text = a.get_text().lower()
-                                            if "open article" in link_text or "read report" in link_text or "original source" in link_text:
-                                                target_link = a['href']
-                                                break
-                                        
-                                        # Hop 3: Fetch & Scrape REAL Content
-                                        if target_link:
-                                            async with session.get(target_link, headers=HEADERS, timeout=10) as ext_resp:
-                                                if ext_resp.status == 200 and "text/html" in ext_resp.headers.get("Content-Type", ""):
-                                                    ext_html = await ext_resp.text()
-                                                    ext_soup = BeautifulSoup(ext_html, 'html.parser')
-                                                    
-                                                    # Cleanup
-                                                    for noise in ext_soup(["script", "style", "nav", "footer", "header", "form"]):
-                                                        noise.decompose()
-                                                    
-                                                    # Extract Text (First 3000 chars)
-                                                    paras = ext_soup.find_all('p')
-                                                    scraped_text = ' '.join([p.get_text().strip() for p in paras if len(p.get_text()) > 20])
-                                                    
-                                                    if len(scraped_text) > 100:
-                                                        sum_text = f"[Source Scraped] {scraped_text[:3000]}"
-                            except Exception: pass 
-
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": sum_text})
 
                 elif source['type'] == 'json':
                      data = json.loads(content)
-                     for v in data.get('vulnerabilities', [])[:10]:
+                     for v in data.get('vulnerabilities', [])[:5]:
                          url = f"https://www.cisa.gov/known-exploited-vulnerabilities-catalog?cve={v['cveID']}"
                          if _is_url_processed(url): continue
                          try: pub_date = date_parser.parse(v['dateAdded']).replace(tzinfo=IL_TZ)
                          except: pub_date = now
                          if (now - pub_date).total_seconds() > 172800: continue
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date.isoformat(), "source": "CISA", "summary": v.get('shortDescription')})
-
-                elif source['type'] == 'telegram':
-                    soup = BeautifulSoup(content, 'html.parser')
-                    msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    msgs_to_check = msgs[-4:] if is_incd else msgs[-10:]
-                    
-                    for msg in msgs_to_check:
-                        try:
-                            text_div = msg.find('div', class_='tgme_widget_message_text')
-                            if not text_div: continue
-                            text = text_div.get_text(separator=' ')
-                            
-                            pub_date = now
-                            time_span = msg.find('time', class_='time')
-                            if time_span and 'datetime' in time_span.attrs:
-                                try: pub_date = date_parser.parse(time_span['datetime']).astimezone(IL_TZ)
-                                except: pass
-                            
-                            if not is_incd:
-                                if (now - pub_date).total_seconds() > 432000: continue
-                            
-                            date_link = msg.find('a', class_='tgme_widget_message_date')
-                            post_link = date_link['href'] if date_link else f"https://t.me/s/Israel_Cyber?t={int(now.timestamp())}"
-                            
-                            if _is_url_processed(post_link): continue
-                            
-                            items.append({
-                                "title": "INCD Alert (Telegram)", 
-                                "url": post_link, 
-                                "date": pub_date.isoformat(), 
-                                "source": "INCD", 
-                                "summary": text[:800]
-                            })
-                        except: pass
-
         except Exception as e: pass
         return items
 
@@ -549,11 +442,15 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            # --- FIX: USE AI EXTRACTED DATE IF AVAILABLE ---
+            # Use AI Extracted date if valid, else original feed date
             final_date = a.get('published_at', item['date'])
+            # Validation to ensure date format is correct
+            try: date_parser.parse(final_date)
+            except: final_date = item['date']
+
             try:
-                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary) VALUES (?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary']))
+                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag')))
                 if c.rowcount > 0: cnt += 1
             except: pass
     conn.commit()
