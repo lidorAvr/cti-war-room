@@ -34,45 +34,23 @@ st.markdown("""
     .stButton button { width: 100%; font-family: 'Rubik', sans-serif; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { justify-content: flex-end; gap: 15px; }
     
-    /* Tool Cards */
-    .tool-card {
-        background: rgba(30, 41, 59, 0.6);
-        border: 1px solid rgba(56, 189, 248, 0.2);
-        border-radius: 10px;
-        padding: 15px;
-        text-align: center;
-        transition: all 0.2s;
-        margin-bottom: 10px;
-        height: 100%;
-        color: white;
-    }
-    .tool-card:hover {
-        background: rgba(56, 189, 248, 0.15);
-        border-color: #38bdf8;
-        transform: translateY(-2px);
-    }
-    .tool-icon { font-size: 24px; margin-bottom: 5px; display: block; }
-    .tool-name { font-weight: bold; color: #e2e8f0; display: block; margin-bottom: 5px; }
-    .tool-desc { font-size: 0.8rem; color: #94a3b8; display: block; }
-    a { text-decoration: none; }
-
     /* Report Cards */
     .report-card {
         background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1); border-radius: 12px; padding: 24px; margin-bottom: 20px;
     }
-    
-    /* Footer */
-    .footer {
-        position: fixed; left: 0; bottom: 0; width: 100%;
-        background: rgba(15, 23, 42, 0.95); border-top: 1px solid #1e293b;
-        color: #64748b; text-align: center; padding: 10px; font-size: 0.75rem; direction: ltr; z-index: 999;
+
+    /* IOC Score Cards */
+    .ioc-card {
+        padding: 15px; border-radius: 10px; text-align: center; color: white; margin-bottom: 10px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
     }
-    
-    /* IOC Dashboard */
-    .metric-box {
-        background: #1e293b; border: 1px solid #334155; padding: 15px; border-radius: 8px; text-align: center;
-    }
+    .ioc-safe { background: linear-gradient(135deg, #10b981, #059669); }
+    .ioc-danger { background: linear-gradient(135deg, #ef4444, #b91c1c); }
+    .ioc-neutral { background: linear-gradient(135deg, #64748b, #475569); }
+    .ioc-title { font-size: 0.9rem; font-weight: bold; opacity: 0.9; }
+    .ioc-value { font-size: 1.8rem; font-weight: bold; margin: 5px 0; }
+    .ioc-sub { font-size: 0.8rem; opacity: 0.8; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -91,8 +69,6 @@ def get_feed_card_html(row, date_str):
         
     source_display = f"🇮🇱 {row['source']}" if row['source'] == 'INCD' else f"📡 {row['source']}"
     tag_display = row.get('tags', 'כללי')
-    
-    # Render bullet points
     summary = clean_html(row['summary']).replace('\n', '<br>')
     
     return f"""
@@ -141,8 +117,7 @@ async def perform_update():
 if "booted" not in st.session_state:
     st.markdown("<h3 style='text-align:center;'>🚀 טוען מערכת מודיעין...</h3>", unsafe_allow_html=True)
     asyncio.run(perform_update())
-    
-    # Auto Run Deep Scan (No Button)
+    # Deep Scan Background
     threats = APTSheetCollector().fetch_threats()
     scanner = DeepWebScanner()
     proc = AIBatchProcessor(GROQ_KEY)
@@ -151,7 +126,6 @@ if "booted" not in st.session_state:
         if res:
              analyzed = asyncio.run(proc.analyze_batch(res))
              save_reports(res, analyzed)
-             
     st.session_state['booted'] = True
     st.rerun()
 
@@ -193,11 +167,9 @@ with tab_feed:
     df_rest = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND source != 'DeepWeb' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
     conn.close()
     
-    # 1. Merge
+    # SORT BY DATE
     df = pd.concat([df_incd, df_rest])
-    # 2. Convert Dates
     df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
-    # 3. Sort Strictly Newest First
     df = df.sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
     
     c1, c2 = st.columns(2)
@@ -209,24 +181,20 @@ with tab_feed:
     
     if f_tag != 'הכל': df = df[df['tags'] == f_tag]
     if "גבוה" in f_sev: df = df[df['severity'].str.contains('Critical|High', case=False)]
-    elif "בינוני" in f_sev: df = df[df['severity'].str.contains('Medium', case=False)]
-    elif "נמוך" in f_sev: df = df[df['severity'].str.contains('Low|Info', case=False)]
-
-    if df.empty: st.info("לא נמצאו ידיעות התואמות את הסינון.")
     
     for _, row in df.iterrows():
         try:
-            dt_obj = row['published_at']
-            if dt_obj is pd.NaT: date_display = "תאריך לא ידוע"
+            dt = row['published_at']
+            if pd.isnull(dt): date_display = "תאריך לא ידוע"
             else:
-                if dt_obj.tzinfo is None: dt_obj = pytz.utc.localize(dt_obj).astimezone(IL_TZ)
-                else: dt_obj = dt_obj.astimezone(IL_TZ)
-                date_display = dt_obj.strftime('%d/%m %H:%M')
-        except: date_display = "--/-- --:--"
+                if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
+                else: dt = dt.astimezone(IL_TZ)
+                date_display = dt.strftime('%d/%m %H:%M')
+        except: date_display = "--/--"
         
         st.markdown(get_feed_card_html(row, date_display), unsafe_allow_html=True)
 
-# --- TAB 2: DOSSIER (RICH) ---
+# --- TAB 2: DOSSIER ---
 with tab_strat:
     threats = APTSheetCollector().fetch_threats()
     sel = st.selectbox("בחר קבוצה", [t['name'] for t in threats])
@@ -246,7 +214,6 @@ with tab_strat:
     </div>
     """, unsafe_allow_html=True)
     
-    # Auto-fetched results
     conn = sqlite3.connect(DB_NAME)
     df_deep = pd.read_sql_query(f"SELECT * FROM intel_reports WHERE source = 'DeepWeb' AND actor_tag = '{actor['name']}' ORDER BY published_at DESC LIMIT 10", conn)
     conn.close()
@@ -255,39 +222,25 @@ with tab_strat:
     if not df_deep.empty:
         for _, row in df_deep.iterrows():
             st.markdown(get_feed_card_html(row, "Deep Web Hit"), unsafe_allow_html=True)
-    else:
-        st.info("לא נמצאו ממצאים חדשים בסריקה האחרונה.")
 
 # --- TAB 3: TOOLS & LAB ---
 with tab_tools:
-    st.markdown("#### 🛠️ ארגז כלים")
-    toolkit = AnalystToolkit.get_tools()
+    st.markdown("#### 🔬 מעבדת חקירות (IOC Analysis)")
     
-    c1, c2, c3 = st.columns(3)
-    cols = [c1, c2, c3]
-    for i, (category, tools) in enumerate(toolkit.items()):
-        with cols[i]:
-            st.markdown(f"**{category}**")
-            for tool in tools:
-                st.markdown(f"""
-                <a href="{tool['url']}" target="_blank">
-                    <div class="tool-card">
-                        <span class="tool-icon">{tool['icon']}</span>
-                        <span class="tool-name">{tool['name']}</span>
-                        <span class="tool-desc">{tool['desc']}</span>
-                    </div>
-                </a>
-                """, unsafe_allow_html=True)
+    # Tool Shortcuts
+    with st.expander("🛠️ ארגז כלים מהיר", expanded=False):
+        toolkit = AnalystToolkit.get_tools()
+        c1, c2, c3 = st.columns(3)
+        cols = [c1, c2, c3]
+        for i, (category, tools) in enumerate(toolkit.items()):
+            with cols[i]:
+                st.markdown(f"**{category}**")
+                for tool in tools:
+                    st.markdown(f"[{tool['icon']} {tool['name']}]({tool['url']})")
 
-    st.markdown("---")
-    st.markdown("#### 🔬 חקירת IOC")
-    
-    # State reset logic
-    if 'scan_res' not in st.session_state: st.session_state['scan_res'] = None
-    
     ioc_in = st.text_input("הזן אינדיקטור (IP/URL/Hash)", key="ioc_input")
     if st.button("בצע חקירה"):
-        st.session_state['scan_res'] = None # Clear previous
+        st.session_state['scan_res'] = None 
         itype = identify_ioc_type(ioc_in)
         if itype:
             tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
@@ -297,69 +250,59 @@ with tab_tools:
                 ab = tl.query_abuseipdb(ioc_in) if itype == 'ip' else None
                 ai_res = asyncio.run(AIBatchProcessor(GROQ_KEY).analyze_single_ioc(ioc_in, itype, {'virustotal': vt, 'urlscan': us}))
                 
-                st.session_state['scan_res'] = {
-                    'vt': vt, 'us': us, 'ab': ab, 'ai': ai_res, 'type': itype
-                }
+                st.session_state['scan_res'] = {'vt': vt, 'us': us, 'ab': ab, 'ai': ai_res, 'type': itype}
 
-    # Result Display
+    # VISUAL RESULTS
     res = st.session_state.get('scan_res')
     if res:
         vt, us, ab = res['vt'], res['us'], res['ab']
         
-        # 1. High Level Metrics
-        m1, m2, m3 = st.columns(3)
+        # SCORE CARDS
+        c1, c2, c3 = st.columns(3)
+        
+        # VT CARD
         if vt:
             mal = vt.get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0)
-            m1.metric("VirusTotal", f"{mal} Hits", delta="Malicious" if mal>0 else "Clean", delta_color="inverse")
-        else: m1.metric("VirusTotal", "N/A")
+            color_class = "ioc-danger" if mal > 0 else "ioc-safe"
+            c1.markdown(f"""
+            <div class="ioc-card {color_class}">
+                <div class="ioc-title">VirusTotal</div>
+                <div class="ioc-value">{mal}</div>
+                <div class="ioc-sub">Malicious Hits</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+             c1.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">VirusTotal</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
         
+        # ABUSEIPDB CARD
         if ab:
-            m2.metric("AbuseIPDB", f"{ab.get('abuseConfidenceScore', 0)}%", "Confidence")
-        else: m2.metric("AbuseIPDB", "N/A", "IP Only")
+            score = ab.get('abuseConfidenceScore', 0)
+            color_class = "ioc-danger" if score > 50 else "ioc-safe"
+            c2.markdown(f"""
+            <div class="ioc-card {color_class}">
+                <div class="ioc-title">AbuseIPDB</div>
+                <div class="ioc-value">{score}%</div>
+                <div class="ioc-sub">Confidence</div>
+            </div>
+            """, unsafe_allow_html=True)
+        elif res['type'] != 'ip':
+             c2.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">AbuseIPDB</div><div class="ioc-value">IP Only</div></div>""", unsafe_allow_html=True)
         
+        # URLSCAN CARD
         if us:
-            m3.metric("URLScan", "Found", "View Below")
-        else: m3.metric("URLScan", "N/A")
-        
-        # 2. Detailed Tabs
-        t1, t2, t3, t4 = st.tabs(["🤖 ניתוח AI", "🦠 VirusTotal", "📷 URLScan", "🚫 AbuseIPDB"])
-        
+             c3.markdown("""<div class="ioc-card ioc-safe"><div class="ioc-title">URLScan</div><div class="ioc-value">Found</div><div class="ioc-sub">View Details</div></div>""", unsafe_allow_html=True)
+        else:
+             c3.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">URLScan</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
+
+        # DETAILS TABS
+        t1, t2, t3 = st.tabs(["🤖 ניתוח AI", "🦠 נתונים טכניים", "📷 צילום מסך"])
         with t1:
-            st.markdown(f'<div style="direction:rtl; text-align:right;">{res["ai"]}</div>', unsafe_allow_html=True)
-            
+             st.markdown(f'<div style="direction:rtl; text-align:right;">{res["ai"]}</div>', unsafe_allow_html=True)
         with t2:
-            if vt:
-                attr = vt.get('attributes', {})
-                st.json({
-                    "Reputation": attr.get('reputation'),
-                    "Tags": attr.get('tags'),
-                    "Created": datetime.datetime.fromtimestamp(attr.get('creation_date', 0)).strftime('%Y-%m-%d') if attr.get('creation_date') else 'N/A',
-                    "Stats": attr.get('last_analysis_stats')
-                })
-            else: st.warning("אין תוצאות.")
-
+             if vt: st.json(vt.get('attributes', {}).get('last_analysis_stats'))
         with t3:
-            if us:
-                task = us.get('task', {})
-                page = us.get('page', {})
-                if task.get('screenshotURL'):
-                    st.image(task.get('screenshotURL'), caption="Screenshot")
-                
-                st.write("#### 🔗 שרשרת הפניות (Redirects)")
-                st.write(f"Target: {task.get('url')}")
-                st.write(f"Final URL: {page.get('url')}")
-                st.write(f"Server: {page.get('server')}")
-                st.write(f"Country: {page.get('country')}")
-            else: st.warning("אין תוצאות.")
+             if us: st.image(us.get('task', {}).get('screenshotURL'))
 
-        with t4:
-            if ab:
-                st.write(f"**ISP:** {ab.get('isp')}")
-                st.write(f"**Usage:** {ab.get('usageType')}")
-                st.write(f"**Host:** {ab.get('hostnames')}")
-            else: st.warning("רלוונטי ל-IP בלבד.")
-
-# --- TAB 4: MAP ---
 with tab_map:
     components.iframe("https://threatmap.checkpoint.com/", height=700)
 
