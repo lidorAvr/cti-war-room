@@ -28,6 +28,38 @@ HEADERS = {
     'Accept-Language': 'he-IL,he;q=0.9,en-US;q=0.8,en;q=0.7'
 }
 
+# --- DATE HELPER ---
+def parse_flexible_date(date_obj):
+    """
+    Robust date parser that handles RSS struct_time, strings, and NaTs.
+    Returns ISO format string in Israel Time.
+    """
+    now = datetime.datetime.now(IL_TZ)
+    try:
+        # Case 1: RSS struct_time
+        if isinstance(date_obj, time.struct_time):
+            dt = datetime.datetime(*date_obj[:6], tzinfo=pytz.utc)
+            return dt.astimezone(IL_TZ).isoformat()
+        
+        # Case 2: String
+        if isinstance(date_obj, str):
+            dt = date_parser.parse(date_obj)
+            if dt.tzinfo is None:
+                dt = pytz.utc.localize(dt)
+            return dt.astimezone(IL_TZ).isoformat()
+            
+        # Case 3: DateTime object
+        if isinstance(date_obj, datetime.datetime):
+            if date_obj.tzinfo is None:
+                date_obj = pytz.utc.localize(date_obj)
+            return date_obj.astimezone(IL_TZ).isoformat()
+            
+    except:
+        pass
+    
+    # Fallback to NOW if parsing fails (keeps chronology)
+    return now.isoformat()
+
 # --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
     ioc = ioc.strip()
@@ -88,6 +120,7 @@ class DeepWebScanner:
                 for res in ddg_results:
                     url = res.get('href')
                     if _is_url_processed(url): continue
+                    
                     results.append({
                         "title": res.get('title'),
                         "url": url,
@@ -113,7 +146,7 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
-    # Models to try in order (Fallback mechanism)
+    # Fallback Mechanism
     models = [model, "llama-3.1-8b-instant"]
     
     for m in models:
@@ -122,23 +155,20 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
         
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.post(url, json=payload, headers=headers, timeout=40) as resp:
+                async with session.post(url, json=payload, headers=headers, timeout=45) as resp:
+                    if resp.status == 429:
+                        time.sleep(1)
+                        continue
                     if resp.status == 200:
                         data = await resp.json()
                         return data['choices'][0]['message']['content']
-                    elif resp.status == 429:
-                        print(f"Rate limit on {m}, switching...")
-                        continue # Try next model
-                    else:
-                        return f"Error {resp.status}"
-            except Exception as e: 
-                continue
+            except: continue
                 
-    return "Error: All AI models busy."
+    return None
 
 def translate_with_gemini_hebrew(text_content):
     """
-    Polishes text to professional Hebrew using Gemini.
+    Enforces Hebrew translation via Gemini.
     """
     try:
         gemini_key = st.secrets.get("gemini_key")
@@ -148,12 +178,12 @@ def translate_with_gemini_hebrew(text_content):
         model = genai.GenerativeModel('gemini-pro')
         
         prompt = f"""
-        Act as a Cyber News Editor for an Israeli defense agency.
-        Task: Translate/Rewrite the following text into clear, professional Hebrew.
+        Act as a Cyber Intelligence Editor.
+        Task: Rewrite the following text into professional Hebrew.
         Rules:
-        1. Keep technical terms (CVE, Malware names, Attack vectors) in English.
-        2. Style: Concise, informative, "bottom line" first.
-        3. If the input is already Hebrew, just polish it.
+        1. Keep technical terms (CVE, Malware, Exploit) in English.
+        2. If the text is a long Telegram message, summarize it into 3 bullet points.
+        3. Tone: Operational, Concise.
         
         Input:
         {text_content}
@@ -187,7 +217,7 @@ class AIBatchProcessor:
 
     async def analyze_batch(self, items):
         if not items: return []
-        chunk_size = 3 # Smaller chunks for better attention
+        chunk_size = 3 
         results = []
         
         system_instruction = """
@@ -196,8 +226,9 @@ class AIBatchProcessor:
         
         For each item:
         1. **Title**: Professional Hebrew title.
-        2. **Summary**: A concise Hebrew summary (3-4 bullet points max). extracting the core intelligence (Who, What, Impact).
-        3. **Logic**: If the source text is messy (like Telegram dumps), clean it up.
+        2. **Summary**: A concise Hebrew summary (Maximum 3 sentences or bullet points). 
+           - IF TEXT IS LONG (like Telegram): Summarize the "Bottom Line".
+           - Keep technical terms in English.
         
         Output JSON: {"items": [{"id": 0, "title": "Hebrew Title", "summary": "Hebrew Summary"}]}
         """
@@ -208,27 +239,29 @@ class AIBatchProcessor:
             batch_text = "\n".join(batch_lines)
             prompt = f"{system_instruction}\nData:\n{batch_text}"
             
-            # 1. Groq Analysis (Drafting)
+            # 1. Groq Analysis
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             
             chunk_map = {}
-            try:
-                data = json.loads(res)
-                for item in data.get("items", []): chunk_map[item.get('id')] = item
-            except: pass
+            if res:
+                try:
+                    data = json.loads(res)
+                    for item in data.get("items", []): chunk_map[item.get('id')] = item
+                except: pass
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
                 
-                # 2. Heuristic Tagging (Backup if AI fails)
+                # 2. Heuristic Tagging
                 raw_txt = (chunk[j]['title'] + chunk[j]['summary'])
                 final_tag, final_sev = self._determine_tag_severity(raw_txt, chunk[j]['source'])
                 
-                # 3. Gemini Polish (Translation)
+                # 3. Gemini Polish (Translation & Summary Enforcement)
+                # Fallback to original text if AI failed
                 draft_title = ai.get('title', chunk[j]['title'])
                 draft_sum = ai.get('summary', chunk[j]['summary'])
                 
-                # Double pass: Ensure it's Hebrew
+                # If still English, force Gemini
                 heb_title = translate_with_gemini_hebrew(draft_title)
                 heb_sum = translate_with_gemini_hebrew(draft_sum)
 
@@ -237,7 +270,7 @@ class AIBatchProcessor:
                     "severity": final_sev, 
                     "title": heb_title,
                     "summary": heb_sum,
-                    "published_at": chunk[j]['date'], # Keep original date
+                    "published_at": chunk[j]['date'], 
                     "actor_tag": chunk[j].get('actor_tag', None),
                     "tags": final_tag
                 })
@@ -260,8 +293,8 @@ class AIBatchProcessor:
         * **חסימה**: Firewall/Proxy rules.
         * **ציד**: What to look for in EDR.
         """
-        # Using smaller model for speed if needed, but trying strong one first
-        return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+        res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+        return res if res else "שגיאה בניתוח AI. נסה שנית."
 
     def _extract_key_intel(self, raw_data):
         summary = {}
@@ -271,9 +304,6 @@ class AIBatchProcessor:
                 'malicious_votes': vt.get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0),
                 'tags': vt.get('attributes', {}).get('tags', [])
             }
-        if 'urlscan' in raw_data and raw_data['urlscan']:
-            us = raw_data['urlscan']
-            summary['urlscan'] = {'verdict': us.get('verdict'), 'country': us.get('page', {}).get('country')}
         return summary
 
     async def generate_hunting_queries(self, actor):
@@ -300,11 +330,15 @@ class ThreatLookup:
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
-            data = res.json()
-            if data.get('results'):
-                scan_id = data['results'][0]['_id']
-                return requests.get(f"https://urlscan.io/api/v1/result/{scan_id}/", headers={"API-Key": self.urlscan_key}, timeout=10).json()
+            # 1. Search
+            search_res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
+            search_data = search_res.json()
+            
+            if search_data.get('results'):
+                # 2. Get Full Result of the most recent scan
+                scan_id = search_data['results'][0]['_id']
+                full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_id}/", headers={"API-Key": self.urlscan_key}, timeout=10)
+                return full_res.json() if full_res.status_code == 200 else None
             return None
         except: return None
 
@@ -338,36 +372,36 @@ class AnalystToolkit:
 
 class APTSheetCollector:
     def fetch_threats(self): 
-        # Richer Data
+        # Richer Data for Analyst
         return [
             {
                 "name": "MuddyWater", 
-                "origin": "Iran", 
-                "target": "Israel, Middle East", 
-                "type": "Espionage / Destructive", 
-                "tools": "PowerShell, Ligolo, ScreenConnect, SimpleHelp", 
+                "origin": "Iran (MOIS)", 
+                "target": "Israel, Turkey, Jordan", 
+                "type": "Espionage", 
+                "tools": "PowerShell, Ligolo, ScreenConnect", 
                 "keywords": ["muddywater", "static_kitten", "mercury"], 
-                "desc": "קבוצה בחסות משרד המודיעין האיראני (MOIS). מתמחה בפישינג ממוקד ושימוש בכלי שליטה מרחוק (RMM).", 
-                "mitre": "T1059, T1105, T1566"
+                "desc": "קבוצת תקיפה המזוהה עם משרד המודיעין האיראני. מתמקדת בגניבת מידע ממשלתי וצבאי באמצעות פישינג וכלי RMM.", 
+                "mitre": "T1059.001, T1105, T1021"
             },
             {
                 "name": "OilRig (APT34)", 
-                "origin": "Iran", 
-                "target": "Israel, Critical Infra", 
+                "origin": "Iran (IRGC)", 
+                "target": "Israel Critical Infra", 
                 "type": "Espionage", 
                 "tools": "Karkoff, SideTwist, DNSpionage", 
                 "keywords": ["oilrig", "apt34", "helix_kitten"], 
-                "desc": "מתמקדת בתשתיות קריטיות, פיננסים וממשל. משתמשת בטכניקות DNS Tunneling להעברת מידע.", 
-                "mitre": "T1071, T1048"
+                "desc": "מתמקדת במגזרי פיננסים, אנרגיה ותקשורת. ידועה בשימוש ב-DNS Tunneling ובתקיפות שרשרת אספקה.", 
+                "mitre": "T1071.004, T1048"
             },
             {
                 "name": "Agonizing Serpens", 
                 "origin": "Iran", 
                 "target": "Israel (Education, Tech)", 
                 "type": "Wiper / Destructive", 
-                "tools": "BiBiWiper, SQL Injection", 
+                "tools": "BiBiWiper, Moneybird", 
                 "keywords": ["agonizing serpens", "bibiwiper", "moneybird"], 
-                "desc": "קבוצה הרסנית המתחזה לכופרה אך מטרתה השמדת מידע (Wipers). תקפה את הטכניון.", 
+                "desc": "קבוצה הרסנית. מתחזה לכופרה אך מטרתה השמדת מידע. תקפה את הטכניון ואת חברת הייעוץ הכלכלי.", 
                 "mitre": "T1485, T1486"
             }
         ]
@@ -388,7 +422,6 @@ class CTICollector:
             async with session.get(source['url'], headers=HEADERS, timeout=25) as resp:
                 if resp.status != 200: return []
                 content = await resp.text()
-                now = datetime.datetime.now(IL_TZ)
                 
                 # --- RSS ---
                 if source['type'] == 'rss':
@@ -396,54 +429,40 @@ class CTICollector:
                     entries = feed.entries[:4] if source['name'] == 'INCD' else feed.entries[:5]
 
                     for entry in entries:
-                        # Robust Date Parsing
-                        pub_date = now
-                        try:
-                            if hasattr(entry, 'published_parsed') and entry.published_parsed:
-                                pub_date = datetime.datetime(*entry.published_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
-                            elif hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                                pub_date = datetime.datetime(*entry.updated_parsed[:6]).replace(tzinfo=pytz.utc).astimezone(IL_TZ)
-                        except: pass
+                        # Use Flexible Parser
+                        date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
+                        pub_date = parse_flexible_date(date_raw)
                         
-                        if source['name'] != 'INCD' and (now - pub_date).total_seconds() > 172800: continue
-                        if _is_url_processed(entry.link): continue
-                        
-                        items.append({"title": entry.title, "url": entry.link, "date": pub_date.isoformat(), "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:1000]})
+                        items.append({"title": entry.title, "url": entry.link, "date": pub_date, "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:1500]})
 
                 # --- JSON ---
                 elif source['type'] == 'json':
                      data = json.loads(content)
                      for v in data.get('vulnerabilities', [])[:5]:
                          url = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
-                         if _is_url_processed(url): continue
-                         # Use DateAdded
-                         try: pub_date = date_parser.parse(v['dateAdded']).astimezone(IL_TZ).isoformat()
-                         except: pub_date = now.isoformat()
-                         
+                         pub_date = parse_flexible_date(v.get('dateAdded'))
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
                 
                 # --- TELEGRAM ---
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
+                    # Force 4 items
                     for msg in msgs[-4:]:
                         try:
                             text_div = msg.find('div', class_='tgme_widget_message_text')
                             if not text_div: continue
                             text = text_div.get_text(separator=' ')
                             
-                            # Extract time
-                            pub_date = now
+                            # Time Extraction
                             time_tag = msg.find('time')
-                            if time_tag and 'datetime' in time_tag.attrs:
-                                try: pub_date = date_parser.parse(time_tag['datetime']).astimezone(IL_TZ)
-                                except: pass
+                            date_raw = time_tag['datetime'] if time_tag else None
+                            pub_date = parse_flexible_date(date_raw)
                             
                             link = msg.find('a', class_='tgme_widget_message_date')
                             url = link['href'] if link else source['url']
-                            if _is_url_processed(url): continue
                             
-                            items.append({"title": "התרעת מערך הסייבר", "url": url, "date": pub_date.isoformat(), "source": "INCD", "summary": text})
+                            items.append({"title": "התרעת מערך הסייבר", "url": url, "date": pub_date, "source": "INCD", "summary": text})
                         except: pass
 
         except: pass
@@ -461,12 +480,12 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            # Priority to parsed date, else current
-            date_val = a.get('published_at', item['date'])
+            # Use original parsed date from fetch_item to ensure consistency
+            final_date = item['date'] 
             
             try:
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), date_val, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag'), a.get('tags')))
+                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag'), a.get('tags')))
                 if c.rowcount > 0: cnt += 1
             except: pass
     conn.commit()
