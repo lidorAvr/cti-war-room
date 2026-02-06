@@ -330,13 +330,13 @@ class ThreatLookup:
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # 1. Search
-            search_res = requests.get(f"https://urlscan.io/api/v1/search/?q={ioc}", headers={"API-Key": self.urlscan_key}, timeout=10)
-            search_data = search_res.json()
-            
-            if search_data.get('results'):
+            # 1. Search with quotes to handle special chars/shorteners
+            search_query = f'"{ioc}"'
+            res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=10)
+            data = res.json()
+            if data.get('results'):
                 # 2. Get Full Result of the most recent scan
-                scan_id = search_data['results'][0]['_id']
+                scan_id = data['results'][0]['_id']
                 full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_id}/", headers={"API-Key": self.urlscan_key}, timeout=10)
                 return full_res.json() if full_res.status_code == 200 else None
             return None
@@ -426,7 +426,8 @@ class CTICollector:
                 # --- RSS ---
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    entries = feed.entries[:4] if source['name'] == 'INCD' else feed.entries[:5]
+                    # INCREASED LIMIT TO 10
+                    entries = feed.entries[:10]
 
                     for entry in entries:
                         # Use Flexible Parser
@@ -438,7 +439,7 @@ class CTICollector:
                 # --- JSON ---
                 elif source['type'] == 'json':
                      data = json.loads(content)
-                     for v in data.get('vulnerabilities', [])[:5]:
+                     for v in data.get('vulnerabilities', [])[:10]: # Increased to 10
                          url = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
                          pub_date = parse_flexible_date(v.get('dateAdded'))
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
@@ -447,8 +448,8 @@ class CTICollector:
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    # Force 4 items
-                    for msg in msgs[-4:]:
+                    # Force 10 items
+                    for msg in msgs[-10:]:
                         try:
                             text_div = msg.find('div', class_='tgme_widget_message_text')
                             if not text_div: continue
