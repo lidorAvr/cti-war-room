@@ -1,12 +1,10 @@
 streamlit
-streamlit-autorefresh
 pandas
 requests
 beautifulsoup4
+feedparser
+google-generativeai
+duckduckgo-search
+aiohttp
 python-dateutil
 pytz
-aiohttp
-feedparser
-lxml
-ddgs
-google-generativeai
