@@ -14,7 +14,6 @@ import time
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-# --- FIX: Correct Import for New Version ---
 from duckduckgo_search import DDGS
 import google.generativeai as genai
 import streamlit as st
@@ -23,6 +22,10 @@ from fake_useragent import UserAgent
 
 DB_NAME = "cti_dashboard.db"
 IL_TZ = pytz.timezone('Asia/Jerusalem')
+
+# --- CONFIGURATION ---
+HISTORY_DAYS = 7    # טווח קשיח: שבוע אחרון בלבד
+FETCH_LIMIT = 100   # מקסימום שאיבה מכל מקור
 
 # --- ROBUST HEADERS ---
 def get_headers():
@@ -48,6 +51,15 @@ def parse_flexible_date(date_obj):
             return date_obj.astimezone(IL_TZ).isoformat()
     except: pass
     return now.isoformat()
+
+def is_recent(date_str):
+    """Checks if an ISO date string is within the HISTORY_DAYS window."""
+    try:
+        dt = date_parser.parse(date_str)
+        if dt.tzinfo is None: dt = pytz.utc.localize(dt)
+        limit = datetime.datetime.now(dt.tzinfo) - datetime.timedelta(days=HISTORY_DAYS)
+        return dt > limit
+    except: return True # If unsure, keep it
 
 # --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
@@ -80,8 +92,9 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_title ON intel_reports(title)")
-    # Keep 14 days of history
-    limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=14)).isoformat()
+    
+    # Strict cleanup of old data
+    limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=HISTORY_DAYS)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
     conn.close()
@@ -93,7 +106,6 @@ def get_existing_data():
         c.execute("SELECT url, title FROM intel_reports")
         rows = c.fetchall()
         conn.close()
-        # Return sets for O(1) lookup
         return {row[0] for row in rows}, {row[1] for row in rows}
     except: return set(), set()
 
@@ -103,7 +115,6 @@ class DeepWebScanner:
         results = []
         try:
             query = f'"{actor_name}" cyber threat intelligence malware analysis report'
-            # Fixed DDGS usage for version >= 6.0.0
             with DDGS() as ddgs:
                 ddg_results = list(ddgs.text(query, max_results=limit))
                 existing_urls, _ = get_existing_data()
@@ -150,9 +161,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     return None
 
 def polish_with_gemini(text_content):
-    """
-    Unit 8200 Editor: Rewrites content to be professional, Hebrew, and operational.
-    """
     try:
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key: return text_content
@@ -195,35 +203,35 @@ class AIBatchProcessor:
         elif "research" in text or "analysis" in text: tag = "מחקר"
         return tag, sev
 
-    def is_similar(self, a, b, threshold=0.7):
+    def is_similar(self, a, b, threshold=0.75):
         return SequenceMatcher(None, a, b).ratio() > threshold
 
     async def analyze_batch(self, items):
         if not items: return []
         existing_urls, existing_titles = get_existing_data()
         
-        # 1. Filter by URL
         items_to_process = [i for i in items if i['url'] not in existing_urls]
         if not items_to_process: return []
 
-        # 2. Python-Side Deduplication (Robust & Safe)
-        # We group similar items purely based on Title similarity before sending to AI
+        # Deduplication (Python Side)
         unique_items = []
         for item in items_to_process:
-            # Check against DB titles
             if any(self.is_similar(item['title'], t) for t in existing_titles): continue
-            # Check against current batch
             if any(self.is_similar(item['title'], u['title']) for u in unique_items): continue
             unique_items.append(item)
 
         if not unique_items: return []
 
-        chunk_size = 5
+        chunk_size = 10 
         results = []
         
         system_instruction = """
         You are a Cyber Intelligence Analyst.
-        Task: Create an intelligence report for each item.
+        
+        **MISSION:**
+        1. Analyze the news items.
+        2. MERGE only if they describe the EXACT same event (Same Victim + Same Attack).
+        3. DO NOT discard unique items. If in doubt, keep it separate.
         
         **OUTPUT LANGUAGE**: Hebrew ONLY (Technical terms in English).
         
@@ -252,7 +260,6 @@ class AIBatchProcessor:
                         if idx is not None and 0 <= idx < len(chunk):
                             original = chunk[idx]
                             
-                            # Polish with Gemini
                             final_title = polish_with_gemini(p_item.get('title'))
                             final_summary = polish_with_gemini(p_item.get('summary'))
                             
@@ -342,21 +349,38 @@ class CTICollector:
             async with session.get(source['url'], headers=get_headers(), timeout=30) as resp:
                 if resp.status != 200: return []
                 content = await resp.text()
+                
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    for entry in feed.entries[:30]:
+                    # --- FETCH LIMIT = 100 ---
+                    for entry in feed.entries[:FETCH_LIMIT]:
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
-                        items.append({"title": entry.title, "url": entry.link, "date": parse_flexible_date(date_raw), "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:2500]})
+                        pub_date = parse_flexible_date(date_raw)
+                        
+                        # --- STRICT 7-DAY FILTER ---
+                        if is_recent(pub_date):
+                            items.append({"title": entry.title, "url": entry.link, "date": pub_date, "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:2500]})
+                
                 elif source['type'] == 'json':
                      data = json.loads(content)
-                     for v in data.get('vulnerabilities', [])[:20]:
-                         items.append({"title": f"KEV: {v['cveID']}", "url": f"https://nvd.nist.gov/vuln/detail/{v['cveID']}", "date": parse_flexible_date(v.get('dateAdded')), "source": "CISA", "summary": v.get('shortDescription')})
+                     # Fetch more to allow date filtering
+                     for v in data.get('vulnerabilities', [])[:50]:
+                         pub_date = parse_flexible_date(v.get('dateAdded'))
+                         if is_recent(pub_date):
+                             items.append({"title": f"KEV: {v['cveID']}", "url": f"https://nvd.nist.gov/vuln/detail/{v['cveID']}", "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
+                
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
-                    for msg in soup.find_all('div', class_='tgme_widget_message_wrap')[-20:]:
+                    for msg in soup.find_all('div', class_='tgme_widget_message_wrap')[-50:]:
                         try:
-                            text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
-                            items.append({"title": "התרעת מערך הסייבר", "url": msg.find('a', class_='tgme_widget_message_date')['href'], "date": parse_flexible_date(msg.find('time')['datetime']), "source": "INCD", "summary": text})
+                            time_tag = msg.find('time')
+                            date_raw = time_tag['datetime'] if time_tag else None
+                            pub_date = parse_flexible_date(date_raw)
+                            
+                            if is_recent(pub_date):
+                                text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
+                                url = msg.find('a', class_='tgme_widget_message_date')['href']
+                                items.append({"title": "התרעת מערך הסייבר", "url": url, "date": pub_date, "source": "INCD", "summary": text})
                         except: pass
         except: pass
         return items
