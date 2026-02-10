@@ -75,30 +75,21 @@ def init_db():
         tags TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_title ON intel_reports(title)")
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=7)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
     conn.close()
 
-def get_existing_urls():
+def get_existing_data():
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        c.execute("SELECT url FROM intel_reports")
-        urls = {row[0] for row in c.fetchall()}
+        c.execute("SELECT url, title FROM intel_reports")
+        rows = c.fetchall()
         conn.close()
-        return urls
-    except: return set()
-
-def _is_url_processed(url):
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT id FROM intel_reports WHERE url = ?", (url,))
-        result = c.fetchone()
-        conn.close()
-        return result is not None
-    except: return False
+        return {row[0] for row in rows}, {row[1] for row in rows}
+    except: return set(), set()
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
@@ -108,9 +99,10 @@ class DeepWebScanner:
             query = f'"{actor_name}" cyber threat intelligence malware analysis report'
             with DDGS() as ddgs:
                 ddg_results = list(ddgs.text(query, max_results=limit))
+                existing_urls, _ = get_existing_data()
                 for res in ddg_results:
                     url = res.get('href')
-                    if _is_url_processed(url): continue
+                    if url in existing_urls: continue
                     results.append({
                         "title": res.get('title'),
                         "url": url,
@@ -150,9 +142,9 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
             except: continue
     return None
 
-def translate_with_gemini_hebrew(text_content):
+def polish_with_gemini(text_content):
     """
-    Polishes the Hebrew to look like a professional Unit 8200 Analyst report.
+    Unit 8200 Editor: Rewrites content to be professional, Hebrew, and operational.
     """
     try:
         gemini_key = st.secrets.get("gemini_key")
@@ -160,23 +152,21 @@ def translate_with_gemini_hebrew(text_content):
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
         
-        # פרומפט "עורך לשוני צבאי" מוקפד
         prompt = f"""
         Act as a Senior Cyber Intelligence Officer (Unit 8200).
-        Your Task: Rewrite and Polish the following text into professional, operational Hebrew.
+        Task: Rewrite the following intelligence report for a CISO.
         
-        CRITICAL RULES:
-        1. **Terminology Fixes**:
-           - "Interference/Disturbance" -> "תקיפה", "קמפיין", "פעילות עוינת" (Context dependent).
-           - "Breach" -> "חדירה", "דליפת מידע".
-           - "Vulnerability" -> "חולשה", "פגיעות".
+         Directives:
+        1. **Language**: High-level Operational Hebrew ONLY.
+        2. **Terminology**:
+           - "Breach" -> "אירוע דליפת מידע" / "חדירה לרשת".
+           - "Attack" -> "מתקפה" / "קמפיין זדוני".
            - "Malware" -> "נוזקה".
+           - "Vulnerability" -> "חולשה" / "פגיעות".
+        3. **Style**: Factual, Concise, No "Machine Translation" feel.
+        4. **Structure**: Ensure flow between points.
         
-        2. **Tone**: Concise, Operational, alarming but factual. NOT "Machine Translation" style.
-        3. **English Preservation**: KEEP technical terms (CVE, RCE, RAT, C2, APT, Phishing) in English.
-        4. **Structure**: If it's a summary, ensure it flows well.
-        
-        Text to Polish:
+        Text:
         {text_content}
         """
         response = model.generate_content(prompt)
@@ -190,7 +180,7 @@ class AIBatchProcessor:
     def _determine_tag_severity(self, text, source):
         text = text.lower()
         sev, tag = "Medium", "כללי"
-        if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt', 'breach']): sev = "High"
+        if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt', 'state-sponsored']): sev = "High"
         if source == "INCD" or "israel" in text or "iran" in text: tag = "ישראל"
         elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "פגיעויות"
         elif "phishing" in text or "credential" in text: tag = "פיישינג"
@@ -200,60 +190,95 @@ class AIBatchProcessor:
 
     async def analyze_batch(self, items):
         if not items: return []
-        existing = get_existing_urls()
-        items_to_process = [i for i in items if i['url'] not in existing]
+        existing_urls, existing_titles = get_existing_data()
+        
+        # 1. Filter by URL to reduce load
+        items_to_process = [i for i in items if i['url'] not in existing_urls]
         if not items_to_process: return []
 
-        chunk_size = 3 
+        # 2. Process in LARGE chunks (10 items) to enable de-duplication
+        chunk_size = 10
         results = []
         
         system_instruction = """
-        You are a Cyber Threat Intelligence Analyst.
-        Task: Analyze the provided cyber security news items.
+        You are a Senior Cyber Intelligence Analyst.
         
-        For each item, output a JSON object with:
-        1. "title": A descriptive, professional Hebrew title.
-        2. "summary": A detailed Hebrew summary (3-4 bullet points). 
-           - Point 1: The Event (What happened).
-           - Point 2: Technical Details (CVEs, Malware names, Tactics).
-           - Point 3: Impact or Mitigation.
+        **MISSION:**
+        1. **CLUSTER & DEDUPLICATE**: Group news items that talk about the SAME event. (e.g., if Source A and Source B discuss "Apple Pay Phishing", merge them).
+        2. **SYNTHESIZE**: For each unique event, write ONE comprehensive report.
+        3. **LANGUAGE**: Hebrew ONLY.
         
-        Output JSON format: {"items": [{"id": 0, "title": "Hebrew Title", "summary": "Hebrew Summary"}]}
+        **REPORT STRUCTURE (Strictly enforce this):**
+        - **Title**: Operational Hebrew Title.
+        - **Summary**:
+            • **תמונת מצב**: What happened? (Fact based).
+            • **ממצאים טכניים**: CVEs, Malware names, TTPs.
+            • **משמעויות**: Impact and Mitigation.
+
+        **Output JSON:**
+        {"items": [
+            {
+                "source_url": "URL of the BEST/NEWEST source for this event",
+                "title": "Hebrew Title",
+                "summary": "The structured 3-part summary in Hebrew"
+            }
+        ]}
         """
         
         for i in range(0, len(items_to_process), chunk_size):
             chunk = items_to_process[i:i+chunk_size]
-            batch_lines = [f"ID:{idx} | Text:{x['title']} - {x['summary'][:2500]}" for idx, x in enumerate(chunk)]
-            batch_text = "\n".join(batch_lines)
-            prompt = f"{system_instruction}\nData:\n{batch_text}"
+            
+            # Prepare batch text
+            batch_text = ""
+            for idx, x in enumerate(chunk):
+                batch_text += f"ITEM {idx} | URL: {x['url']} | Title: {x['title']} | Content Snippet: {x['summary'][:1000]}\n\n"
+            
+            prompt = f"{system_instruction}\n\nRAW INTELLIGENCE:\n{batch_text}"
             
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
-            chunk_map = {}
+            
             if res:
                 try:
                     data = json.loads(res)
-                    for item in data.get("items", []): chunk_map[item.get('id')] = item
-                except: pass
-            
-            for j in range(len(chunk)):
-                ai = chunk_map.get(j, {})
-                raw_txt = (chunk[j]['title'] + chunk[j]['summary'])
-                final_tag, final_sev = self._determine_tag_severity(raw_txt, chunk[j]['source'])
-                
-                # --- FORCE GEMINI POLISH ON EVERYTHING ---
-                # This ensures the "8200 Analyst" tone is applied even if Groq was lazy.
-                draft_title = ai.get('title', chunk[j]['title'])
-                draft_summary = ai.get('summary', chunk[j]['summary'])
-                
-                polished_title = translate_with_gemini_hebrew(draft_title)
-                polished_summary = translate_with_gemini_hebrew(draft_summary)
+                    processed_items = data.get("items", [])
+                    
+                    for p_item in processed_items:
+                        # Logic: Find the original item that matches the chosen source_url
+                        # This links the synthesized text back to a concrete source for the link
+                        original = next((x for x in chunk if x['url'] == p_item.get('source_url')), None)
+                        
+                        # Fallback: If AI hallucinated a URL, use the first one in the chunk
+                        if not original: original = chunk[0]
 
-                results.append({
-                    "category": "News", "severity": final_sev, 
-                    "title": polished_title, "summary": polished_summary,
-                    "published_at": chunk[j]['date'], 
-                    "actor_tag": chunk[j].get('actor_tag', None), "tags": final_tag
-                })
+                        # Check if title already exists in DB (Double de-duplication)
+                        if any(p_item.get('title') in t for t in existing_titles): continue
+
+                        # Polish with Gemini (The "Editor")
+                        final_title = polish_with_gemini(p_item.get('title'))
+                        final_summary = polish_with_gemini(p_item.get('summary'))
+                        
+                        # Tags & Severity based on the NEW text
+                        full_text = final_title + final_summary
+                        final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
+
+                        results.append({
+                            "category": "News", 
+                            "severity": final_sev, 
+                            "title": final_title, 
+                            "summary": final_summary,
+                            "published_at": original['date'],
+                            "source": original['source'], 
+                            "url": original['url'],       
+                            "actor_tag": original.get('actor_tag', None),
+                            "tags": final_tag
+                        })
+                        
+                        existing_titles.add(final_title) # Add to local cache
+                        
+                except Exception as e:
+                    print(f"Parsing Error: {e}")
+                    pass
+                    
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
@@ -330,18 +355,15 @@ class CTICollector:
                 content = await resp.text()
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    # INCREASED LIMIT TO 30 ITEMS
                     for entry in feed.entries[:30]:
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
                         items.append({"title": entry.title, "url": entry.link, "date": parse_flexible_date(date_raw), "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:2500]})
                 elif source['type'] == 'json':
                      data = json.loads(content)
-                     # INCREASED LIMIT TO 20
                      for v in data.get('vulnerabilities', [])[:20]:
                          items.append({"title": f"KEV: {v['cveID']}", "url": f"https://nvd.nist.gov/vuln/detail/{v['cveID']}", "date": parse_flexible_date(v.get('dateAdded')), "source": "CISA", "summary": v.get('shortDescription')})
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
-                    # INCREASED LIMIT TO 20
                     for msg in soup.find_all('div', class_='tgme_widget_message_wrap')[-20:]:
                         try:
                             text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
@@ -359,14 +381,13 @@ class CTICollector:
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
-    for i, item in enumerate(raw):
-        if i < len(analyzed):
-            a = analyzed[i]
-            try:
-                c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag'), a.get('tags')))
-                if c.rowcount > 0: cnt += 1
-            except: pass
+    # Process processed items directly as they are already deduplicated
+    for item in analyzed:
+        try:
+            c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (datetime.datetime.now(IL_TZ).isoformat(), item['published_at'], item['source'], item['url'], item['title'], item['category'], item['severity'], item['summary'], item.get('actor_tag'), item.get('tags')))
+            if c.rowcount > 0: cnt += 1
+        except: pass
     conn.commit()
     conn.close()
     return cnt
