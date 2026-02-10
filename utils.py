@@ -75,7 +75,6 @@ def init_db():
         tags TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
-    # INCREASED RETENTION TO 7 DAYS (More Data)
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=7)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -152,13 +151,34 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     return None
 
 def translate_with_gemini_hebrew(text_content):
+    """
+    Polishes the Hebrew to look like a professional Unit 8200 Analyst report.
+    """
     try:
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key: return text_content
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
-        # Stronger Prompt for Gemini Backup
-        prompt = f"Translate the following cyber security text to professional HEBREW. Maintain technical terms in English (e.g., Malware, Ransomware). Text: {text_content}"
+        
+        # פרומפט "עורך לשוני צבאי" מוקפד
+        prompt = f"""
+        Act as a Senior Cyber Intelligence Officer (Unit 8200).
+        Your Task: Rewrite and Polish the following text into professional, operational Hebrew.
+        
+        CRITICAL RULES:
+        1. **Terminology Fixes**:
+           - "Interference/Disturbance" -> "תקיפה", "קמפיין", "פעילות עוינת" (Context dependent).
+           - "Breach" -> "חדירה", "דליפת מידע".
+           - "Vulnerability" -> "חולשה", "פגיעות".
+           - "Malware" -> "נוזקה".
+        
+        2. **Tone**: Concise, Operational, alarming but factual. NOT "Machine Translation" style.
+        3. **English Preservation**: KEEP technical terms (CVE, RCE, RAT, C2, APT, Phishing) in English.
+        4. **Structure**: If it's a summary, ensure it flows well.
+        
+        Text to Polish:
+        {text_content}
+        """
         response = model.generate_content(prompt)
         return response.text
     except: return text_content
@@ -170,7 +190,7 @@ class AIBatchProcessor:
     def _determine_tag_severity(self, text, source):
         text = text.lower()
         sev, tag = "Medium", "כללי"
-        if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt']): sev = "High"
+        if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt', 'breach']): sev = "High"
         if source == "INCD" or "israel" in text or "iran" in text: tag = "ישראל"
         elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "פגיעויות"
         elif "phishing" in text or "credential" in text: tag = "פיישינג"
@@ -187,18 +207,18 @@ class AIBatchProcessor:
         chunk_size = 3 
         results = []
         
-        # --- AGGRESSIVE HEBREW PROMPT ---
         system_instruction = """
-        You are an Elite Cyber Intelligence Officer (Unit 8200).
-        Task: Analyze cyber news and output a JSON.
-
-        CRITICAL RULES:
-        1. **LANGUAGE**: All output (Title, Summary) MUST be in HEBREW.
-        2. **SUMMARY**: Must be DETAILED (3-4 bullet points). Do NOT be concise. Explain the threat, the impact, and the mitigation.
-        3. **TERMS**: Keep specific technical terms (e.g., 'Phishing', 'CVE-2024-1234', 'Ransomware') in English within the Hebrew text.
-        4. **TITLE**: Dramatic and Operational Hebrew title.
-
-        Output JSON format: {"items": [{"id": 0, "title": "כותרת מבצעית בעברית", "summary": "• נקודה 1: מה קרה\n• נקודה 2: השפעה\n• נקודה 3: המלצה"}]}
+        You are a Cyber Threat Intelligence Analyst.
+        Task: Analyze the provided cyber security news items.
+        
+        For each item, output a JSON object with:
+        1. "title": A descriptive, professional Hebrew title.
+        2. "summary": A detailed Hebrew summary (3-4 bullet points). 
+           - Point 1: The Event (What happened).
+           - Point 2: Technical Details (CVEs, Malware names, Tactics).
+           - Point 3: Impact or Mitigation.
+        
+        Output JSON format: {"items": [{"id": 0, "title": "Hebrew Title", "summary": "Hebrew Summary"}]}
         """
         
         for i in range(0, len(items_to_process), chunk_size):
@@ -220,18 +240,17 @@ class AIBatchProcessor:
                 raw_txt = (chunk[j]['title'] + chunk[j]['summary'])
                 final_tag, final_sev = self._determine_tag_severity(raw_txt, chunk[j]['source'])
                 
-                title = ai.get('title', chunk[j]['title'])
-                summary = ai.get('summary', chunk[j]['summary'])
-
-                # Double-Check: If AI failed to speak Hebrew, force Gemini
-                if not any("\u0590" <= c <= "\u05EA" for c in title): 
-                     title = translate_with_gemini_hebrew(title)
-                if not any("\u0590" <= c <= "\u05EA" for c in summary):
-                     summary = translate_with_gemini_hebrew(summary)
+                # --- FORCE GEMINI POLISH ON EVERYTHING ---
+                # This ensures the "8200 Analyst" tone is applied even if Groq was lazy.
+                draft_title = ai.get('title', chunk[j]['title'])
+                draft_summary = ai.get('summary', chunk[j]['summary'])
+                
+                polished_title = translate_with_gemini_hebrew(draft_title)
+                polished_summary = translate_with_gemini_hebrew(draft_summary)
 
                 results.append({
                     "category": "News", "severity": final_sev, 
-                    "title": title, "summary": summary,
+                    "title": polished_title, "summary": polished_summary,
                     "published_at": chunk[j]['date'], 
                     "actor_tag": chunk[j].get('actor_tag', None), "tags": final_tag
                 })
