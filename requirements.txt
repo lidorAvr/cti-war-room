@@ -8,3 +8,4 @@ duckduckgo-search>=6.0.0
 aiohttp
 python-dateutil
 pytz
+fake-useragent
