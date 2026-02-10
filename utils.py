@@ -36,28 +36,22 @@ def parse_flexible_date(date_obj):
     """
     now = datetime.datetime.now(IL_TZ)
     try:
-        # Case 1: RSS struct_time
         if isinstance(date_obj, time.struct_time):
             dt = datetime.datetime(*date_obj[:6], tzinfo=pytz.utc)
             return dt.astimezone(IL_TZ).isoformat()
         
-        # Case 2: String
         if isinstance(date_obj, str):
             dt = date_parser.parse(date_obj)
             if dt.tzinfo is None:
                 dt = pytz.utc.localize(dt)
             return dt.astimezone(IL_TZ).isoformat()
             
-        # Case 3: DateTime object
         if isinstance(date_obj, datetime.datetime):
             if date_obj.tzinfo is None:
                 date_obj = pytz.utc.localize(date_obj)
             return date_obj.astimezone(IL_TZ).isoformat()
-            
     except:
         pass
-    
-    # Fallback to NOW if parsing fails (keeps chronology)
     return now.isoformat()
 
 # --- IOC VALIDATION ---
@@ -157,7 +151,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
-    # Fallback Mechanism
     models = [model, "llama-3.1-8b-instant"]
     
     for m in models:
@@ -179,7 +172,7 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
 
 def translate_with_gemini_hebrew(text_content):
     """
-    Enforces Hebrew translation via Gemini.
+    Enforces Hebrew translation via Gemini - ORIGINAL HIGH QUALITY PROMPT
     """
     try:
         gemini_key = st.secrets.get("gemini_key")
@@ -188,6 +181,7 @@ def translate_with_gemini_hebrew(text_content):
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
         
+        # --- RESTORED ORIGINAL PROMPT ---
         prompt = f"""
         Act as a Cyber Intelligence Editor.
         Task: Rewrite the following text into professional Hebrew.
@@ -229,15 +223,15 @@ class AIBatchProcessor:
     async def analyze_batch(self, items):
         if not items: return []
         
-        # --- SPEED OPTIMIZATION: Filter existing items BEFORE AI ---
+        # --- Speed Optimization: Filter existing items BEFORE AI ---
         existing = get_existing_urls()
         items_to_process = [i for i in items if i['url'] not in existing]
         if not items_to_process: return []
-        # -----------------------------------------------------------
 
         chunk_size = 3 
         results = []
         
+        # --- RESTORED ORIGINAL PROMPT ---
         system_instruction = """
         You are an Elite Cyber News Editor.
         Task: Create a structured summary for a dashboard.
@@ -275,11 +269,9 @@ class AIBatchProcessor:
                 final_tag, final_sev = self._determine_tag_severity(raw_txt, chunk[j]['source'])
                 
                 # 3. Gemini Polish (Translation & Summary Enforcement)
-                # Fallback to original text if AI failed
                 draft_title = ai.get('title', chunk[j]['title'])
                 draft_sum = ai.get('summary', chunk[j]['summary'])
                 
-                # If still English, force Gemini
                 heb_title = translate_with_gemini_hebrew(draft_title)
                 heb_sum = translate_with_gemini_hebrew(draft_sum)
 
@@ -296,6 +288,7 @@ class AIBatchProcessor:
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
         lean_data = self._extract_key_intel(data)
+        # --- RESTORED ORIGINAL PROMPT ---
         prompt = f"""
         Act as a Senior SOC Analyst (Unit 8200 style).
         Target: {ioc} ({ioc_type})
@@ -348,12 +341,10 @@ class ThreatLookup:
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # 1. Search with quotes to handle special chars/shorteners
             search_query = f'"{ioc}"'
             res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=10)
             data = res.json()
             if data.get('results'):
-                # 2. Get Full Result of the most recent scan
                 scan_id = data['results'][0]['_id']
                 full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_id}/", headers={"API-Key": self.urlscan_key}, timeout=10)
                 return full_res.json() if full_res.status_code == 200 else None
@@ -390,7 +381,6 @@ class AnalystToolkit:
 
 class APTSheetCollector:
     def fetch_threats(self): 
-        # Richer Data for Analyst
         return [
             {
                 "name": "MuddyWater", 
@@ -446,11 +436,9 @@ class CTICollector:
                 # --- RSS ---
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    # INCREASED LIMIT TO 10
                     entries = feed.entries[:10]
 
                     for entry in entries:
-                        # Use Flexible Parser
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
                         pub_date = parse_flexible_date(date_raw)
                         
@@ -459,7 +447,7 @@ class CTICollector:
                 # --- JSON ---
                 elif source['type'] == 'json':
                      data = json.loads(content)
-                     for v in data.get('vulnerabilities', [])[:10]: # Increased to 10
+                     for v in data.get('vulnerabilities', [])[:10]:
                          url = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
                          pub_date = parse_flexible_date(v.get('dateAdded'))
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
@@ -468,14 +456,12 @@ class CTICollector:
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    # Force 10 items
                     for msg in msgs[-10:]:
                         try:
                             text_div = msg.find('div', class_='tgme_widget_message_text')
                             if not text_div: continue
                             text = text_div.get_text(separator=' ')
                             
-                            # Time Extraction
                             time_tag = msg.find('time')
                             date_raw = time_tag['datetime'] if time_tag else None
                             pub_date = parse_flexible_date(date_raw)
@@ -498,34 +484,18 @@ class CTICollector:
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
+    # Matching Logic:
+    # Analyzed list only contains items that were processed (new items).
+    # We must match them back to save them.
+    # Since we filter before processing, 'analyzed' corresponds to 'raw_filtered'.
+    # We will assume 'raw' passed here is the FILTERED list from app.py
+    
     for i, item in enumerate(raw):
-        # --- FIX: Match analyzed item by URL/Title to ensure correctness after filtering ---
-        # Since 'raw' might be filtered in 'analyzed', we need to be careful.
-        # But 'save_reports' is called with the lists returned from analyze_batch.
-        # Actually, in app.py we call: analyzed = proc.analyze_batch(raw).
-        # AIBatchProcessor returns a list of result dicts.
-        # We need to make sure indices match or use logic.
-        # Given the previous logic relied on indices, and analyze_batch now filters,
-        # we must ensure that save_reports receives the FILTERED raw list or matches properly.
-        # To be safe and minimal: update this loop to match based on assumption that
-        # analyzed list corresponds to the filtered items.
-        
-        # NOTE: To keep it simple and working as requested, I'll rely on the existing 
-        # structure but ensure logic in analyze_batch returns what matches.
-        
         if i < len(analyzed):
             a = analyzed[i]
-            # Use original parsed date from fetch_item to ensure consistency
-            # But wait, if analyze_batch skipped items, 'i' won't align with 'raw'.
-            # FIX: We will pass the FILTERED raw list to save_reports in app.py
-            # or handle it here.
-            # Best approach: Assume 'raw' passed here is the list that WAS processed.
-            
-            final_date = a.get('published_at') # Use the date carried over in analyzed result
-            
             try:
                 c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    (datetime.datetime.now(IL_TZ).isoformat(), final_date, item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag'), a.get('tags')))
+                    (datetime.datetime.now(IL_TZ).isoformat(), item['date'], item['source'], item['url'], a['title'], a['category'], a['severity'], a['summary'], a.get('actor_tag'), a.get('tags')))
                 if c.rowcount > 0: cnt += 1
             except: pass
     conn.commit()
