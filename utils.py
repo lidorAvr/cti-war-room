@@ -14,7 +14,8 @@ import time
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-from ddgs import DDGS
+# --- FIX: Updated Import for Stability ---
+from duckduckgo_search import DDGS
 import google.generativeai as genai
 import streamlit as st
 
@@ -143,9 +144,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     return None
 
 def polish_with_gemini(text_content):
-    """
-    Unit 8200 Editor: Rewrites content to be professional, Hebrew, and operational.
-    """
     try:
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key: return text_content
@@ -192,11 +190,9 @@ class AIBatchProcessor:
         if not items: return []
         existing_urls, existing_titles = get_existing_data()
         
-        # 1. Filter by URL to reduce load
         items_to_process = [i for i in items if i['url'] not in existing_urls]
         if not items_to_process: return []
 
-        # 2. Process in LARGE chunks (10 items) to enable de-duplication
         chunk_size = 10
         results = []
         
@@ -204,11 +200,11 @@ class AIBatchProcessor:
         You are a Senior Cyber Intelligence Analyst.
         
         **MISSION:**
-        1. **CLUSTER & DEDUPLICATE**: Group news items that talk about the SAME event. (e.g., if Source A and Source B discuss "Apple Pay Phishing", merge them).
+        1. **CLUSTER & DEDUPLICATE**: Group news items that talk about the SAME event.
         2. **SYNTHESIZE**: For each unique event, write ONE comprehensive report.
         3. **LANGUAGE**: Hebrew ONLY.
         
-        **REPORT STRUCTURE (Strictly enforce this):**
+        **REPORT STRUCTURE:**
         - **Title**: Operational Hebrew Title.
         - **Summary**:
             • **תמונת מצב**: What happened? (Fact based).
@@ -228,7 +224,6 @@ class AIBatchProcessor:
         for i in range(0, len(items_to_process), chunk_size):
             chunk = items_to_process[i:i+chunk_size]
             
-            # Prepare batch text
             batch_text = ""
             for idx, x in enumerate(chunk):
                 batch_text += f"ITEM {idx} | URL: {x['url']} | Title: {x['title']} | Content Snippet: {x['summary'][:1000]}\n\n"
@@ -243,23 +238,16 @@ class AIBatchProcessor:
                     processed_items = data.get("items", [])
                     
                     for p_item in processed_items:
-                        # Logic: Find the original item that matches the chosen source_url
-                        # This links the synthesized text back to a concrete source for the link
                         original = next((x for x in chunk if x['url'] == p_item.get('source_url')), None)
-                        
-                        # Fallback: If AI hallucinated a URL, use the first one in the chunk
                         if not original: original = chunk[0]
 
-                        # Check if title already exists in DB (Double de-duplication)
                         if any(p_item.get('title') in t for t in existing_titles): continue
 
-                        # Polish with Gemini (The "Editor")
                         final_title = polish_with_gemini(p_item.get('title'))
                         final_summary = polish_with_gemini(p_item.get('summary'))
                         
-                        # Tags & Severity based on the NEW text
-                        full_text = final_title + final_summary
-                        final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
+                        tag_text = final_title + final_summary
+                        final_tag, final_sev = self._determine_tag_severity(tag_text, original['source'])
 
                         results.append({
                             "category": "News", 
@@ -272,12 +260,8 @@ class AIBatchProcessor:
                             "actor_tag": original.get('actor_tag', None),
                             "tags": final_tag
                         })
-                        
-                        existing_titles.add(final_title) # Add to local cache
-                        
-                except Exception as e:
-                    print(f"Parsing Error: {e}")
-                    pass
+                        existing_titles.add(final_title)
+                except: pass
                     
         return results
 
@@ -381,7 +365,6 @@ class CTICollector:
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
-    # Process processed items directly as they are already deduplicated
     for item in analyzed:
         try:
             c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
