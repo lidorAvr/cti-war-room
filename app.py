@@ -94,13 +94,15 @@ async def perform_update(status_container=None):
     if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת (RSS/Telegram)...**]")
     raw = await col.get_all_data()
     
-    existing = get_existing_urls()
-    raw_to_process = [r for r in raw if r['url'] not in existing]
+    # Filter only by URL initially
+    existing_urls, _ = get_existing_data()
+    raw_to_process = [r for r in raw if r['url'] not in existing_urls]
     
     if raw_to_process:
-        if status_container: status_container.markdown(f":orange[**🤖 מפעיל מנועי AI על {len(raw_to_process)} ידיעות חדשות...**]")
-        analyzed = await proc.analyze_batch(raw_to_process)
-        return save_reports(raw_to_process, analyzed)
+        if status_container: status_container.markdown(f":orange[**🤖 מפעיל מנועי AI (איחוד ידיעות וניתוח)...**]")
+        # Now returns processed results directly
+        results = await proc.analyze_batch(raw_to_process)
+        return save_reports(raw_to_process, results)
     return 0
 
 # --- BOOT SEQUENCE ---
@@ -138,14 +140,13 @@ with st.sidebar:
             st.rerun()
             
     with col2:
-        # --- כפתור ההשמדה העצמית ---
         if st.button("🗑️ איפוס מלא"):
             try:
                 if os.path.exists(DB_NAME):
                     os.remove(DB_NAME)
                     st.toast("✅ מסד נתונים נמחק!", icon="🗑️")
                     time.sleep(1)
-                    st.rerun() # יגרום לאתחול מחדש ויצירה של DB נקי
+                    st.rerun()
             except Exception as e:
                 st.error(f"שגיאה: {e}")
 
@@ -215,7 +216,11 @@ with tab_strat:
             if res:
                 s.markdown(":orange[**נמצאו אינדיקטורים, מפעיל ניתוח...**]")
                 analyzed = asyncio.run(proc.analyze_batch(res))
-                to_save = [r for r in res if r['url'] not in get_existing_urls()]
+                
+                # Deduplication logic inside scanning too
+                existing_urls, _ = get_existing_data()
+                to_save = [r for r in res if r['url'] not in existing_urls]
+                
                 if to_save:
                     save_reports(to_save, analyzed)
                     st.success(f"נוספו {len(to_save)} דוחות חדשים!")
