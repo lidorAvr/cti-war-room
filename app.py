@@ -18,15 +18,12 @@ st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️"
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;600&family=Heebo:wght@300;400;700&display=swap');
-    
     .stApp { direction: rtl; text-align: right; background-color: #0b0f19; font-family: 'Heebo', sans-serif; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, .stMarkdown { text-align: right; font-family: 'Heebo', sans-serif; }
-    
     [data-testid="stSidebarCollapseButton"] { float: left; margin-left: 10px; margin-right: auto; }
     .stTextInput input, .stSelectbox, .stMultiSelect { direction: rtl; text-align: right; }
     .stButton button { width: 100%; font-family: 'Rubik', sans-serif; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { justify-content: flex-end; gap: 15px; }
-    
     .tool-card {
         background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(56, 189, 248, 0.3);
         border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 15px;
@@ -37,7 +34,6 @@ st.markdown("""
     .tool-name { font-weight: 700; color: #f1f5f9; display: block; margin-bottom: 5px; font-size: 1.1rem; }
     .tool-desc { font-size: 0.85rem; color: #cbd5e1; display: block; line-height: 1.4; }
     a { text-decoration: none; }
-
     .report-card {
         background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1); border-radius: 12px; padding: 24px; margin-bottom: 20px;
@@ -87,12 +83,12 @@ VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-# --- AUTO REFRESH LOGIC (NATIVE) ---
-# רענון אוטומטי כל 15 דקות ללא תלות ברכיבים חיצוניים
+# --- NATIVE AUTO REFRESH (NO EXTERNAL COMPONENT) ---
 if 'last_run' not in st.session_state:
     st.session_state['last_run'] = time.time()
 
-if time.time() - st.session_state['last_run'] > 900: # 900 seconds = 15 min
+# Refresh every 15 minutes (900 seconds)
+if time.time() - st.session_state['last_run'] > 900:
     st.session_state['last_run'] = time.time()
     st.rerun()
 
@@ -107,7 +103,6 @@ async def perform_update(status_container=None):
     
     if raw_to_process:
         if status_container: status_container.markdown(f":orange[**🤖 מפעיל מנועי AI (איחוד ידיעות וניתוח)...**]")
-        # Now returns processed results directly
         results = await proc.analyze_batch(raw_to_process)
         return save_reports(raw_to_process, results)
     return 0
