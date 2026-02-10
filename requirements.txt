@@ -4,7 +4,7 @@ requests
 beautifulsoup4
 feedparser
 google-generativeai
-duckduckgo-search
+duckduckgo-search>=6.0.0
 aiohttp
 python-dateutil
 pytz
