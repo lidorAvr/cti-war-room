@@ -14,7 +14,6 @@ import time
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
-# --- FIX: Updated Import for Stability ---
 from duckduckgo_search import DDGS
 import google.generativeai as genai
 import streamlit as st
@@ -76,7 +75,7 @@ def init_db():
         tags TEXT
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
-    c.execute("CREATE INDEX IF NOT EXISTS idx_title ON intel_reports(title)")
+    # שומר היסטוריה של 7 ימים
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=7)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
     conn.commit()
@@ -86,11 +85,11 @@ def get_existing_data():
     try:
         conn = sqlite3.connect(DB_NAME)
         c = conn.cursor()
-        c.execute("SELECT url, title FROM intel_reports")
+        c.execute("SELECT url FROM intel_reports")
         rows = c.fetchall()
         conn.close()
-        return {row[0] for row in rows}, {row[1] for row in rows}
-    except: return set(), set()
+        return {row[0] for row in rows}
+    except: return set()
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
@@ -100,7 +99,7 @@ class DeepWebScanner:
             query = f'"{actor_name}" cyber threat intelligence malware analysis report'
             with DDGS() as ddgs:
                 ddg_results = list(ddgs.text(query, max_results=limit))
-                existing_urls, _ = get_existing_data()
+                existing_urls = get_existing_data()
                 for res in ddg_results:
                     url = res.get('href')
                     if url in existing_urls: continue
@@ -144,27 +143,32 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     return None
 
 def polish_with_gemini(text_content):
+    """
+    Unit 8200 Editor: Rewrites content to be professional, Hebrew, and operational.
+    """
     try:
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key: return text_content
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
         
+        # פרומפט מתוקן ומדויק יותר מבחינה מקצועית
         prompt = f"""
-        Act as a Senior Cyber Intelligence Officer (Unit 8200).
-        Task: Rewrite the following intelligence report for a CISO.
+        Act as a Senior Cyber Intelligence Analyst (Unit 8200).
+        Task: Rewrite the following intelligence brief for a CISO.
         
-         Directives:
-        1. **Language**: High-level Operational Hebrew ONLY.
-        2. **Terminology**:
+        **CRITICAL STYLE RULES:**
+        1. **Terminology Translation**:
+           - "Reconnaissance" -> "איסוף מודיעין" / "סיור מקדים" (NEVER "שדה רגלים"!).
+           - "State-sponsored" -> "תוקף מדינתי" / "בחסות מדינה".
            - "Breach" -> "אירוע דליפת מידע" / "חדירה לרשת".
-           - "Attack" -> "מתקפה" / "קמפיין זדוני".
-           - "Malware" -> "נוזקה".
+           - "Campaign" -> "קמפיין תקיפה".
            - "Vulnerability" -> "חולשה" / "פגיעות".
-        3. **Style**: Factual, Concise, No "Machine Translation" feel.
-        4. **Structure**: Ensure flow between points.
         
-        Text:
+        2. **Tone**: Operational, clear, factual. Avoid robotic or direct Google Translate phrasing.
+        3. **English**: Keep technical terms (CVE-XXXX, RAT, APT28, Phishing) in English.
+        
+        Input Text to Fix:
         {text_content}
         """
         response = model.generate_content(prompt)
@@ -188,35 +192,40 @@ class AIBatchProcessor:
 
     async def analyze_batch(self, items):
         if not items: return []
-        existing_urls, existing_titles = get_existing_data()
+        existing_urls = get_existing_data()
         
+        # Filter purely by URL to ensure we process new links
         items_to_process = [i for i in items if i['url'] not in existing_urls]
         if not items_to_process: return []
 
-        chunk_size = 10
+        # Reduced chunk size slightly to ensure better focus per item
+        chunk_size = 5
         results = []
         
+        # פרומפט מעודכן: פחות איחוד אגרסיבי, יותר ניתוח מדויק
         system_instruction = """
-        You are a Senior Cyber Intelligence Analyst.
+        You are a Cyber Intelligence Analyst.
         
         **MISSION:**
-        1. **CLUSTER & DEDUPLICATE**: Group news items that talk about the SAME event.
-        2. **SYNTHESIZE**: For each unique event, write ONE comprehensive report.
-        3. **LANGUAGE**: Hebrew ONLY.
+        Analyze the provided news items.
+        If multiple items describe the EXACT same event (same victim, same malware), merge them.
+        Otherwise, treat them as separate intelligence items.
         
-        **REPORT STRUCTURE:**
-        - **Title**: Operational Hebrew Title.
+        **OUTPUT LANGUAGE:** Hebrew ONLY (except technical terms).
+        
+        **REPORT STRUCTURE (Strictly enforce this format):**
+        - **Title**: Operational Hebrew Title (Clear & Professional).
         - **Summary**:
-            • **תמונת מצב**: What happened? (Fact based).
-            • **ממצאים טכניים**: CVEs, Malware names, TTPs.
-            • **משמעויות**: Impact and Mitigation.
+            • **תמונת מצב**: What happened? (e.g., "Identified a new phishing campaign targeting...").
+            • **ניתוח טכני**: Technical details (CVEs, Malware names, TTPs).
+            • **משמעויות**: Impact on organizations.
 
         **Output JSON:**
         {"items": [
             {
-                "source_url": "URL of the BEST/NEWEST source for this event",
+                "source_url": "URL of the specific article",
                 "title": "Hebrew Title",
-                "summary": "The structured 3-part summary in Hebrew"
+                "summary": "The structured 3-part summary"
             }
         ]}
         """
@@ -226,7 +235,7 @@ class AIBatchProcessor:
             
             batch_text = ""
             for idx, x in enumerate(chunk):
-                batch_text += f"ITEM {idx} | URL: {x['url']} | Title: {x['title']} | Content Snippet: {x['summary'][:1000]}\n\n"
+                batch_text += f"ITEM {idx} | URL: {x['url']} | Title: {x['title']} | Content Snippet: {x['summary'][:1500]}\n\n"
             
             prompt = f"{system_instruction}\n\nRAW INTELLIGENCE:\n{batch_text}"
             
@@ -238,14 +247,18 @@ class AIBatchProcessor:
                     processed_items = data.get("items", [])
                     
                     for p_item in processed_items:
+                        # Find original metadata based on URL (robust matching)
                         original = next((x for x in chunk if x['url'] == p_item.get('source_url')), None)
-                        if not original: original = chunk[0]
+                        
+                        # If URL matching fails (AI hallucination), try to match by similarity or fallback
+                        if not original:
+                             original = chunk[0] # Fallback to ensure we don't lose data
 
-                        if any(p_item.get('title') in t for t in existing_titles): continue
-
+                        # Polish with Gemini (The "Editor") for top-tier Hebrew
                         final_title = polish_with_gemini(p_item.get('title'))
                         final_summary = polish_with_gemini(p_item.get('summary'))
                         
+                        # Determine severity based on the polished text
                         tag_text = final_title + final_summary
                         final_tag, final_sev = self._determine_tag_severity(tag_text, original['source'])
 
@@ -260,8 +273,11 @@ class AIBatchProcessor:
                             "actor_tag": original.get('actor_tag', None),
                             "tags": final_tag
                         })
-                        existing_titles.add(final_title)
-                except: pass
+                        
+                except Exception as e:
+                    # In case of error, we don't want to crash, we skip this chunk
+                    print(f"Parsing Error: {e}")
+                    pass
                     
         return results
 
@@ -365,6 +381,7 @@ class CTICollector:
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
+    # Loop through the ANALYZED items, as they contain the processed info
     for item in analyzed:
         try:
             c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
