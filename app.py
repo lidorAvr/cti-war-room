@@ -6,6 +6,7 @@ import datetime
 import pytz
 import time
 import re
+import os
 import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
@@ -90,7 +91,6 @@ ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 async def perform_update(status_container=None):
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
     
-    # שימוש ב-Markdown לצבעים בולטים
     if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת (RSS/Telegram)...**]")
     raw = await col.get_all_data()
     
@@ -103,6 +103,7 @@ async def perform_update(status_container=None):
         return save_reports(raw_to_process, analyzed)
     return 0
 
+# --- BOOT SEQUENCE ---
 if "booted" not in st.session_state:
     with st.status("🚀 **מאתחל מערכת CTI...**", expanded=True) as status:
         st.markdown(":green[**🔍 מבצע בדיקת שפיות למסד הנתונים...**]")
@@ -120,26 +121,43 @@ if "booted" not in st.session_state:
     st.session_state['booted'] = True
     st.rerun()
 
+# --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=60)
     st.markdown("### CTI WAR ROOM")
     ok, msg = ConnectionManager.check_groq(GROQ_KEY)
     st.caption(f"AI STATUS: {msg}")
     
-    if st.button("⚡ סנכרון ידני"):
-        with st.status("🔄 **מבצע סנכרון...**") as s:
-            c = asyncio.run(perform_update(s))
-            s.update(label=f"✅ עודכן: {c}", state="complete")
-        time.sleep(1)
-        st.rerun()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⚡ סנכרון"):
+            with st.status("🔄 **מבצע סנכרון...**") as s:
+                c = asyncio.run(perform_update(s))
+                s.update(label=f"✅ עודכן: {c}", state="complete")
+            time.sleep(1)
+            st.rerun()
+            
+    with col2:
+        # --- כפתור ההשמדה העצמית ---
+        if st.button("🗑️ איפוס מלא"):
+            try:
+                if os.path.exists(DB_NAME):
+                    os.remove(DB_NAME)
+                    st.toast("✅ מסד נתונים נמחק!", icon="🗑️")
+                    time.sleep(1)
+                    st.rerun() # יגרום לאתחול מחדש ויצירה של DB נקי
+            except Exception as e:
+                st.error(f"שגיאה: {e}")
 
 st.title("לוח בקרה מבצעי")
 conn = sqlite3.connect(DB_NAME)
 c = conn.cursor()
 c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-7 days') AND source != 'DeepWeb'")
-count_24h = c.fetchone()[0]
+try: count_24h = c.fetchone()[0]
+except: count_24h = 0
 c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' AND published_at > datetime('now', '-7 days')")
-count_crit = c.fetchone()[0]
+try: count_crit = c.fetchone()[0]
+except: count_crit = 0
 conn.close()
 
 m4, m3, m2, m1 = st.columns(4)
