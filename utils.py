@@ -87,6 +87,17 @@ def init_db():
     conn.commit()
     conn.close()
 
+def get_existing_urls():
+    """שליפה מהירה של כתבות קיימות למניעת עיבוד כפול"""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        c = conn.cursor()
+        c.execute("SELECT url FROM intel_reports")
+        urls = {row[0] for row in c.fetchall()}
+        conn.close()
+        return urls
+    except: return set()
+
 def _is_url_processed(url):
     try:
         conn = sqlite3.connect(DB_NAME)
@@ -96,17 +107,6 @@ def _is_url_processed(url):
         conn.close()
         return result is not None
     except: return False
-
-def get_existing_urls():
-    """מוסיף בדיקת מהירות למסד הנתונים כדי למנוע ניתוח כפול"""
-    try:
-        conn = sqlite3.connect(DB_NAME)
-        c = conn.cursor()
-        c.execute("SELECT url FROM intel_reports")
-        urls = {row[0] for row in c.fetchall()}
-        conn.close()
-        return urls
-    except: return set()
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
@@ -153,7 +153,7 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
             try:
                 async with session.post(url, json=payload, headers=headers, timeout=45) as resp:
                     if resp.status == 429:
-                        time.sleep(1)
+                        await asyncio.sleep(1)
                         continue
                     if resp.status == 200:
                         data = await resp.json()
@@ -167,12 +167,7 @@ def translate_with_gemini_hebrew(text_content):
         if not gemini_key: return text_content
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
-        prompt = f"""
-        Act as a Cyber Intelligence Editor.
-        Task: Rewrite the following text into professional Hebrew.
-        Input:
-        {text_content}
-        """
+        prompt = f"Act as a Cyber Intelligence Editor. Rewrite the following text into professional Hebrew technical language: {text_content}"
         response = model.generate_content(prompt)
         return response.text
     except: return text_content
@@ -195,22 +190,19 @@ class AIBatchProcessor:
 
     async def analyze_batch(self, items):
         if not items: return []
-        # ייעול: מסנן כתבות שכבר קיימות במסד הנתונים לפני הניתוח היקר ב-AI
+        # ייעול משמעותי: סריקה רק של פריטים שאינם קיימים ב-DB
         existing = get_existing_urls()
         items_to_process = [i for i in items if i['url'] not in existing]
         if not items_to_process: return []
 
         chunk_size = 3 
         results = []
-        system_instruction = """Output JSON: {"items": [{"id": 0, "title": "Hebrew Title", "summary": "Hebrew Summary"}]}"""
-        
         for i in range(0, len(items_to_process), chunk_size):
             chunk = items_to_process[i:i+chunk_size]
-            batch_lines = [f"ID:{idx} | Text:{x['title']} - {x['summary'][:2000]}" for idx, x in enumerate(chunk)]
-            batch_text = "\n".join(batch_lines)
-            prompt = f"{system_instruction}\nData:\n{batch_text}"
+            batch_text = "\n".join([f"ID:{idx} | {x['title']} - {x['summary'][:1000]}" for idx, x in enumerate(chunk)])
+            prompt = f"Output JSON: {{\"items\": [{{ \"id\": 0, \"title\": \"Hebrew Title\", \"summary\": \"Hebrew Summary\" }}]}} Data:\n{batch_text}"
+            res = await query_groq_api(self.key, prompt)
             
-            res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             chunk_map = {}
             if res:
                 try:
@@ -220,27 +212,18 @@ class AIBatchProcessor:
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
-                final_tag, final_sev = self._determine_tag_severity((chunk[j]['title'] + chunk[j]['summary']), chunk[j]['source'])
-                heb_title = translate_with_gemini_hebrew(ai.get('title', chunk[j]['title']))
-                heb_sum = translate_with_gemini_hebrew(ai.get('summary', chunk[j]['summary']))
-                results.append({"category": "News", "severity": final_sev, "title": heb_title, "summary": heb_sum, "published_at": chunk[j]['date'], "actor_tag": chunk[j].get('actor_tag', None), "tags": final_tag})
+                f_tag, f_sev = self._determine_tag_severity((chunk[j]['title'] + chunk[j]['summary']), chunk[j]['source'])
+                results.append({
+                    "category": "News", "severity": f_sev, "title": translate_with_gemini_hebrew(ai.get('title', chunk[j]['title'])),
+                    "summary": translate_with_gemini_hebrew(ai.get('summary', chunk[j]['summary'])),
+                    "published_at": chunk[j]['date'], "actor_tag": chunk[j].get('actor_tag'), "tags": f_tag
+                })
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
-        lean_data = self._extract_key_intel(data)
-        prompt = f"Act as Senior SOC Analyst. Target: {ioc}. Data: {json.dumps(lean_data)}. Markdown HEBREW ONLY."
-        return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
-
-    def _extract_key_intel(self, raw_data):
-        summary = {}
-        if 'virustotal' in raw_data and raw_data['virustotal']:
-            vt = raw_data['virustotal']
-            summary['virustotal'] = {'malicious_votes': vt.get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0), 'tags': vt.get('attributes', {}).get('tags', [])}
-        return summary
-
-    async def generate_hunting_queries(self, actor):
-        prompt = f"Generate XQL & YARA hunting rules for actor: {actor['name']}."
-        return await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
+        lean_data = {'malicious': data.get('virustotal', {}).get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0)}
+        prompt = f"Analyze IOC: {ioc} ({ioc_type}) based on VT data: {json.dumps(lean_data)}. Markdown Hebrew."
+        return await query_groq_api(self.key, prompt, json_mode=False)
 
 class ThreatLookup:
     def __init__(self, vt_key=None, urlscan_key=None, abuse_key=None):
@@ -249,25 +232,20 @@ class ThreatLookup:
         if not self.vt_key: return None
         try:
             url_id = base64.urlsafe_b64encode(ioc.encode()).decode().strip("=") if ioc_type == "url" else ioc
-            endpoint = f"{'urls' if ioc_type == 'url' else 'ip_addresses' if ioc_type == 'ip' else 'domains' if ioc_type == 'domain' else 'files'}/{url_id}"
-            res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=10)
+            res = requests.get(f"https://www.virustotal.com/api/v3/{'urls' if ioc_type == 'url' else 'files' if ioc_type == 'hash' else 'ip_addresses' if ioc_type == 'ip' else 'domains'}/{url_id}", headers={"x-apikey": self.vt_key}, timeout=10)
             return res.json().get('data', {}) if res.status_code == 200 else None
         except: return None
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
             res = requests.get(f"https://urlscan.io/api/v1/search/?q=\"{ioc}\"", headers={"API-Key": self.urlscan_key}, timeout=10)
-            data = res.json()
-            if data.get('results'):
-                scan_id = data['results'][0]['_id']
-                full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_id}/", headers={"API-Key": self.urlscan_key}, timeout=10)
-                return full_res.json() if full_res.status_code == 200 else None
+            if res.json().get('results'):
+                return requests.get(f"https://urlscan.io/api/v1/result/{res.json()['results'][0]['_id']}/", timeout=10).json()
         except: return None
     def query_abuseipdb(self, ip):
         if not self.abuse_key: return None
         try:
-            res = requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.abuse_key, 'Accept': 'application/json'}, params={'ipAddress': ip, 'maxAgeInDays': 90}, timeout=10)
-            return res.json().get('data', {})
+            return requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.abuse_key}, params={'ipAddress': ip}, timeout=10).json().get('data', {})
         except: return None
 
 class AnalystToolkit:
@@ -282,9 +260,9 @@ class AnalystToolkit:
 class APTSheetCollector:
     def fetch_threats(self): 
         return [
-            {"name": "MuddyWater", "origin": "Iran (MOIS)", "target": "Israel, Turkey, Jordan", "type": "Espionage", "tools": "PowerShell, Ligolo, ScreenConnect", "desc": "מזוהה עם משרד המודיעין האיראני.", "mitre": "T1059.001"},
-            {"name": "OilRig (APT34)", "origin": "Iran (IRGC)", "target": "Israel Critical Infra", "type": "Espionage", "tools": "Karkoff, SideTwist", "desc": "מתמקדת במגזרי פיננסים ואנרגיה.", "mitre": "T1071.004"},
-            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel (Education, Tech)", "type": "Wiper", "tools": "BiBiWiper, Moneybird", "desc": "מטרתה השמדת מידע.", "mitre": "T1485"}
+            {"name": "MuddyWater", "origin": "Iran (MOIS)", "target": "Israel", "type": "Espionage", "tools": "PowerShell, Ligolo", "desc": "מזוהה עם המודיעין האיראני."},
+            {"name": "OilRig (APT34)", "origin": "Iran (IRGC)", "target": "Israel", "type": "Espionage", "tools": "DNSpionage", "desc": "מתמקדת בתשתיות קריטיות."},
+            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Wiper", "tools": "BiBiWiper", "desc": "מטרתה השמדת מידע."}
         ]
 
 class CTICollector:
@@ -316,8 +294,7 @@ class CTICollector:
                     soup = BeautifulSoup(content, 'html.parser')
                     for msg in soup.find_all('div', class_='tgme_widget_message_wrap')[-10:]:
                         try:
-                            text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
-                            items.append({"title": "התרעת מערך הסייבר", "url": msg.find('a', class_='tgme_widget_message_date')['href'], "date": parse_flexible_date(msg.find('time')['datetime']), "source": "INCD", "summary": text})
+                            items.append({"title": "התרעת מערך הסייבר", "url": msg.find('a', class_='tgme_widget_message_date')['href'], "date": parse_flexible_date(msg.find('time')['datetime']), "source": "INCD", "summary": msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')})
                         except: pass
         except: pass
         return items
@@ -332,8 +309,6 @@ def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
     for i, item in enumerate(raw):
-        # מתקן באג שבו הניתוח המדולל לא תואם למקור
-        item_to_save = next((a for a in analyzed if a['published_at'] == item['date'] and a['title'] != item['title']), None)
         if i < len(analyzed):
             a = analyzed[i]
             try:
