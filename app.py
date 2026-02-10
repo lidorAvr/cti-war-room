@@ -92,7 +92,6 @@ async def perform_update(status_container=None):
     if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת...**]")
     raw = await col.get_all_data()
     
-    # Simple Deduplication before AI
     existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
     
@@ -141,16 +140,16 @@ with st.sidebar:
 st.title("לוח בקרה מבצעי")
 conn = sqlite3.connect(DB_NAME)
 c = conn.cursor()
-c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-7 days') AND source != 'DeepWeb'")
+c.execute(f"SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-{HISTORY_DAYS} days') AND source != 'DeepWeb'")
 try: count_24h = c.fetchone()[0]
 except: count_24h = 0
-c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' AND published_at > datetime('now', '-7 days')")
+c.execute(f"SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' AND published_at > datetime('now', '-{HISTORY_DAYS} days')")
 try: count_crit = c.fetchone()[0]
 except: count_crit = 0
 conn.close()
 
 m4, m3, m2, m1 = st.columns(4)
-m1.metric("ידיעות (7 ימים)", count_24h)
+m1.metric(f"ידיעות ({HISTORY_DAYS} ימים)", count_24h)
 m2.metric("התרעות קריטיות", count_crit)
 m3.metric("מקורות", "7")
 m4.metric("זמינות", "100%")
@@ -161,7 +160,7 @@ tab_feed, tab_strat, tab_tools, tab_map = st.tabs(["🔴 עדכונים שוטפ
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'DeepWeb' ORDER BY published_at DESC LIMIT 100", conn)
+    df = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'DeepWeb' ORDER BY published_at DESC LIMIT 200", conn)
     conn.close()
     if not df.empty:
         df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
