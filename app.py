@@ -10,7 +10,6 @@ import os
 import streamlit.components.v1 as components
 from utils import *
 from dateutil import parser as date_parser
-from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
@@ -79,14 +78,23 @@ def get_feed_card_html(row, date_str):
     </div>
     """
 
+# --- INITIALIZATION ---
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
-st_autorefresh(interval=15 * 60 * 1000, key="data_refresh")
 
 GROQ_KEY = st.secrets.get("groq_key", "")
 VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
+
+# --- AUTO REFRESH LOGIC (NATIVE) ---
+# רענון אוטומטי כל 15 דקות ללא תלות ברכיבים חיצוניים
+if 'last_run' not in st.session_state:
+    st.session_state['last_run'] = time.time()
+
+if time.time() - st.session_state['last_run'] > 900: # 900 seconds = 15 min
+    st.session_state['last_run'] = time.time()
+    st.rerun()
 
 async def perform_update(status_container=None):
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
@@ -94,7 +102,6 @@ async def perform_update(status_container=None):
     if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת (RSS/Telegram)...**]")
     raw = await col.get_all_data()
     
-    # Filter only by URL initially
     existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
     
@@ -217,7 +224,6 @@ with tab_strat:
                 s.markdown(":orange[**נמצאו אינדיקטורים, מפעיל ניתוח...**]")
                 analyzed = asyncio.run(proc.analyze_batch(res))
                 
-                # Deduplication logic inside scanning too
                 existing_urls, _ = get_existing_data()
                 to_save = [r for r in res if r['url'] not in existing_urls]
                 
