@@ -143,32 +143,305 @@ URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
 # --- CORE UPDATE FUNCTIONS ---
-async def update_live_feed(p_bar, status_text):
-    status_text.info("📡 אוסף ידיעות חמות מהמקורות...")
+async def perform_update(status_container=None):
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-    raw = await col.get_all_data()
-    p_bar.progress(30)
     
-    # Filter EXISTING items to save AI time (but keep quality high)
+    # 1. Fetch
+    if status_container: status_container.update(label="📡 אוסף ידיעות מהמקורות...", state="running")
+    raw = await col.get_all_data()
+    
+    # 2. Filter existing
     existing = get_existing_urls()
     raw_to_process = [r for r in raw if r['url'] not in existing]
     
+    # 3. Analyze
     if raw_to_process:
-        status_text.info(f"🤖 מנתח {len(raw_to_process)} ידיעות חדשות (AI Processing)...")
+        if status_container: status_container.update(label=f"🤖 מנתח {len(raw_to_process)} ידיעות חדשות ב-AI...", state="running")
         analyzed = await proc.analyze_batch(raw_to_process)
-        save_reports(raw_to_process, analyzed)
-    p_bar.progress(60)
+        return save_reports(raw_to_process, analyzed)
+    return 0
 
-async def update_threat_dossiers(p_bar, status_text):
-    status_text.info("🕵️ מעדכן תיקי שחקני איום (Deep Scan)...")
+# --- BOOT SEQUENCE (FAST & VISUAL) ---
+if "booted" not in st.session_state:
+    # שימוש ב-st.status במקום סתם טקסט - מונע מסך שחור ונותן אינדיקציה ברורה
+    with st.status("🚀 מאתחל מערכת מודיעין...", expanded=True) as status:
+        st.write("🔍 בודק תקינות מסד נתונים...")
+        time.sleep(0.5)
+        
+        st.write("📡 מתחבר לעדכוני מודיעין מהירים (RSS)...")
+        # אנו מריצים רק את העדכון המהיר בהתחלה כדי שהמערכת תעלה מיד
+        count = asyncio.run(perform_update())
+        if count > 0:
+            st.write(f"✅ נוספו {count} ידיעות חדשות.")
+        else:
+            st.write("✅ המערכת מעודכנת.")
+            
+        status.update(label="✅ המערכת מוכנה לעבודה!", state="complete", expanded=False)
+        time.sleep(1)
+        
+    st.session_state['booted'] = True
+    st.rerun()
+
+# --- SIDEBAR & DASHBOARD ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=60)
+    st.markdown("### CTI WAR ROOM")
+    ok, msg = ConnectionManager.check_groq(GROQ_KEY)
+    st.caption(f"AI STATUS: {msg}")
+    
+    # כפתור סנכרון ידני
+    if st.button("⚡ סנכרון מהיר (RSS)"):
+        with st.status("מסנכרן...") as s:
+            c = asyncio.run(perform_update(s))
+            s.update(label=f"עודכן: {c}", state="complete")
+        time.sleep(1)
+        st.rerun()
+
+st.title("לוח בקרה מבצעי")
+conn = sqlite3.connect(DB_NAME)
+c = conn.cursor()
+c.execute("SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-24 hours') AND source != 'DeepWeb'")
+try:
+    count_24h = c.fetchone()[0]
+except: count_24h = 0
+
+c.execute("SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' AND published_at > datetime('now', '-24 hours')")
+try:
+    count_crit = c.fetchone()[0]
+except: count_crit = 0
+conn.close()
+
+m4, m3, m2, m1 = st.columns(4)
+m1.metric("ידיעות (24ש)", count_24h)
+m2.metric("התרעות קריטיות", count_crit)
+m3.metric("מקורות", "7")
+m4.metric("זמינות", "100%")
+
+st.markdown("---")
+
+tab_feed, tab_strat, tab_tools, tab_map = st.tabs(["🔴 עדכונים שוטפים", "🗂️ תיקי תקיפה", "🛠️ מעבדת חקירות", "🌍 מפת תקיפות"])
+
+# --- TAB 1: LIVE FEED ---
+with tab_feed:
+    conn = sqlite3.connect(DB_NAME)
+    df_incd = pd.read_sql_query("SELECT * FROM intel_reports WHERE source = 'INCD' ORDER BY published_at DESC LIMIT 10", conn)
+    df_rest = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'INCD' AND source != 'DeepWeb' AND published_at > datetime('now', '-2 days') ORDER BY published_at DESC LIMIT 50", conn)
+    conn.close()
+    
+    df = pd.concat([df_incd, df_rest])
+    if not df.empty:
+        df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
+        df = df.sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
+        
+        c1, c2 = st.columns(2)
+        with c1: 
+            all_tags = ['הכל', 'פיישינג', 'נוזקה', 'פגיעויות', 'ישראל', 'מחקר', 'כללי']
+            f_tag = st.radio("סינון לפי תגיות", all_tags, horizontal=True)
+        with c2: 
+            f_sev = st.radio("חומרה", ["הכל", "קריטי/גבוה", "בינוני", "נמוך/מידע"], horizontal=True)
+        
+        if f_tag != 'הכל': df = df[df['tags'] == f_tag]
+        if "גבוה" in f_sev: df = df[df['severity'].str.contains('Critical|High', case=False)]
+        
+        for _, row in df.iterrows():
+            try:
+                dt = row['published_at']
+                if pd.isnull(dt): date_display = "תאריך לא ידוע"
+                else:
+                    if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
+                    else: dt = dt.astimezone(IL_TZ)
+                    date_display = dt.strftime('%d/%m %H:%M')
+            except: date_display = "--/--"
+            
+            st.markdown(get_feed_card_html(row, date_display), unsafe_allow_html=True)
+    else:
+        st.info("אין נתונים להצגה כרגע. המערכת אוספת מידע...")
+
+# --- TAB 2: DOSSIER ---
+with tab_strat:
     threats = APTSheetCollector().fetch_threats()
-    scanner, proc = DeepWebScanner(), AIBatchProcessor(GROQ_KEY)
-    for i, threat in enumerate(threats):
-        res = scanner.scan_actor(threat['name'], limit=2)
-        if res:
-             # Same filtering logic
-             existing = get_existing_urls()
-             res_to_process = [r for r in res if r['url'] not in existing]
-             if res_to_process:
-                 analyzed = await proc.analyze_batch(res_to_process)
-                 save_reports(res_to_process, analyzed)
+    sel = st.selectbox("בחר קבוצה", [t['name'] for t in threats])
+    actor = next(t for t in threats if t['name'] == sel)
+    
+    # סריקה יזומה - מונע תקיעה בטעינה הראשונית!
+    if st.button(f"🔎 בצע סריקת Deep Web עבור {actor['name']}"):
+        with st.status("סורק מקורות עומק...", expanded=True) as s:
+            scanner = DeepWebScanner()
+            proc = AIBatchProcessor(GROQ_KEY)
+            res = scanner.scan_actor(actor['name'], limit=3)
+            if res:
+                s.write("נמצאו תוצאות, מפעיל ניתוח AI...")
+                analyzed = asyncio.run(proc.analyze_batch(res))
+                existing = get_existing_urls()
+                to_save = [r for r in res if r['url'] not in existing]
+                if to_save:
+                    save_reports(to_save, analyzed)
+                    st.success(f"נוספו {len(to_save)} דוחות חדשים!")
+                else:
+                    st.info("לא נמצא מידע חדש שלא קיים במערכת.")
+            else:
+                st.warning("לא נמצאו תוצאות חדשות בסריקה זו.")
+            st.rerun()
+
+    st.markdown(f"""
+    <div style="background:linear-gradient(180deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%); padding:20px; border-radius:10px; border-left:4px solid #f59e0b; direction:rtl; text-align:right;">
+        <h2 style="color:white; margin:0;">{actor['name']}</h2>
+        <p style="color:#cbd5e1; font-size:1.1rem;">{actor['desc']}</p>
+        <div style="display:flex; gap:10px; margin-top:10px;">
+            <span style="background:#0f172a; padding:5px 10px; border-radius:5px; color:#fcd34d;">מוצא: {actor['origin']}</span>
+            <span style="background:#0f172a; padding:5px 10px; border-radius:5px; color:#fbcfe8;">יעד: {actor['target']}</span>
+            <span style="background:#0f172a; padding:5px 10px; border-radius:5px; color:#93c5fd;">סוג: {actor['type']}</span>
+        </div>
+        <hr style="border-color:#334155;">
+        <p><b>כלים:</b> <code style="color:#fca5a5;">{actor['tools']}</code></p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    conn = sqlite3.connect(DB_NAME)
+    df_deep = pd.read_sql_query(f"SELECT * FROM intel_reports WHERE source = 'DeepWeb' AND actor_tag = '{actor['name']}' ORDER BY published_at DESC LIMIT 10", conn)
+    conn.close()
+    
+    st.markdown("##### 🕵️ ממצאי Deep Scan (היסטוריה)")
+    if not df_deep.empty:
+        for _, row in df_deep.iterrows():
+            st.markdown(get_feed_card_html(row, "Deep Web Hit"), unsafe_allow_html=True)
+    else:
+        st.info("טרם בוצעו סריקות או לא נמצאו ממצאים עבור שחקן זה.")
+
+# --- TAB 3: TOOLS & LAB ---
+with tab_tools:
+    st.markdown("#### 🛠️ ארגז כלים")
+    toolkit = AnalystToolkit.get_tools()
+    
+    c1, c2, c3 = st.columns(3)
+    cols = [c1, c2, c3]
+    for i, (category, tools) in enumerate(toolkit.items()):
+        with cols[i]:
+            st.markdown(f"**{category}**")
+            for tool in tools:
+                st.markdown(f"""
+                <a href="{tool['url']}" target="_blank">
+                    <div class="tool-card">
+                        <span class="tool-icon">{tool['icon']}</span>
+                        <span class="tool-name">{tool['name']}</span>
+                        <span class="tool-desc">{tool['desc']}</span>
+                    </div>
+                </a>
+                """, unsafe_allow_html=True)
+
+    st.markdown("---")
+    st.markdown("#### 🔬 חקירת IOC")
+    
+    if 'scan_res' not in st.session_state: st.session_state['scan_res'] = None
+    
+    ioc_in = st.text_input("הזן אינדיקטור (IP/URL/Hash)", key="ioc_input")
+    if st.button("בצע חקירה"):
+        st.session_state['scan_res'] = None 
+        itype = identify_ioc_type(ioc_in)
+        if itype:
+            tl = ThreatLookup(VT_KEY, URLSCAN_KEY, ABUSE_KEY)
+            with st.spinner("אוסף מודיעין ממנועים..."):
+                vt = tl.query_virustotal(ioc_in, itype)
+                us = tl.query_urlscan(ioc_in)
+                ab = tl.query_abuseipdb(ioc_in) if itype == 'ip' else None
+                ai_res = asyncio.run(AIBatchProcessor(GROQ_KEY).analyze_single_ioc(ioc_in, itype, {'virustotal': vt, 'urlscan': us}))
+                
+                st.session_state['scan_res'] = {'vt': vt, 'us': us, 'ab': ab, 'ai': ai_res, 'type': itype}
+
+    # RESULTS
+    res = st.session_state.get('scan_res')
+    if res:
+        vt, us, ab = res['vt'], res['us'], res['ab']
+        
+        # --- REDIRECT ALERT ---
+        if us and us.get('task') and us.get('page'):
+            input_url = us['task'].get('url', '')
+            final_url = us['page'].get('url', '')
+            if input_url != final_url:
+                st.markdown(f"""
+                <div class="redirect-alert">
+                    ⚠️ זוהתה הפנייה (Redirect)!
+                    <br>מקור: {input_url}
+                    <br>יעד סופי: {final_url}
+                </div>
+                """, unsafe_allow_html=True)
+
+        # 1. SCORE CARDS
+        c1, c2, c3 = st.columns(3)
+        
+        # VT CARD
+        if vt:
+            mal = vt.get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0)
+            color_class = "ioc-danger" if mal > 0 else "ioc-safe"
+            c1.markdown(f"""
+            <div class="ioc-card {color_class}">
+                <div class="ioc-title">VirusTotal</div>
+                <div class="ioc-value">{mal}</div>
+                <div class="ioc-sub">Malicious Hits</div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+             c1.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">VirusTotal</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
+        
+        # ABUSEIPDB CARD
+        if ab:
+            score = ab.get('abuseConfidenceScore', 0)
+            color_class = "ioc-danger" if score > 50 else "ioc-safe"
+            c2.markdown(f"""
+            <div class="ioc-card {color_class}">
+                <div class="ioc-title">AbuseIPDB</div>
+                <div class="ioc-value">{score}%</div>
+                <div class="ioc-sub">Confidence</div>
+            </div>
+            """, unsafe_allow_html=True)
+        elif res['type'] != 'ip':
+             c2.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">AbuseIPDB</div><div class="ioc-value">IP Only</div></div>""", unsafe_allow_html=True)
+        
+        # URLSCAN CARD
+        if us:
+             c3.markdown("""<div class="ioc-card ioc-safe"><div class="ioc-title">URLScan</div><div class="ioc-value">Found</div><div class="ioc-sub">View Details</div></div>""", unsafe_allow_html=True)
+        else:
+             c3.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">URLScan</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
+
+        # 2. DETAILS TABS
+        t1, t2, t3, t4 = st.tabs(["🤖 ניתוח AI", "🦠 נתונים טכניים (VT)", "📷 URLScan", "🚫 AbuseIPDB"])
+        
+        with t1:
+             st.markdown(f'<div style="direction:rtl; text-align:right;">{res["ai"]}</div>', unsafe_allow_html=True)
+        
+        with t2:
+             if vt:
+                attr = vt.get('attributes', {})
+                st.write("**HTTP Response:**", attr.get('last_http_response_code'))
+                st.write("**Last Analysis:**", datetime.datetime.fromtimestamp(attr.get('last_analysis_date', 0)).strftime('%Y-%m-%d'))
+                st.write("**Categories:**", attr.get('categories'))
+                st.write("**Tags:**", attr.get('tags'))
+                st.json(attr.get('last_analysis_stats'))
+             else: st.info("אין נתונים.")
+
+        with t3:
+             if us:
+                task = us.get('task', {})
+                page = us.get('page', {})
+                st.image(task.get('screenshotURL'), caption="Screenshot")
+                st.write(f"**Final URL:** {page.get('url')}")
+                st.write(f"**Server:** {page.get('server')}")
+                st.write(f"**Country:** {page.get('country')}")
+                st.write(f"**IP:** {page.get('ip')}")
+                with st.expander("Redirect Chain"):
+                    st.json(us.get('data', {}).get('requests', []))
+             else: st.info("אין נתונים.")
+
+        with t4:
+            if ab:
+                st.write(f"**ISP:** {ab.get('isp')}")
+                st.write(f"**Domain:** {ab.get('domain')}")
+                st.write(f"**Usage Type:** {ab.get('usageType')}")
+                st.write(f"**Country:** {ab.get('countryCode')}")
+                st.metric("Total Reports", ab.get('totalReports'))
+            else: st.info("רלוונטי ל-IP בלבד.")
+
+with tab_map:
+    components.iframe("https://threatmap.checkpoint.com/", height=700)
+
+st.markdown("""<div class="footer">SYSTEM ARCHITECT: <b>LIDOR AVRAHAMY</b></div>""", unsafe_allow_html=True)
