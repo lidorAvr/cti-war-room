@@ -36,19 +36,16 @@ def parse_flexible_date(date_obj):
     """
     now = datetime.datetime.now(IL_TZ)
     try:
-        # Case 1: RSS struct_time
         if isinstance(date_obj, time.struct_time):
             dt = datetime.datetime(*date_obj[:6], tzinfo=pytz.utc)
             return dt.astimezone(IL_TZ).isoformat()
         
-        # Case 2: String
         if isinstance(date_obj, str):
             dt = date_parser.parse(date_obj)
             if dt.tzinfo is None:
                 dt = pytz.utc.localize(dt)
             return dt.astimezone(IL_TZ).isoformat()
             
-        # Case 3: DateTime object
         if isinstance(date_obj, datetime.datetime):
             if date_obj.tzinfo is None:
                 date_obj = pytz.utc.localize(date_obj)
@@ -57,7 +54,6 @@ def parse_flexible_date(date_obj):
     except:
         pass
     
-    # Fallback to NOW if parsing fails (keeps chronology)
     return now.isoformat()
 
 # --- IOC VALIDATION ---
@@ -146,7 +142,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     
-    # Fallback Mechanism
     models = [model, "llama-3.1-8b-instant"]
     
     for m in models:
@@ -167,9 +162,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     return None
 
 def translate_with_gemini_hebrew(text_content):
-    """
-    Enforces Hebrew translation via Gemini.
-    """
     try:
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key: return text_content
@@ -202,11 +194,9 @@ class AIBatchProcessor:
         sev = "Medium"
         tag = "כללי"
         
-        # Severity Logic
         if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt']):
             sev = "High"
         
-        # Tag Logic
         if source == "INCD" or "israel" in text or "iran" in text: tag = "ישראל"
         elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "פגיעויות"
         elif "phishing" in text or "credential" in text: tag = "פיישינג"
@@ -239,7 +229,6 @@ class AIBatchProcessor:
             batch_text = "\n".join(batch_lines)
             prompt = f"{system_instruction}\nData:\n{batch_text}"
             
-            # 1. Groq Analysis
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             
             chunk_map = {}
@@ -251,17 +240,12 @@ class AIBatchProcessor:
             
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
-                
-                # 2. Heuristic Tagging
                 raw_txt = (chunk[j]['title'] + chunk[j]['summary'])
                 final_tag, final_sev = self._determine_tag_severity(raw_txt, chunk[j]['source'])
                 
-                # 3. Gemini Polish (Translation & Summary Enforcement)
-                # Fallback to original text if AI failed
                 draft_title = ai.get('title', chunk[j]['title'])
                 draft_sum = ai.get('summary', chunk[j]['summary'])
                 
-                # If still English, force Gemini
                 heb_title = translate_with_gemini_hebrew(draft_title)
                 heb_sum = translate_with_gemini_hebrew(draft_sum)
 
@@ -330,12 +314,10 @@ class ThreatLookup:
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
-            # 1. Search with quotes to handle special chars/shorteners
             search_query = f'"{ioc}"'
             res = requests.get(f"https://urlscan.io/api/v1/search/?q={search_query}", headers={"API-Key": self.urlscan_key}, timeout=10)
             data = res.json()
             if data.get('results'):
-                # 2. Get Full Result of the most recent scan
                 scan_id = data['results'][0]['_id']
                 full_res = requests.get(f"https://urlscan.io/api/v1/result/{scan_id}/", headers={"API-Key": self.urlscan_key}, timeout=10)
                 return full_res.json() if full_res.status_code == 200 else None
@@ -372,7 +354,6 @@ class AnalystToolkit:
 
 class APTSheetCollector:
     def fetch_threats(self): 
-        # Richer Data for Analyst
         return [
             {
                 "name": "MuddyWater", 
@@ -413,7 +394,9 @@ class CTICollector:
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
         {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
-        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"} 
+        {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"},
+        # --- NEW SOURCE: Malwarebytes Labs ---
+        {"name": "Malwarebytes", "url": "https://www.malwarebytes.com/blog/feed/", "type": "rss"}
     ]
 
     async def fetch_item(self, session, source):
@@ -423,39 +406,32 @@ class CTICollector:
                 if resp.status != 200: return []
                 content = await resp.text()
                 
-                # --- RSS ---
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
-                    # INCREASED LIMIT TO 10
                     entries = feed.entries[:10]
 
                     for entry in entries:
-                        # Use Flexible Parser
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
                         pub_date = parse_flexible_date(date_raw)
                         
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date, "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:1500]})
 
-                # --- JSON ---
                 elif source['type'] == 'json':
                      data = json.loads(content)
-                     for v in data.get('vulnerabilities', [])[:10]: # Increased to 10
+                     for v in data.get('vulnerabilities', [])[:10]:
                          url = f"https://nvd.nist.gov/vuln/detail/{v['cveID']}"
                          pub_date = parse_flexible_date(v.get('dateAdded'))
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
                 
-                # --- TELEGRAM ---
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
-                    # Force 10 items
                     for msg in msgs[-10:]:
                         try:
                             text_div = msg.find('div', class_='tgme_widget_message_text')
                             if not text_div: continue
                             text = text_div.get_text(separator=' ')
                             
-                            # Time Extraction
                             time_tag = msg.find('time')
                             date_raw = time_tag['datetime'] if time_tag else None
                             pub_date = parse_flexible_date(date_raw)
@@ -481,7 +457,6 @@ def save_reports(raw, analyzed):
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
-            # Use original parsed date from fetch_item to ensure consistency
             final_date = item['date'] 
             
             try:
