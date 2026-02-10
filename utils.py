@@ -171,9 +171,6 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     return None
 
 def translate_with_gemini_hebrew(text_content):
-    """
-    Enforces Hebrew translation via Gemini - ORIGINAL HIGH QUALITY PROMPT
-    """
     try:
         gemini_key = st.secrets.get("gemini_key")
         if not gemini_key: return text_content
@@ -181,7 +178,6 @@ def translate_with_gemini_hebrew(text_content):
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel('gemini-pro')
         
-        # --- RESTORED ORIGINAL PROMPT ---
         prompt = f"""
         Act as a Cyber Intelligence Editor.
         Task: Rewrite the following text into professional Hebrew.
@@ -207,11 +203,9 @@ class AIBatchProcessor:
         sev = "Medium"
         tag = "כללי"
         
-        # Severity Logic
         if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt']):
             sev = "High"
         
-        # Tag Logic
         if source == "INCD" or "israel" in text or "iran" in text: tag = "ישראל"
         elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "פגיעויות"
         elif "phishing" in text or "credential" in text: tag = "פיישינג"
@@ -223,7 +217,6 @@ class AIBatchProcessor:
     async def analyze_batch(self, items):
         if not items: return []
         
-        # --- Speed Optimization: Filter existing items BEFORE AI ---
         existing = get_existing_urls()
         items_to_process = [i for i in items if i['url'] not in existing]
         if not items_to_process: return []
@@ -231,7 +224,6 @@ class AIBatchProcessor:
         chunk_size = 3 
         results = []
         
-        # --- RESTORED ORIGINAL PROMPT ---
         system_instruction = """
         You are an Elite Cyber News Editor.
         Task: Create a structured summary for a dashboard.
@@ -251,7 +243,6 @@ class AIBatchProcessor:
             batch_text = "\n".join(batch_lines)
             prompt = f"{system_instruction}\nData:\n{batch_text}"
             
-            # 1. Groq Analysis
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
             
             chunk_map = {}
@@ -264,11 +255,9 @@ class AIBatchProcessor:
             for j in range(len(chunk)):
                 ai = chunk_map.get(j, {})
                 
-                # 2. Heuristic Tagging
                 raw_txt = (chunk[j]['title'] + chunk[j]['summary'])
                 final_tag, final_sev = self._determine_tag_severity(raw_txt, chunk[j]['source'])
                 
-                # 3. Gemini Polish (Translation & Summary Enforcement)
                 draft_title = ai.get('title', chunk[j]['title'])
                 draft_sum = ai.get('summary', chunk[j]['summary'])
                 
@@ -288,7 +277,6 @@ class AIBatchProcessor:
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
         lean_data = self._extract_key_intel(data)
-        # --- RESTORED ORIGINAL PROMPT ---
         prompt = f"""
         Act as a Senior SOC Analyst (Unit 8200 style).
         Target: {ioc} ({ioc_type})
@@ -422,7 +410,6 @@ class CTICollector:
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
         {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
         {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"},
-        # --- NEW SOURCE: Malwarebytes ---
         {"name": "Malwarebytes", "url": "https://www.malwarebytes.com/blog/feed/", "type": "rss"}
     ]
 
@@ -433,18 +420,14 @@ class CTICollector:
                 if resp.status != 200: return []
                 content = await resp.text()
                 
-                # --- RSS ---
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
                     entries = feed.entries[:10]
-
                     for entry in entries:
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
                         pub_date = parse_flexible_date(date_raw)
-                        
                         items.append({"title": entry.title, "url": entry.link, "date": pub_date, "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:1500]})
-
-                # --- JSON ---
+                
                 elif source['type'] == 'json':
                      data = json.loads(content)
                      for v in data.get('vulnerabilities', [])[:10]:
@@ -452,7 +435,6 @@ class CTICollector:
                          pub_date = parse_flexible_date(v.get('dateAdded'))
                          items.append({"title": f"KEV: {v['cveID']}", "url": url, "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
                 
-                # --- TELEGRAM ---
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     msgs = soup.find_all('div', class_='tgme_widget_message_wrap')
@@ -484,12 +466,6 @@ class CTICollector:
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
     c, cnt = conn.cursor(), 0
-    # Matching Logic:
-    # Analyzed list only contains items that were processed (new items).
-    # We must match them back to save them.
-    # Since we filter before processing, 'analyzed' corresponds to 'raw_filtered'.
-    # We will assume 'raw' passed here is the FILTERED list from app.py
-    
     for i, item in enumerate(raw):
         if i < len(analyzed):
             a = analyzed[i]
