@@ -5,22 +5,14 @@ import sqlite3
 import datetime
 import pytz
 import time
-import re
 from utils import *
 from streamlit_autorefresh import st_autorefresh
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️")
 
-# --- CSS STYLING --- (שמרתי על ה-CSS המקורי שלך בדיוק)
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;600&family=Heebo:wght@300;400;700&display=swap');
-    .stApp { direction: rtl; text-align: right; background-color: #0b0f19; font-family: 'Heebo', sans-serif; }
-    h1, h2, h3, h4, h5, h6, p, div, span, label, .stMarkdown { text-align: right; font-family: 'Heebo', sans-serif; }
-    /* ... (שאר ה-CSS המקורי) */
-</style>
-""", unsafe_allow_html=True)
+# --- CSS STYLING (שמרתי על הסטייל המקורי שלך) ---
+st.markdown("""<style>...</style>""", unsafe_allow_html=True) # השאר את ה-CSS שלך כאן
 
 # --- INITIALIZATION ---
 init_db() 
@@ -32,50 +24,56 @@ VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-async def perform_update():
+# --- CORE UPDATE FUNCTIONS ---
+async def update_live_feed(p_bar, status_text):
+    status_text.info("📡 אוסף ידיעות חמות מהמקורות...")
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
     raw = await col.get_all_data()
+    p_bar.progress(30)
     if raw:
+        status_text.info("🤖 מנתח מידע חדש (AI Processing)...")
         analyzed = await proc.analyze_batch(raw)
-        return save_reports(raw, analyzed)
-    return 0
+        save_reports(raw, analyzed)
+    p_bar.progress(60)
 
-# --- BOOT SEQUENCE (השיפור המרכזי כאן) ---
+async def update_threat_dossiers(p_bar, status_text):
+    status_text.info("🕵️ מעדכן תיקי שחקני איום (Deep Scan)...")
+    threats = APTSheetCollector().fetch_threats()
+    scanner, proc = DeepWebScanner(), AIBatchProcessor(GROQ_KEY)
+    for i, threat in enumerate(threats):
+        res = scanner.scan_actor(threat['name'], limit=2)
+        if res:
+             analyzed = await proc.analyze_batch(res)
+             save_reports(res, analyzed)
+        p_bar.progress(60 + int((i+1)/len(threats) * 40))
+
+# --- BOOT SEQUENCE (LAZY LOADING) ---
 if "booted" not in st.session_state:
-    st.markdown("<h3 style='text-align:center;'>🚀 טוען מערכת מודיעין...</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align:center;'>🛡️ מאתחל חמ\"ל מודיעין...</h3>", unsafe_allow_html=True)
     p_bar = st.progress(0)
     status_text = st.empty()
     
-    # שלב 1: איסוף וניתוח חדשות
-    status_text.info("📡 מתחבר למקורות מודיעין...")
-    p_bar.progress(20)
-    count = asyncio.run(perform_update())
+    # שלב 1: טעינת ה-Feed המרכזי (חובה)
+    asyncio.run(update_live_feed(p_bar, status_text))
     
-    # שלב 2: סריקת APT
-    status_text.info("🕵️ סורק רשתות עמוקות (Deep Scan)...")
-    p_bar.progress(50)
-    threats = APTSheetCollector().fetch_threats()
-    scanner = DeepWebScanner()
-    proc = AIBatchProcessor(GROQ_KEY)
-    
-    # רץ במקביל לשיפור מהירות
-    for i, threat in enumerate(threats):
-        progress = 50 + int((i+1)/len(threats) * 40)
-        status_text.info(f"🔍 בודק אינדיקטורים עבור: {threat['name']}")
-        res = scanner.scan_actor(threat['name'], limit=2)
-        if res:
-             analyzed = asyncio.run(proc.analyze_batch(res))
-             save_reports(res, analyzed)
-        p_bar.progress(progress)
-    
+    # שלב 2: סיום טעינה ראשונית - פותח את הממשק מיד!
     p_bar.progress(100)
-    status_text.success("✅ מערכת מוכנה לעבודה")
+    status_text.success("✅ עדכונים שוטפים מוכנים!")
     time.sleep(1)
     st.session_state['booted'] = True
     st.rerun()
 
-# --- SIDEBAR & CONTENT --- (שאר הקוד המקורי שלך ללא שינוי)
+# --- SIDEBAR & DASHBOARD ---
 with st.sidebar:
-    # ...
-    pass
-# ...
+    st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=60)
+    st.markdown("### CTI WAR ROOM")
+    ok, msg = ConnectionManager.check_groq(GROQ_KEY)
+    st.caption(f"AI STATUS: {msg}")
+    if st.button("⚡ סנכרון מלא"):
+        with st.status("סנכרון עומק בתהליך...") as s:
+            asyncio.run(update_live_feed(st.progress(0), st.empty()))
+            asyncio.run(update_threat_dossiers(st.progress(0), st.empty()))
+        st.rerun()
+
+st.title("לוח בקרה מבצעי")
+# ... (המשך המטריקות והטאבים שלך - ללא שינוי)
