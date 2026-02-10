@@ -18,15 +18,12 @@ st.set_page_config(page_title="CTI WAR ROOM", layout="wide", page_icon="🛡️"
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Rubik:wght@300;400;600&family=Heebo:wght@300;400;700&display=swap');
-    
     .stApp { direction: rtl; text-align: right; background-color: #0b0f19; font-family: 'Heebo', sans-serif; }
     h1, h2, h3, h4, h5, h6, p, div, span, label, .stMarkdown { text-align: right; font-family: 'Heebo', sans-serif; }
-    
     [data-testid="stSidebarCollapseButton"] { float: left; margin-left: 10px; margin-right: auto; }
     .stTextInput input, .stSelectbox, .stMultiSelect { direction: rtl; text-align: right; }
     .stButton button { width: 100%; font-family: 'Rubik', sans-serif; border-radius: 8px; }
     .stTabs [data-baseweb="tab-list"] { justify-content: flex-end; gap: 15px; }
-    
     .tool-card {
         background: rgba(30, 41, 59, 0.7); border: 1px solid rgba(56, 189, 248, 0.3);
         border-radius: 12px; padding: 20px; text-align: center; margin-bottom: 15px;
@@ -37,7 +34,6 @@ st.markdown("""
     .tool-name { font-weight: 700; color: #f1f5f9; display: block; margin-bottom: 5px; font-size: 1.1rem; }
     .tool-desc { font-size: 0.85rem; color: #cbd5e1; display: block; line-height: 1.4; }
     a { text-decoration: none; }
-
     .report-card {
         background: rgba(30, 41, 59, 0.4); backdrop-filter: blur(12px);
         border: 1px solid rgba(148, 163, 184, 0.1); border-radius: 12px; padding: 24px; margin-bottom: 20px;
@@ -61,7 +57,6 @@ def get_feed_card_html(row, date_str):
     badge_bg, badge_color, border_color = "rgba(100, 116, 139, 0.2)", "#cbd5e1", "rgba(100, 116, 139, 0.3)"
     if "critical" in sev or "high" in sev: badge_bg, badge_color, border_color = "rgba(220, 38, 38, 0.2)", "#fca5a5", "#ef4444"
     elif "medium" in sev: badge_bg, badge_color, border_color = "rgba(59, 130, 246, 0.2)", "#93c5fd", "#3b82f6"
-    
     summary = clean_html(row['summary']).replace('\n', '<br>')
     return f"""
     <div class="report-card" style="direction: rtl; text-align: right; border-right: 4px solid {border_color};">
@@ -86,48 +81,39 @@ VT_KEY = st.secrets.get("vt_key", "")
 URLSCAN_KEY = st.secrets.get("urlscan_key", "")
 ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
 
-# --- NATIVE AUTO REFRESH (NO EXTERNAL COMPONENT) ---
 if 'last_run' not in st.session_state:
     st.session_state['last_run'] = time.time()
-
 if time.time() - st.session_state['last_run'] > 900:
     st.session_state['last_run'] = time.time()
     st.rerun()
 
 async def perform_update(status_container=None):
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
-    
-    if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת (RSS/Telegram)...**]")
+    if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת...**]")
     raw = await col.get_all_data()
     
-    existing_urls = get_existing_data()
+    # Simple Deduplication before AI
+    existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
     
     if raw_to_process:
-        if status_container: status_container.markdown(f":orange[**🤖 מפעיל מנועי AI (איחוד ידיעות וניתוח)...**]")
+        if status_container: status_container.markdown(f":orange[**🤖 מנתח {len(raw_to_process)} ידיעות חדשות...**]")
         results = await proc.analyze_batch(raw_to_process)
         return save_reports(raw_to_process, results)
     return 0
 
-# --- BOOT SEQUENCE ---
 if "booted" not in st.session_state:
-    with st.status("🚀 **מאתחל מערכת CTI...**", expanded=True) as status:
-        st.markdown(":green[**🔍 מבצע בדיקת שפיות למסד הנתונים...**]")
+    with st.status("🚀 **מאתחל מערכת...**", expanded=True) as status:
+        st.markdown(":green[**🔍 מבצע בדיקת שפיות...**]")
         time.sleep(0.5)
-        
         count = asyncio.run(perform_update(status))
-        if count > 0:
-            st.markdown(f":green[**✅ נקלטו בהצלחה {count} אירועי סייבר חדשים.**]")
-        else:
-            st.markdown(":grey[**✅ המערכת מעודכנת (לא נמצאו אירועים חדשים).**]")
-            
-        status.update(label="✅ **המערכת מבצעית**", state="complete", expanded=False)
+        if count > 0: st.markdown(f":green[**✅ נקלטו {count} אירועים חדשים.**]")
+        else: st.markdown(":grey[**✅ המערכת מעודכנת.**]")
+        status.update(label="✅ **המערכת מוכנה**", state="complete", expanded=False)
         time.sleep(1)
-        
     st.session_state['booted'] = True
     st.rerun()
 
-# --- SIDEBAR ---
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=60)
     st.markdown("### CTI WAR ROOM")
@@ -142,17 +128,15 @@ with st.sidebar:
                 s.update(label=f"✅ עודכן: {c}", state="complete")
             time.sleep(1)
             st.rerun()
-            
     with col2:
-        if st.button("🗑️ איפוס מלא"):
+        if st.button("🗑️ איפוס"):
             try:
                 if os.path.exists(DB_NAME):
                     os.remove(DB_NAME)
-                    st.toast("✅ מסד נתונים נמחק!", icon="🗑️")
+                    st.toast("✅ נמחק!", icon="🗑️")
                     time.sleep(1)
                     st.rerun()
-            except Exception as e:
-                st.error(f"שגיאה: {e}")
+            except Exception as e: st.error(f"שגיאה: {e}")
 
 st.title("לוח בקרה מבצעי")
 conn = sqlite3.connect(DB_NAME)
@@ -179,21 +163,17 @@ with tab_feed:
     conn = sqlite3.connect(DB_NAME)
     df = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'DeepWeb' ORDER BY published_at DESC LIMIT 100", conn)
     conn.close()
-    
     if not df.empty:
         df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
         df = df.sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
-        
         c1, c2 = st.columns(2)
         with c1: 
             all_tags = ['הכל', 'פיישינג', 'נוזקה', 'פגיעויות', 'ישראל', 'מחקר', 'כללי']
             f_tag = st.radio("סינון לפי תגיות", all_tags, horizontal=True)
         with c2: 
             f_sev = st.radio("חומרה", ["הכל", "קריטי/גבוה", "בינוני", "נמוך/מידע"], horizontal=True)
-        
         if f_tag != 'הכל': df = df[df['tags'] == f_tag]
         if "גבוה" in f_sev: df = df[df['severity'].str.contains('Critical|High', case=False)]
-        
         for _, row in df.iterrows():
             try:
                 dt = row['published_at']
@@ -204,14 +184,12 @@ with tab_feed:
                     date_display = dt.strftime('%d/%m %H:%M')
             except: date_display = "--/--"
             st.markdown(get_feed_card_html(row, date_display), unsafe_allow_html=True)
-    else:
-        st.info("אין נתונים להצגה כרגע. המערכת אוספת מידע...")
+    else: st.info("אין נתונים להצגה כרגע. המערכת אוספת מידע...")
 
 with tab_strat:
     threats = APTSheetCollector().fetch_threats()
     sel = st.selectbox("בחר קבוצה", [t['name'] for t in threats])
     actor = next(t for t in threats if t['name'] == sel)
-    
     if st.button(f"🔎 סריקת Deep Web - {actor['name']}"):
         with st.status("🕵️ **מפעיל סוכן איסוף...**", expanded=True) as s:
             scanner = DeepWebScanner()
@@ -220,17 +198,13 @@ with tab_strat:
             if res:
                 s.markdown(":orange[**נמצאו אינדיקטורים, מפעיל ניתוח...**]")
                 analyzed = asyncio.run(proc.analyze_batch(res))
-                
-                existing_urls, _ = get_existing_data()
-                to_save = [r for r in res if r['url'] not in existing_urls]
-                
+                to_save = [r for r in res if r['url'] not in get_existing_data()[0]]
                 if to_save:
                     save_reports(to_save, analyzed)
                     st.success(f"נוספו {len(to_save)} דוחות חדשים!")
                 else: st.info("המידע כבר קיים במערכת.")
             else: st.warning("לא נמצאו תוצאות חדשות.")
             st.rerun()
-
     st.markdown(f"""
     <div style="background:linear-gradient(180deg, rgba(30, 41, 59, 0.6) 0%, rgba(15, 23, 42, 0.8) 100%); padding:20px; border-radius:10px; border-left:4px solid #f59e0b; direction:rtl; text-align:right;">
         <h2 style="color:white; margin:0;">{actor['name']}</h2>
@@ -244,11 +218,9 @@ with tab_strat:
         <p><b>כלים:</b> <code style="color:#fca5a5;">{actor['tools']}</code></p>
     </div>
     """, unsafe_allow_html=True)
-    
     conn = sqlite3.connect(DB_NAME)
     df_deep = pd.read_sql_query(f"SELECT * FROM intel_reports WHERE source = 'DeepWeb' AND actor_tag = '{actor['name']}' ORDER BY published_at DESC LIMIT 10", conn)
     conn.close()
-    
     st.markdown("##### 🕵️ היסטוריית סריקות")
     if not df_deep.empty:
         for _, row in df_deep.iterrows():
@@ -265,7 +237,6 @@ with tab_tools:
             st.markdown(f"**{category}**")
             for tool in tools:
                 st.markdown(f"""<a href="{tool['url']}" target="_blank"><div class="tool-card"><span class="tool-icon">{tool['icon']}</span><span class="tool-name">{tool['name']}</span><span class="tool-desc">{tool['desc']}</span></div></a>""", unsafe_allow_html=True)
-
     st.markdown("---")
     st.markdown("#### 🔬 חקירת IOC")
     if 'scan_res' not in st.session_state: st.session_state['scan_res'] = None
@@ -281,28 +252,23 @@ with tab_tools:
                 ab = tl.query_abuseipdb(ioc_in) if itype == 'ip' else None
                 ai_res = asyncio.run(AIBatchProcessor(GROQ_KEY).analyze_single_ioc(ioc_in, itype, {'virustotal': vt, 'urlscan': us}))
                 st.session_state['scan_res'] = {'vt': vt, 'us': us, 'ab': ab, 'ai': ai_res, 'type': itype}
-
     res = st.session_state.get('scan_res')
     if res:
         vt, us, ab = res['vt'], res['us'], res['ab']
         if us and us.get('task') and us.get('page'):
             if us['task'].get('url') != us['page'].get('url'):
                 st.markdown(f"""<div class="redirect-alert">⚠️ זוהתה הפנייה (Redirect)!<br>מקור: {us['task'].get('url')}<br>יעד סופי: {us['page'].get('url')}</div>""", unsafe_allow_html=True)
-
         c1, c2, c3 = st.columns(3)
         if vt:
             mal = vt.get('attributes', {}).get('last_analysis_stats', {}).get('malicious', 0)
             c1.markdown(f"""<div class="ioc-card {'ioc-danger' if mal > 0 else 'ioc-safe'}"><div class="ioc-title">VirusTotal</div><div class="ioc-value">{mal}</div><div class="ioc-sub">Malicious Hits</div></div>""", unsafe_allow_html=True)
         else: c1.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">VirusTotal</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
-        
         if ab:
             score = ab.get('abuseConfidenceScore', 0)
             c2.markdown(f"""<div class="ioc-card {'ioc-danger' if score > 50 else 'ioc-safe'}"><div class="ioc-title">AbuseIPDB</div><div class="ioc-value">{score}%</div><div class="ioc-sub">Confidence</div></div>""", unsafe_allow_html=True)
         else: c2.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">AbuseIPDB</div><div class="ioc-value">IP Only</div></div>""", unsafe_allow_html=True)
-        
         if us: c3.markdown("""<div class="ioc-card ioc-safe"><div class="ioc-title">URLScan</div><div class="ioc-value">Found</div><div class="ioc-sub">View Details</div></div>""", unsafe_allow_html=True)
         else: c3.markdown("""<div class="ioc-card ioc-neutral"><div class="ioc-title">URLScan</div><div class="ioc-value">N/A</div></div>""", unsafe_allow_html=True)
-
         t1, t2, t3, t4 = st.tabs(["🤖 ניתוח AI", "🦠 נתונים טכניים (VT)", "📷 URLScan", "🚫 AbuseIPDB"])
         with t1: st.markdown(f'<div style="direction:rtl; text-align:right;">{res["ai"]}</div>', unsafe_allow_html=True)
         with t2:
