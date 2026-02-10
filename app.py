@@ -49,7 +49,7 @@ async def update_threat_dossiers(p_bar, status_text):
 
 # --- BOOT SEQUENCE (LAZY LOADING) ---
 if "booted" not in st.session_state:
-    st.markdown("<h3 style='text-align:center;'>🛡️ מאתחל חמ\"ל מודיעין...</h3>", unsafe_allow_html=True)
+    st.markdown("<h3 style='text-align:center;'>🛡️ מאתחל סריקת  וניתוח מקורות מודיעין...</h3>", unsafe_allow_html=True)
     p_bar = st.progress(0)
     status_text = st.empty()
     
@@ -77,3 +77,4 @@ with st.sidebar:
 
 st.title("לוח בקרה מבצעי")
 # ... (המשך המטריקות והטאבים שלך - ללא שינוי)
+
