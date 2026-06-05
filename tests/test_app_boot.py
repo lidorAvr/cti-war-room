@@ -21,7 +21,7 @@ def _make_app(monkeypatch, tmp_path):
     import utils
 
     async def _no_network(*args, **kwargs):
-        return []
+        return [], []
 
     # Hermetic + fast: no live feeds during boot
     monkeypatch.setattr(utils.CTICollector, "get_all_data", _no_network)
@@ -68,7 +68,7 @@ def test_app_renders_feed_with_data(monkeypatch, tmp_path):
     import utils
 
     async def _no_network(*args, **kwargs):
-        return []
+        return [], []
 
     monkeypatch.setattr(utils.CTICollector, "get_all_data", _no_network)
     monkeypatch.chdir(tmp_path)

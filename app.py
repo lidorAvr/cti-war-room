@@ -76,10 +76,10 @@ def get_feed_card_html(row, date_str):
 init_db() 
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 
-GROQ_KEY = st.secrets.get("groq_key", "")
-VT_KEY = st.secrets.get("vt_key", "")
-URLSCAN_KEY = st.secrets.get("urlscan_key", "")
-ABUSE_KEY = st.secrets.get("abuseipdb_key", "")
+GROQ_KEY = get_secret("groq_key", "")
+VT_KEY = get_secret("vt_key", "")
+URLSCAN_KEY = get_secret("urlscan_key", "")
+ABUSE_KEY = get_secret("abuseipdb_key", "")
 
 if 'last_run' not in st.session_state:
     st.session_state['last_run'] = time.time()
@@ -90,8 +90,9 @@ if time.time() - st.session_state['last_run'] > 900:
 async def perform_update(status_container=None):
     col, proc = CTICollector(), AIBatchProcessor(GROQ_KEY)
     if status_container: status_container.markdown(":blue[**📡 מתחבר לערוצי התקשורת...**]")
-    raw = await col.get_all_data()
-    
+    raw, source_status = await col.get_all_data()
+    st.session_state['source_status'] = source_status
+
     existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
     
@@ -137,22 +138,48 @@ with st.sidebar:
                     st.rerun()
             except Exception as e: st.error(f"שגיאה: {e}")
 
+    # --- Capability banner: surface missing keys instead of a silent no-op ---
+    _caps = [("Groq (ניתוח AI)", GROQ_KEY), ("VirusTotal", VT_KEY), ("URLScan", URLSCAN_KEY), ("AbuseIPDB", ABUSE_KEY)]
+    _missing = [name for name, val in _caps if not val]
+    if _missing:
+        st.warning("⚠️ מפתחות חסרים — יכולות מושבתות: " + ", ".join(_missing))
+
+    # --- Source health from the last sync ---
+    _statuses = st.session_state.get('source_status')
+    if _statuses:
+        _failed = [s for s in _statuses if not s['ok']]
+        _ok_n = len(_statuses) - len(_failed)
+        with st.expander(f"📡 מקורות: {_ok_n}/{len(_statuses)} פעילים", expanded=bool(_failed)):
+            for s in _statuses:
+                if s['ok']:
+                    st.caption(f"✅ {s['source']} — {s['count']} ידיעות")
+                else:
+                    st.caption(f"❌ {s['source']} — {s.get('error', 'שגיאה')}")
+
 st.title("לוח בקרה מבצעי")
 conn = sqlite3.connect(DB_NAME)
 c = conn.cursor()
 c.execute(f"SELECT COUNT(*) FROM intel_reports WHERE published_at > datetime('now', '-{HISTORY_DAYS} days') AND source != 'DeepWeb'")
 try: count_24h = c.fetchone()[0]
-except: count_24h = 0
+except Exception as e:
+    log.warning("count_24h query failed: %s", e); count_24h = 0
 c.execute(f"SELECT COUNT(*) FROM intel_reports WHERE severity LIKE '%Critical%' AND published_at > datetime('now', '-{HISTORY_DAYS} days')")
 try: count_crit = c.fetchone()[0]
-except: count_crit = 0
+except Exception as e:
+    log.warning("count_crit query failed: %s", e); count_crit = 0
 conn.close()
 
 m4, m3, m2, m1 = st.columns(4)
 m1.metric(f"ידיעות ({HISTORY_DAYS} ימים)", count_24h)
 m2.metric("התרעות קריטיות", count_crit)
-m3.metric("מקורות", "7")
-m4.metric("זמינות", "100%")
+_src = st.session_state.get('source_status') or []
+if _src:
+    _src_ok = sum(1 for s in _src if s['ok'])
+    m3.metric("מקורות פעילים", f"{_src_ok}/{len(_src)}")
+    m4.metric("זמינות מקורות", f"{round(100 * _src_ok / len(_src))}%")
+else:
+    m3.metric("מקורות", str(len(CTICollector.SOURCES)))
+    m4.metric("זמינות", "—")
 
 st.markdown("---")
 
@@ -181,7 +208,9 @@ with tab_feed:
                     if dt.tzinfo is None: dt = pytz.utc.localize(dt).astimezone(IL_TZ)
                     else: dt = dt.astimezone(IL_TZ)
                     date_display = dt.strftime('%d/%m %H:%M')
-            except: date_display = "--/--"
+            except Exception as e:
+                log.debug("feed row date render failed: %s", e)
+                date_display = "--/--"
             st.markdown(get_feed_card_html(row, date_display), unsafe_allow_html=True)
     else: st.info("אין נתונים להצגה כרגע. המערכת אוספת מידע...")
 
