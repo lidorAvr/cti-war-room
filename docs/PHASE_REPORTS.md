@@ -124,7 +124,7 @@ smoke + this report, no open critical finding. Roadmap: see
 | **Goal** | Automated test gate on every push; **deploy intentionally deferred** (owner decision). |
 
 ### Built
-- **`.github/workflows/ci.yml`** — on push (all branches) + PRs to `main`: checkout, Python 3.12, `pip install -r requirements-dev.txt`, `pytest`. pip cache enabled.
+- **`.github/workflows/ci.yml`** — on push to `main` + PRs to `main` (one run per change, no duplicates): checkout, Python 3.12, `pip install -r requirements-dev.txt`, `pytest`. pip cache enabled.
 - **CI status badge** in `README.md`.
 
 ### Tested (gate)
