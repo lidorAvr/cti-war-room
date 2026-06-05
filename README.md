@@ -4,8 +4,9 @@ An operational **Cyber Threat Intelligence** dashboard: it aggregates security
 feeds, summarizes them into operational Hebrew with an LLM, and gives the analyst
 live IOC investigation tools — all in a single Streamlit app.
 
-> The UI is **Hebrew (RTL)**. This README is in English for reach; screenshots
-> show the live Hebrew interface.
+> The UI is **English (LTR)**. AI-generated summaries are written in **Hebrew** and
+> render right-to-left automatically (`dir="auto"`); without a Groq key the feed
+> still shows real raw source items.
 
 [![CI](https://github.com/lidorAvr/cti-war-room/actions/workflows/ci.yml/badge.svg)](https://github.com/lidorAvr/cti-war-room/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
