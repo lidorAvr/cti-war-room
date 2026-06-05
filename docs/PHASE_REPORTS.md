@@ -139,3 +139,36 @@ Per owner: public deployment is **not** started. Open before Phase 3 deploy:
 - GitHub flagged `actions/checkout@v4` + `actions/setup-python@v5` run on Node 20 (auto-forced to Node 24 ~2026-06-16) — bump action majors when convenient.
 
 **Gate: PASS (CI green).**
+
+---
+
+## Phase 4a — Graceful no-AI feed fallback  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-05 |
+| **Branch** | `feat-raw-feed-fallback` → PR to `main` |
+| **Goal** | The feed must show real intel even with no Groq key (owner-found gap). |
+
+### Problem
+The app fetched real items successfully (6–7 sources, ~80/run) but the feed went
+**blank without a Groq key** — items were discarded at the AI-summary step
+(`save_reports` only stored AI-analyzed rows). The connection was real; only the
+display depended on a paid/AI key.
+
+### Built
+- `AIBatchProcessor.analyze_batch`: the AI call now runs only `if self.key`, and
+  **when a chunk yields no AI output (no key, Groq error, or unparseable JSON) the
+  RAW fetched items are kept** — rule-based `_determine_tag_severity`, `category="Raw"`.
+  With a key, behavior is unchanged (Hebrew AI summaries).
+- `app.get_feed_card_html`: subtle **"גולמי · ללא AI"** badge on raw cards (transparency).
+
+### Tested (gate)
+- `pytest` **39/39** (+3: raw kept without key incl. rule-based High severity; empty input; no re-add of already-stored items).
+- **Live end-to-end with NO key**: fetched **80** real items → **75 saved & shown** (deduped) — e.g. *"Cisco SD-WAN zero-day exploited in attacks"*, *"Everest Forms Pro WordPress flaw exploited"*, *"FIFA World Cup 2026 scams"*.
+
+### Scope / behavior
+- Graceful degradation only; the AI path is untouched when a key is present.
+- Aligns with the project principle: always-working fallback (raw before AI), no silent blank screen.
+
+**Gate: PASS.**
