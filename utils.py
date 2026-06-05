@@ -192,13 +192,13 @@ class AIBatchProcessor:
 
     def _determine_tag_severity(self, text, source):
         text = text.lower()
-        sev, tag = "Medium", "כללי"
+        sev, tag = "Medium", "General"
         if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt', 'state-sponsored']): sev = "High"
-        if source == "INCD" or "israel" in text or "iran" in text: tag = "ישראל"
-        elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "פגיעויות"
-        elif "phishing" in text or "credential" in text: tag = "פיישינג"
-        elif "malware" in text or "trojan" in text or "backdoor" in text: tag = "נוזקה"
-        elif "research" in text or "analysis" in text: tag = "מחקר"
+        if source == "INCD" or "israel" in text or "iran" in text: tag = "Israel"
+        elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "Vulnerabilities"
+        elif "phishing" in text or "credential" in text: tag = "Phishing"
+        elif "malware" in text or "trojan" in text or "backdoor" in text: tag = "Malware"
+        elif "research" in text or "analysis" in text: tag = "Research"
         return tag, sev
 
     def is_similar(self, a, b, threshold=0.75):
@@ -309,7 +309,7 @@ class AIBatchProcessor:
         lean_data = self._extract_key_intel(data)
         prompt = f"Act as Senior SOC Analyst. Target: {ioc} ({ioc_type}). Data: {json.dumps(lean_data)}. Output Hebrew Markdown analysis."
         res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=False)
-        return res if res else "שגיאה בניתוח."
+        return res if res else "Analysis unavailable."
 
     def _extract_key_intel(self, raw_data):
         summary = {}
@@ -361,9 +361,9 @@ class AnalystToolkit:
 class APTSheetCollector:
     def fetch_threats(self):
         return [
-            {"name": "MuddyWater", "origin": "Iran (MOIS)", "target": "Israel", "type": "Espionage", "tools": "PowerShell, Ligolo", "desc": "מזוהה עם משרד המודיעין האיראני."},
-            {"name": "OilRig (APT34)", "origin": "Iran (IRGC)", "target": "Israel", "type": "Espionage", "tools": "DNSpionage", "desc": "מתמקדת בתשתיות קריטיות."},
-            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Wiper", "tools": "BiBiWiper", "desc": "מטרתה השמדת מידע."}
+            {"name": "MuddyWater", "origin": "Iran (MOIS)", "target": "Israel", "type": "Espionage", "tools": "PowerShell, Ligolo", "desc": "Linked to Iran's Ministry of Intelligence (MOIS)."},
+            {"name": "OilRig (APT34)", "origin": "Iran (IRGC)", "target": "Israel", "type": "Espionage", "tools": "DNSpionage", "desc": "Targets critical infrastructure."},
+            {"name": "Agonizing Serpens", "origin": "Iran", "target": "Israel", "type": "Wiper", "tools": "BiBiWiper", "desc": "Data-destruction (wiper) operations."}
         ]
 
 class CTICollector:
@@ -419,7 +419,7 @@ class CTICollector:
                             if is_recent(pub_date):
                                 text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
                                 url = msg.find('a', class_='tgme_widget_message_date')['href']
-                                items.append({"title": "התרעת מערך הסייבר", "url": url, "date": pub_date, "source": "INCD", "summary": text})
+                                items.append({"title": "INCD Cyber Alert", "url": url, "date": pub_date, "source": "INCD", "summary": text})
                         except Exception as e:
                             log.debug("telegram message parse skipped: %s", e)
         except Exception as e:
