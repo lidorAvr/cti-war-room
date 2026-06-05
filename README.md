@@ -7,6 +7,7 @@ live IOC investigation tools — all in a single Streamlit app.
 > The UI is **Hebrew (RTL)**. This README is in English for reach; screenshots
 > show the live Hebrew interface.
 
+[![CI](https://github.com/lidorAvr/cti-war-room/actions/workflows/ci.yml/badge.svg)](https://github.com/lidorAvr/cti-war-room/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![Streamlit](https://img.shields.io/badge/streamlit-1.58-red)
 ![License](https://img.shields.io/badge/license-MIT-green)
