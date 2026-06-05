@@ -11,11 +11,11 @@ import pytz
 import feedparser
 import base64
 import time
+import logging
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 from duckduckgo_search import DDGS
-import google.generativeai as genai
 import streamlit as st
 from difflib import SequenceMatcher
 from fake_useragent import UserAgent
@@ -27,12 +27,30 @@ IL_TZ = pytz.timezone('Asia/Jerusalem')
 HISTORY_DAYS = 7    # טווח קשיח: שבוע אחרון בלבד
 FETCH_LIMIT = 100   # מקסימום שאיבה מכל מקור
 
+log = logging.getLogger("cti_war_room")
+
+
+def get_secret(key, default=""):
+    """Safe access to st.secrets that never raises when no secrets.toml exists.
+
+    st.secrets.get(key, default) raises StreamlitSecretNotFoundError when there is
+    no secrets file at all (the supplied default is never reached). This wraps it
+    so a missing key OR a missing secrets file both return `default` — the app
+    boots and simply reports the capability as disabled instead of crashing.
+    """
+    try:
+        return st.secrets.get(key, default)
+    except Exception:
+        return default
+
+
 # --- ROBUST HEADERS ---
 def get_headers():
     try:
         ua = UserAgent()
         return {'User-Agent': ua.random, 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'}
-    except:
+    except Exception as e:
+        log.debug("fake-useragent unavailable, using static UA: %s", e)
         return {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
 # --- DATE HELPER ---
@@ -49,7 +67,8 @@ def parse_flexible_date(date_obj):
         if isinstance(date_obj, datetime.datetime):
             if date_obj.tzinfo is None: date_obj = pytz.utc.localize(date_obj)
             return date_obj.astimezone(IL_TZ).isoformat()
-    except: pass
+    except Exception as e:
+        log.debug("parse_flexible_date failed for %r: %s", date_obj, e)
     return now.isoformat()
 
 def is_recent(date_str):
@@ -59,7 +78,9 @@ def is_recent(date_str):
         if dt.tzinfo is None: dt = pytz.utc.localize(dt)
         limit = datetime.datetime.now(dt.tzinfo) - datetime.timedelta(days=HISTORY_DAYS)
         return dt > limit
-    except: return True # If unsure, keep it
+    except Exception as e:
+        log.debug("is_recent could not parse %r: %s", date_str, e)
+        return True  # If unsure, keep it
 
 # --- IOC VALIDATION ---
 def identify_ioc_type(ioc):
@@ -92,7 +113,7 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_title ON intel_reports(title)")
-    
+
     # Strict cleanup of old data
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=HISTORY_DAYS)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
@@ -107,7 +128,9 @@ def get_existing_data():
         rows = c.fetchall()
         conn.close()
         return {row[0] for row in rows}, {row[1] for row in rows}
-    except: return set(), set()
+    except Exception as e:
+        log.warning("get_existing_data failed: %s", e)
+        return set(), set()
 
 # --- DEEP WEB SCANNER ---
 class DeepWebScanner:
@@ -129,7 +152,8 @@ class DeepWebScanner:
                         "summary": res.get('body', 'No summary available.'),
                         "actor_tag": actor_name
                     })
-        except Exception as e: print(f"Deep Scan Error: {e}")
+        except Exception as e:
+            log.warning("DeepWeb scan failed for %s: %s", actor_name, e)
         return results
 
 # --- CONNECTION & AI ENGINES ---
@@ -157,41 +181,15 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
                     if resp.status == 200:
                         data = await resp.json()
                         return data['choices'][0]['message']['content']
-            except: continue
+            except Exception as e:
+                log.warning("Groq request failed (model=%s): %s", m, e)
+                continue
     return None
-
-def polish_with_gemini(text_content):
-    try:
-        gemini_key = st.secrets.get("gemini_key")
-        if not gemini_key: return text_content
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel('gemini-pro')
-        
-        prompt = f"""
-        Act as a Senior Cyber Intelligence Officer (Unit 8200).
-        Task: Rewrite the following intelligence brief for a CISO.
-        
-        **RULES:**
-        1. **Language**: High-level Operational Hebrew ONLY.
-        2. **Terminology**:
-           - "Breach" -> "דליפת מידע" / "חדירה".
-           - "Attack" -> "מתקפה" / "קמפיין".
-           - "Malware" -> "נוזקה".
-           - "Vulnerability" -> "פגיעות".
-        3. **Style**: Operational, factual, concise.
-        4. **Structure**: Title, then 3 bullet points.
-        
-        Text:
-        {text_content}
-        """
-        response = model.generate_content(prompt)
-        return response.text
-    except: return text_content
 
 class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
-    
+
     def _determine_tag_severity(self, text, source):
         text = text.lower()
         sev, tag = "Medium", "כללי"
@@ -209,7 +207,7 @@ class AIBatchProcessor:
     async def analyze_batch(self, items):
         if not items: return []
         existing_urls, existing_titles = get_existing_data()
-        
+
         items_to_process = [i for i in items if i['url'] not in existing_urls]
         if not items_to_process: return []
 
@@ -222,19 +220,19 @@ class AIBatchProcessor:
 
         if not unique_items: return []
 
-        chunk_size = 10 
+        chunk_size = 10
         results = []
-        
+
         system_instruction = """
         You are a Cyber Intelligence Analyst.
-        
+
         **MISSION:**
         1. Analyze the news items.
         2. MERGE only if they describe the EXACT same event (Same Victim + Same Attack).
         3. DO NOT discard unique items. If in doubt, keep it separate.
-        
+
         **OUTPUT LANGUAGE**: Hebrew ONLY (Technical terms in English).
-        
+
         **REPORT STRUCTURE (JSON):**
         {"items": [
             {
@@ -244,14 +242,14 @@ class AIBatchProcessor:
             }
         ]}
         """
-        
+
         for i in range(0, len(unique_items), chunk_size):
             chunk = unique_items[i:i+chunk_size]
             batch_text = "\n".join([f"ID:{idx} | Title: {x['title']} | Content: {x['summary'][:1500]}" for idx, x in enumerate(chunk)])
             prompt = f"{system_instruction}\n\nDATA:\n{batch_text}"
-            
+
             res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
-            
+
             if res:
                 try:
                     data = json.loads(res)
@@ -259,22 +257,25 @@ class AIBatchProcessor:
                         idx = p_item.get('id')
                         if idx is not None and 0 <= idx < len(chunk):
                             original = chunk[idx]
-                            
-                            final_title = polish_with_gemini(p_item.get('title'))
-                            final_summary = polish_with_gemini(p_item.get('summary'))
-                            
+
+                            # Groq already returns operational Hebrew; the former
+                            # google-generativeai "polish" pass was end-of-life and removed.
+                            final_title = p_item.get('title') or ""
+                            final_summary = p_item.get('summary') or ""
+
                             full_text = final_title + final_summary
                             final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
 
                             results.append({
-                                "category": "News", "severity": final_sev, 
+                                "category": "News", "severity": final_sev,
                                 "title": final_title, "summary": final_summary,
                                 "published_at": original['date'],
-                                "source": original['source'], "url": original['url'],       
+                                "source": original['source'], "url": original['url'],
                                 "actor_tag": original.get('actor_tag', None), "tags": final_tag
                             })
-                except: pass
-                    
+                except Exception as e:
+                    log.warning("failed to parse Groq JSON response: %s", e)
+
         return results
 
     async def analyze_single_ioc(self, ioc, ioc_type, data):
@@ -299,7 +300,9 @@ class ThreatLookup:
             endpoint = f"urls/{base64.urlsafe_b64encode(ioc.encode()).decode().strip('=')}" if ioc_type == "url" else f"{'ip_addresses' if ioc_type == 'ip' else 'domains' if ioc_type == 'domain' else 'files'}/{ioc}"
             res = requests.get(f"https://www.virustotal.com/api/v3/{endpoint}", headers={"x-apikey": self.vt_key}, timeout=10)
             return res.json().get('data', {}) if res.status_code == 200 else None
-        except: return None
+        except Exception as e:
+            log.warning("VirusTotal query failed for %s: %s", ioc, e)
+            return None
     def query_urlscan(self, ioc):
         if not self.urlscan_key: return None
         try:
@@ -308,12 +311,16 @@ class ThreatLookup:
             if data.get('results'):
                 return requests.get(f"https://urlscan.io/api/v1/result/{data['results'][0]['_id']}/", headers={"API-Key": self.urlscan_key}, timeout=10).json()
             return None
-        except: return None
+        except Exception as e:
+            log.warning("URLScan query failed for %s: %s", ioc, e)
+            return None
     def query_abuseipdb(self, ip):
         if not self.abuse_key: return None
         try:
             return requests.get("https://api.abuseipdb.com/api/v2/check", headers={'Key': self.abuse_key}, params={'ipAddress': ip}, timeout=10).json().get('data', {})
-        except: return None
+        except Exception as e:
+            log.warning("AbuseIPDB query failed for %s: %s", ip, e)
+            return None
 
 class AnalystToolkit:
     @staticmethod
@@ -325,7 +332,7 @@ class AnalystToolkit:
         }
 
 class APTSheetCollector:
-    def fetch_threats(self): 
+    def fetch_threats(self):
         return [
             {"name": "MuddyWater", "origin": "Iran (MOIS)", "target": "Israel", "type": "Espionage", "tools": "PowerShell, Ligolo", "desc": "מזוהה עם משרד המודיעין האיראני."},
             {"name": "OilRig (APT34)", "origin": "Iran (IRGC)", "target": "Israel", "type": "Espionage", "tools": "DNSpionage", "desc": "מתמקדת בתשתיות קריטיות."},
@@ -344,23 +351,28 @@ class CTICollector:
     ]
 
     async def fetch_item(self, session, source):
+        """Fetch one source. Returns a status dict so callers can surface failures:
+        {source, url, ok, items, error}. ok=False means the source did NOT load
+        (vs. ok=True with an empty list, which means "loaded, nothing recent")."""
         items = []
         try:
             async with session.get(source['url'], headers=get_headers(), timeout=30) as resp:
-                if resp.status != 200: return []
+                if resp.status != 200:
+                    log.warning("source %s returned HTTP %s", source['name'], resp.status)
+                    return {"source": source['name'], "url": source['url'], "ok": False, "items": [], "error": f"HTTP {resp.status}"}
                 content = await resp.text()
-                
+
                 if source['type'] == 'rss':
                     feed = feedparser.parse(content)
                     # --- FETCH LIMIT = 100 ---
                     for entry in feed.entries[:FETCH_LIMIT]:
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
                         pub_date = parse_flexible_date(date_raw)
-                        
+
                         # --- STRICT 7-DAY FILTER ---
                         if is_recent(pub_date):
                             items.append({"title": entry.title, "url": entry.link, "date": pub_date, "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:2500]})
-                
+
                 elif source['type'] == 'json':
                      data = json.loads(content)
                      # Fetch more to allow date filtering
@@ -368,7 +380,7 @@ class CTICollector:
                          pub_date = parse_flexible_date(v.get('dateAdded'))
                          if is_recent(pub_date):
                              items.append({"title": f"KEV: {v['cveID']}", "url": f"https://nvd.nist.gov/vuln/detail/{v['cveID']}", "date": pub_date, "source": "CISA", "summary": v.get('shortDescription')})
-                
+
                 elif source['type'] == 'telegram':
                     soup = BeautifulSoup(content, 'html.parser')
                     for msg in soup.find_all('div', class_='tgme_widget_message_wrap')[-50:]:
@@ -376,20 +388,27 @@ class CTICollector:
                             time_tag = msg.find('time')
                             date_raw = time_tag['datetime'] if time_tag else None
                             pub_date = parse_flexible_date(date_raw)
-                            
+
                             if is_recent(pub_date):
                                 text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
                                 url = msg.find('a', class_='tgme_widget_message_date')['href']
                                 items.append({"title": "התרעת מערך הסייבר", "url": url, "date": pub_date, "source": "INCD", "summary": text})
-                        except: pass
-        except: pass
-        return items
+                        except Exception as e:
+                            log.debug("telegram message parse skipped: %s", e)
+        except Exception as e:
+            log.warning("source fetch failed: %s (%s): %s", source['name'], source['url'], e)
+            return {"source": source['name'], "url": source['url'], "ok": False, "items": [], "error": str(e)}
+        return {"source": source['name'], "url": source['url'], "ok": True, "items": items, "error": None}
 
     async def get_all_data(self):
+        """Returns (items, statuses). `items` is the flat list of fetched reports;
+        `statuses` is one entry per source so the UI can show source health."""
         async with aiohttp.ClientSession() as session:
             tasks = [self.fetch_item(session, s) for s in self.SOURCES]
             results = await asyncio.gather(*tasks)
-            return [i for sub in results for i in sub]
+        items = [it for r in results for it in r["items"]]
+        statuses = [{"source": r["source"], "url": r["url"], "ok": r["ok"], "count": len(r["items"]), "error": r["error"]} for r in results]
+        return items, statuses
 
 def save_reports(raw, analyzed):
     conn = sqlite3.connect(DB_NAME)
@@ -399,7 +418,8 @@ def save_reports(raw, analyzed):
             c.execute("INSERT OR IGNORE INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (datetime.datetime.now(IL_TZ).isoformat(), item['published_at'], item['source'], item['url'], item['title'], item['category'], item['severity'], item['summary'], item.get('actor_tag'), item.get('tags')))
             if c.rowcount > 0: cnt += 1
-        except: pass
+        except Exception as e:
+            log.warning("failed to save report %s: %s", item.get('url'), e)
     conn.commit()
     conn.close()
     return cnt

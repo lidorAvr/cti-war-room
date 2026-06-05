@@ -46,3 +46,37 @@ smoke + this report, no open critical finding. Roadmap: see
 - Known findings **intentionally deferred to Phase 1**: F1 (no-`secrets.toml` boot crash), F2 (google-generativeai EOL), F3 (16 bare `except:`).
 
 **Gate: PASS — no open critical finding for Phase 0 scope.**
+
+---
+
+## Phase 1 — Reliability Hardening  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-05 |
+| **Branch** | `phase-1-reliability` → PR to `main` |
+| **Goal** | Close F1/F2/F3 — the tool must fail **loudly**, not silently. |
+
+### Built
+- **F1 — no-secrets crash fixed.** New `get_secret()` in `utils.py` wraps `st.secrets` so a missing key *or* a missing `secrets.toml` returns a default instead of raising `StreamlitSecretNotFoundError`. `app.py` uses it for all 4 keys. Sidebar **capability banner** lists which keys are missing (AI/enrichment disabled) instead of crashing.
+- **F2 — EOL Gemini removed.** Dropped `import google.generativeai`, `polish_with_gemini`, and its 2 per-item calls (Groq already returns operational Hebrew). Removed `google-generativeai` from `requirements.txt` → venv slimmed **~85 → 67 packages** (no google-*/grpc/pydantic/cryptography).
+- **F3 — no silent failures.** All **16 bare `except:`** replaced with scoped `except Exception` + a `cti_war_room` logger. `CTICollector.fetch_item`/`get_all_data` now return **per-source status**; sidebar **source-health panel** + honest `מקורות פעילים X/N` and `זמינות מקורות %` metrics (replaced the fake hard-coded "100%").
+
+### Tested (gate)
+- **`pytest` 36/36 green** on the slimmed 3.12.10 venv (+5 Phase 1 tests).
+- **Live feeds smoke** on the refactored `get_all_data`: 78 items — and a **real `INCD` HTTP 403 was surfaced** (logged + in status), exactly the failure the old bare `except` hid.
+- **Real `streamlit run` headless boot** clean (health 200, no traceback).
+- Confirmed **no google/grpc/pydantic** packages remain.
+
+### New tests (`tests/test_phase1.py`, 5)
+`get_secret` default w/o file · **app boots WITHOUT secrets** (the original F1 crash, now a regression test) · Gemini layer removed · `get_all_data` returns items+statuses · sidebar surfaces a failed source.
+
+### Not tested (deferred)
+- Groq AI summary quality and IOC enrichment (need real API keys) — manual / later.
+- Manual click-through UX — owner's call.
+
+### Scope / behavior
+- Behavior changes here are **intentional reliability fixes**: no crash on missing secrets, visible source failures, honest availability metrics, dead Gemini path removed.
+- **F1, F2, F3 closed.**
+
+**Gate: PASS.**
