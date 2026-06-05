@@ -93,28 +93,28 @@ class TestTagSeverity:
         self.p = utils.AIBatchProcessor("")
 
     def test_ransomware_is_high_but_general_tag(self):
-        assert self.p._determine_tag_severity("ransomware hits hospital", "BleepingComputer") == ("כללי", "High")
+        assert self.p._determine_tag_severity("ransomware hits hospital", "BleepingComputer") == ("General", "High")
 
     def test_cve_is_vuln_and_high(self):
-        assert self.p._determine_tag_severity("New CVE-2024-1234 vulnerability", "X") == ("פגיעויות", "High")
+        assert self.p._determine_tag_severity("New CVE-2024-1234 vulnerability", "X") == ("Vulnerabilities", "High")
 
     def test_iran_apt_is_israel_and_high(self):
-        assert self.p._determine_tag_severity("Iran APT campaign", "X") == ("ישראל", "High")
+        assert self.p._determine_tag_severity("Iran APT campaign", "X") == ("Israel", "High")
 
     def test_phishing_is_medium(self):
-        assert self.p._determine_tag_severity("phishing credential theft", "X") == ("פיישינג", "Medium")
+        assert self.p._determine_tag_severity("phishing credential theft", "X") == ("Phishing", "Medium")
 
     def test_malware_tag(self):
-        assert self.p._determine_tag_severity("new trojan backdoor", "X") == ("נוזקה", "Medium")
+        assert self.p._determine_tag_severity("new trojan backdoor", "X") == ("Malware", "Medium")
 
     def test_research_tag(self):
-        assert self.p._determine_tag_severity("deep threat research analysis", "X") == ("מחקר", "Medium")
+        assert self.p._determine_tag_severity("deep threat research analysis", "X") == ("Research", "Medium")
 
     def test_incd_source_is_israel(self):
-        assert self.p._determine_tag_severity("routine update", "INCD") == ("ישראל", "Medium")
+        assert self.p._determine_tag_severity("routine update", "INCD") == ("Israel", "Medium")
 
     def test_default_is_general_medium(self):
-        assert self.p._determine_tag_severity("nothing special here", "X") == ("כללי", "Medium")
+        assert self.p._determine_tag_severity("nothing special here", "X") == ("General", "Medium")
 
 
 # ------------------------------------------------- AIBatchProcessor similarity

@@ -172,3 +172,31 @@ display depended on a paid/AI key.
 - Aligns with the project principle: always-working fallback (raw before AI), no silent blank screen.
 
 **Gate: PASS.**
+
+---
+
+## Phase 4c — English UI (native LTR)  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-05 |
+| **Branch** | `feat-english-ui` → PR to `main` |
+| **Goal** | Comfortable, correctly-aligned UI. The forced global RTL broke Streamlit's layout. |
+
+### Why
+Streamlit is LTR-native; the previous global `direction: rtl; text-align: right` on
+every element fought BaseWeb components and rendered poorly. Owner chose a clean
+**English LTR** UI over fragile RTL hacks.
+
+### Built
+- Removed the global RTL CSS → **native LTR layout** (Inter font; Heebo kept as Hebrew fallback).
+- Translated **all UI chrome to English**: title, sidebar, Sync/Reset, tabs, metrics, capability banner, source-health panel, feed filters, IOC lab, toolkit, statuses, empty states, footer.
+- English tags (`Israel / Vulnerabilities / Phishing / Malware / Research / General`) and English APT dossiers.
+- Feed cards use **`dir="auto"`**: Hebrew AI summaries render RTL, English raw items render LTR — automatically, inside the LTR UI.
+- **AI summaries + IOC analysis stay Hebrew** (owner choice); the Groq prompts are unchanged.
+
+### Tested (gate)
+- `pytest` **39/39** (updated tag-severity and title assertions to English).
+- **Live**: English tabs/metrics confirmed (Reports/Critical alerts/Active sources/Source availability), 75 real items rendered, `dir="auto"` working.
+
+**Gate: PASS.**

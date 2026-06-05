@@ -54,7 +54,7 @@ def test_app_shows_operations_title(monkeypatch, tmp_path):
     at.run()
     assert len(at.exception) == 0, f"app.py raised on boot: {[e.value for e in at.exception]}"
     titles = [t.value for t in at.title]
-    assert "לוח בקרה מבצעי" in titles
+    assert "Operations Dashboard" in titles
 
 
 def test_app_renders_feed_with_data(monkeypatch, tmp_path):
