@@ -112,3 +112,30 @@ smoke + this report, no open critical finding. Roadmap: see
 - Screenshots are a placeholder in the README (`docs/img/`) — to be added.
 
 **Gate: PASS.**
+
+---
+
+## Phase 3 (CI) — Continuous Integration  ✅ PASS  ·  deploy deferred
+
+| | |
+|---|---|
+| **Date** | 2026-06-05 |
+| **Branch** | `phase-3-ci` → PR to `main` |
+| **Goal** | Automated test gate on every push; **deploy intentionally deferred** (owner decision). |
+
+### Built
+- **`.github/workflows/ci.yml`** — on push to `main` + PRs to `main` (one run per change, no duplicates): checkout, Python 3.12, `pip install -r requirements-dev.txt`, `pytest`. pip cache enabled.
+- **CI status badge** in `README.md`.
+
+### Tested (gate)
+- **GitHub Actions run `27015227656` = success in 52s** (checkout · setup 3.12 · install · pytest 36/36).
+
+### Deploy — DEFERRED (owner)
+Per owner: public deployment is **not** started. Open before Phase 3 deploy:
+- **D2** target — Streamlit Community Cloud vs Docker self-host.
+- Public-exposure + **API-cost** review (Groq/VT/URLScan/AbuseIPDB quotas), the auto-refresh hammering sources, the embedded iframe, and binding address.
+
+### Notes / follow-ups
+- GitHub flagged `actions/checkout@v4` + `actions/setup-python@v5` run on Node 20 (auto-forced to Node 24 ~2026-06-16) — bump action majors when convenient.
+
+**Gate: PASS (CI green).**
