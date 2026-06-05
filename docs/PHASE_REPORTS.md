@@ -80,3 +80,35 @@ smoke + this report, no open critical finding. Roadmap: see
 - **F1, F2, F3 closed.**
 
 **Gate: PASS.**
+
+---
+
+## Phase 2 — Documentation & Onboarding  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-05 |
+| **Branch** | `phase-2-docs` → PR to `main` |
+| **Goal** | Anyone (incl. future-you) can set up and run in ~5 minutes. |
+
+### Built
+- **`README.md`** (English, by owner choice): overview, features, architecture diagram, sources table, setup, run, secrets config table, tests, disclaimer, MIT badge.
+- **`.streamlit/secrets.toml.example`** — documents the 4 active keys (`groq_key`, `vt_key`, `urlscan_key`, `abuseipdb_key`); all optional. (`gemini_key` dropped in Phase 1.)
+- **`LICENSE`** — MIT © 2026 Lidor Avrahamy (owner choice).
+- **`run.ps1`** — one-command launcher (ensures venv, installs deps, warns if no secrets, runs Streamlit).
+- **`docs/ARCHITECTURE.md`** — data flow, modules, storage, design principles.
+
+### Tested (gate)
+- `secrets.toml.example` parses as valid TOML (keys: groq/vt/urlscan/abuseipdb).
+- `run.ps1` **launches the app end-to-end** headless — health 200, Streamlit started.
+- `pytest` **36/36** green (no code change).
+- README / ARCHITECTURE render as Markdown.
+
+### Decisions (owner)
+- LICENSE = **MIT**; README language = **English**.
+
+### Notes / follow-ups
+- Streamlit binds all interfaces by default (`run.ps1` shows Network/External URLs) — bind address / exposure to be handled in **Phase 3 (deploy)**.
+- Screenshots are a placeholder in the README (`docs/img/`) — to be added.
+
+**Gate: PASS.**
