@@ -245,36 +245,63 @@ class AIBatchProcessor:
 
         for i in range(0, len(unique_items), chunk_size):
             chunk = unique_items[i:i+chunk_size]
-            batch_text = "\n".join([f"ID:{idx} | Title: {x['title']} | Content: {x['summary'][:1500]}" for idx, x in enumerate(chunk)])
-            prompt = f"{system_instruction}\n\nDATA:\n{batch_text}"
+            chunk_results = []
 
-            res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
+            # --- AI path (only if a key is configured) ---
+            if self.key:
+                batch_text = "\n".join([f"ID:{idx} | Title: {x['title']} | Content: {x['summary'][:1500]}" for idx, x in enumerate(chunk)])
+                prompt = f"{system_instruction}\n\nDATA:\n{batch_text}"
 
-            if res:
-                try:
-                    data = json.loads(res)
-                    for p_item in data.get("items", []):
-                        idx = p_item.get('id')
-                        if idx is not None and 0 <= idx < len(chunk):
-                            original = chunk[idx]
+                res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
 
-                            # Groq already returns operational Hebrew; the former
-                            # google-generativeai "polish" pass was end-of-life and removed.
-                            final_title = p_item.get('title') or ""
-                            final_summary = p_item.get('summary') or ""
+                if res:
+                    try:
+                        data = json.loads(res)
+                        for p_item in data.get("items", []):
+                            idx = p_item.get('id')
+                            if idx is not None and 0 <= idx < len(chunk):
+                                original = chunk[idx]
 
-                            full_text = final_title + final_summary
-                            final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
+                                # Groq already returns operational Hebrew; the former
+                                # google-generativeai "polish" pass was end-of-life and removed.
+                                final_title = p_item.get('title') or ""
+                                final_summary = p_item.get('summary') or ""
 
-                            results.append({
-                                "category": "News", "severity": final_sev,
-                                "title": final_title, "summary": final_summary,
-                                "published_at": original['date'],
-                                "source": original['source'], "url": original['url'],
-                                "actor_tag": original.get('actor_tag', None), "tags": final_tag
-                            })
-                except Exception as e:
-                    log.warning("failed to parse Groq JSON response: %s", e)
+                                full_text = final_title + final_summary
+                                final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
+
+                                chunk_results.append({
+                                    "category": "News", "severity": final_sev,
+                                    "title": final_title, "summary": final_summary,
+                                    "published_at": original['date'],
+                                    "source": original['source'], "url": original['url'],
+                                    "actor_tag": original.get('actor_tag', None), "tags": final_tag
+                                })
+                    except Exception as e:
+                        log.warning("failed to parse Groq JSON response: %s", e)
+
+            # --- Graceful degradation ---
+            # If the AI produced nothing for this chunk (no key, Groq error, or an
+            # unparseable response), keep the RAW fetched items so the feed still
+            # shows real intel instead of going blank. Tag/severity stay rule-based.
+            if not chunk_results:
+                if not self.key:
+                    log.info("no Groq key: showing %d raw item(s) without AI summary", len(chunk))
+                else:
+                    log.warning("Groq returned no usable output: falling back to %d raw item(s)", len(chunk))
+                for original in chunk:
+                    raw_title = original.get('title') or ""
+                    raw_summary = original.get('summary') or ""
+                    final_tag, final_sev = self._determine_tag_severity(f"{raw_title} {raw_summary}", original['source'])
+                    chunk_results.append({
+                        "category": "Raw", "severity": final_sev,
+                        "title": raw_title, "summary": raw_summary,
+                        "published_at": original['date'],
+                        "source": original['source'], "url": original['url'],
+                        "actor_tag": original.get('actor_tag', None), "tags": final_tag
+                    })
+
+            results.extend(chunk_results)
 
         return results
 

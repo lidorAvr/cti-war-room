@@ -58,12 +58,15 @@ def get_feed_card_html(row, date_str):
     if "critical" in sev or "high" in sev: badge_bg, badge_color, border_color = "rgba(220, 38, 38, 0.2)", "#fca5a5", "#ef4444"
     elif "medium" in sev: badge_bg, badge_color, border_color = "rgba(59, 130, 246, 0.2)", "#93c5fd", "#3b82f6"
     summary = clean_html(row['summary']).replace('\n', '<br>')
+    is_raw = str(row.get('category', '')).lower() == 'raw'
+    raw_badge = ('<div style="background: rgba(148,163,184,0.12); color:#94a3b8; border:1px solid #475569; padding:2px 10px; border-radius:99px; font-size:0.7rem;">גולמי · ללא AI</div>' if is_raw else '')
     return f"""
     <div class="report-card" style="direction: rtl; text-align: right; border-right: 4px solid {border_color};">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-direction: row-reverse;">
              <div style="display: flex; gap: 10px;">
                 <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold;">{row['severity'].upper()}</div>
                 <div style="background: rgba(30, 41, 59, 0.5); color: #94a3b8; border: 1px solid #334155; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem;">{row.get('tags', 'כללי')}</div>
+                {raw_badge}
              </div>
             <div style="font-family: 'Rubik'; font-size: 0.85rem; color: #94a3b8;">{date_str} • <b style="color: #e2e8f0;">{row['source']}</b></div>
         </div>
