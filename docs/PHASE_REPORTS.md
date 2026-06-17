@@ -200,3 +200,32 @@ every element fought BaseWeb components and rendered poorly. Owner chose a clean
 - **Live**: English tabs/metrics confirmed (Reports/Critical alerts/Active sources/Source availability), 75 real items rendered, `dir="auto"` working.
 
 **Gate: PASS.**
+
+---
+
+## Phase 4d — Source expansion (Israel + general)  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-05 |
+| **Branch** | `feat-more-sources` → PR to `main` |
+| **Goal** | More Israeli/Hebrew/INCD coverage + reliable general sources that actually work with the app. |
+
+### Method
+Tested ~25 candidate feeds against the app's real fetch logic and kept only those returning recent items and not blocked. (Verified-broken/blocked, NOT added: Geektime, Sophos, JPost 404, CISA advisories — Cloudflare 403, Times of Israel — too general.)
+
+### Built
+- **Robustness fix** — `_entry_summary()`: RSS entries lacking `summary` (e.g. **Dark Reading**) no longer crash the whole source; falls back to description/content, and `title`/`link` are read defensively (entries with no link are skipped).
+- **+16 verified sources** (7 → 26 total):
+  - 🇮🇱 **Israel/Hebrew**: People & Computers (pc.co.il), Cyber News IL (rss.app — *חדשות סייבר / ארז דסה*), CyberSafe, Techz (cyber tag), INCD Alerts (`CyberGovIL`).
+  - 🔬 **Top-tier**: SANS ISC, Securelist, Talos, Check Point Research, ESET, Mandiant, Krebs, Schneier, DFIR Report, Project Zero.
+  - 📰 **News**: SecurityWeek, Security Affairs, GBHackers, Dark Reading.
+
+### Tested (gate)
+- `pytest` **43/43** (+4: source registry well-formed & unique URLs; `_entry_summary` robustness).
+- **Live smoke**: **221 items, 25/26 sources active** — Hebrew coverage now strong (People & Computers 30, Cyber News IL 25, INCD 4). Only `INCD` gov.il RSS fails (Cloudflare 403 — known, kept as honest indicator).
+
+### Note
+More sources → more items per sync. With a Groq key this means more AI calls (cost); without a key the no-AI fallback keeps it free.
+
+**Gate: PASS.**

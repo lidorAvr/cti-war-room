@@ -53,6 +53,22 @@ def get_headers():
         log.debug("fake-useragent unavailable, using static UA: %s", e)
         return {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
+
+def _entry_summary(entry):
+    """Robustly extract an RSS entry's summary text. Some feeds (e.g. Dark
+    Reading) omit `summary`; fall back to description/content so one feed's
+    quirk never crashes the whole source."""
+    raw = getattr(entry, 'summary', None) or getattr(entry, 'description', None)
+    if not raw:
+        content = getattr(entry, 'content', None)
+        if content:
+            try:
+                first = content[0]
+                raw = first.get('value') if hasattr(first, 'get') else getattr(first, 'value', None)
+            except Exception:
+                raw = None
+    return BeautifulSoup(raw or "", "html.parser").get_text()[:2500]
+
 # --- DATE HELPER ---
 def parse_flexible_date(date_obj):
     now = datetime.datetime.now(IL_TZ)
@@ -368,13 +384,35 @@ class APTSheetCollector:
 
 class CTICollector:
     SOURCES = [
+        # --- General / international news ---
         {"name": "BleepingComputer", "url": "https://www.bleepingcomputer.com/feed/", "type": "rss"},
         {"name": "TheHackerNews", "url": "https://feeds.feedburner.com/TheHackersNews", "type": "rss"},
+        {"name": "Malwarebytes", "url": "https://www.malwarebytes.com/blog/feed/", "type": "rss"},
+        {"name": "SecurityWeek", "url": "https://www.securityweek.com/feed/", "type": "rss"},
+        {"name": "Security Affairs", "url": "https://securityaffairs.com/feed", "type": "rss"},
+        {"name": "GBHackers", "url": "https://gbhackers.com/feed/", "type": "rss"},
+        {"name": "Dark Reading", "url": "https://www.darkreading.com/rss.xml", "type": "rss"},
+        # --- Top-tier threat research ---
         {"name": "Unit 42", "url": "https://unit42.paloaltonetworks.com/feed/", "type": "rss"},
+        {"name": "SANS ISC", "url": "https://isc.sans.edu/rssfeed_full.xml", "type": "rss"},
+        {"name": "Securelist", "url": "https://securelist.com/feed/", "type": "rss"},
+        {"name": "Talos", "url": "https://blog.talosintelligence.com/rss/", "type": "rss"},
+        {"name": "Check Point", "url": "https://research.checkpoint.com/feed/", "type": "rss"},
+        {"name": "ESET", "url": "https://www.welivesecurity.com/en/rss/feed/", "type": "rss"},
+        {"name": "Mandiant", "url": "https://www.mandiant.com/resources/blog/rss.xml", "type": "rss"},
+        {"name": "Krebs", "url": "https://krebsonsecurity.com/feed/", "type": "rss"},
+        {"name": "Schneier", "url": "https://www.schneier.com/feed/atom/", "type": "rss"},
+        {"name": "DFIR Report", "url": "https://thedfirreport.com/feed/", "type": "rss"},
+        {"name": "Project Zero", "url": "https://googleprojectzero.blogspot.com/feeds/posts/default", "type": "rss"},
         {"name": "CISA KEV", "url": "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json", "type": "json"},
+        # --- Israel / Hebrew ---
+        {"name": "People & Computers", "url": "https://www.pc.co.il/feed/", "type": "rss"},
+        {"name": "Cyber News IL", "url": "https://rss.app/feeds/Ho4gIVhEXQwiIoOx.xml", "type": "rss"},
+        {"name": "CyberSafe", "url": "https://cybersafe.co.il/category/%D7%97%D7%93%D7%A9%D7%95%D7%AA-%D7%A1%D7%99%D7%99%D7%91%D7%A8/feed/", "type": "rss"},
+        {"name": "Techz", "url": "https://techz.co.il/tag/%D7%A1%D7%99%D7%99%D7%91%D7%A8/feed/", "type": "rss"},
         {"name": "INCD", "url": "https://www.gov.il/he/rss/news_list?officeId=4bcc13f5-fed6-4b8c-b8ee-7bf4a6bc81c8", "type": "rss"},
         {"name": "INCD", "url": "https://t.me/s/Israel_Cyber", "type": "telegram"},
-        {"name": "Malwarebytes", "url": "https://www.malwarebytes.com/blog/feed/", "type": "rss"}
+        {"name": "INCD Alerts", "url": "https://t.me/s/CyberGovIL", "type": "telegram"},
     ]
 
     async def fetch_item(self, session, source):
@@ -393,12 +431,15 @@ class CTICollector:
                     feed = feedparser.parse(content)
                     # --- FETCH LIMIT = 100 ---
                     for entry in feed.entries[:FETCH_LIMIT]:
+                        link = getattr(entry, 'link', None)
+                        if not link:
+                            continue
                         date_raw = getattr(entry, 'published_parsed', None) or getattr(entry, 'updated_parsed', None)
                         pub_date = parse_flexible_date(date_raw)
 
                         # --- STRICT 7-DAY FILTER ---
                         if is_recent(pub_date):
-                            items.append({"title": entry.title, "url": entry.link, "date": pub_date, "source": source['name'], "summary": BeautifulSoup(entry.summary, "html.parser").get_text()[:2500]})
+                            items.append({"title": getattr(entry, 'title', '(no title)'), "url": link, "date": pub_date, "source": source['name'], "summary": _entry_summary(entry)})
 
                 elif source['type'] == 'json':
                      data = json.loads(content)
