@@ -253,3 +253,27 @@ More sources → more items per sync. With a Groq key this means more AI calls (
 - **Live smoke** (26 sources, no key): 96 cards, **max 10/source**, **INCD 10** (was 1), no marketing, no off-topic, no tz error.
 
 **Gate: PASS.**
+
+---
+
+## Phase 4f — Cross-source de-dup & relevance  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-17 |
+| **Branch** | `feat-dedup-relevance` → PR to `main` |
+| **Goal** | Don't show the same story from multiple outlets; drop low-value "junk" while keeping SOC-relevant items. |
+
+### Verified the problem first
+Live fetch had **18 duplicate items / 6 cross-source clusters** — the same CVE/story from 3–4 outlets (e.g. CISA KEV + The Hacker News + Security Affairs on CVE-2026-20262) — that the old `SequenceMatcher(0.75)` title de-dup missed (each outlet phrases the title differently).
+
+### Built
+- **Cross-source de-dup**: normalized **title token-set Jaccard (≥0.5) + shared-CVE** matching (`_signature` / `is_duplicate`), replacing the raw-title SequenceMatcher. The richest copy (longest summary) is kept; terse duplicates dropped.
+- **Low-value filter** (`is_low_value`): drops marketing / surveys / business-HR / podcasts — matched on the **title only, word-bounded**.
+- **Hardened against false positives (both caught by the live smoke):** `"sponsored"` appears in The Hacker News *body* boilerplate, and `"ebook"` is a substring of *"Facebook"* — title-only + latin word-boundary matching fixed both, so real intel (NarwhalRAT, JDY botnet, Facebook scams, Dark Reading threat groups) is kept.
+
+### Tested (gate)
+- `pytest` **64/64** (+ marker word-boundary `ebook`⊄`Facebook`, `is_duplicate` CVE/token, `analyze_batch` collapses one CVE across 3 outlets, sponsored-in-body kept).
+- **Live verify**: 238 fetched → 29 junk dropped (all genuine) → **195 unique** (14 cross-source dups removed); every duplicate CVE appears **once**; INCD 10. UI renders clean (122 capped cards, no error).
+
+**Gate: PASS.**

@@ -11,11 +11,18 @@ import utils  # noqa: E402
 
 class TestIsNoise:
     def test_marketing_dropped_for_any_source(self):
-        item = {"title": "מבצע", "summary": "תוכן שיווקי - הצטרפו ל-SOC שלנו", "source": "Cyber News IL"}
+        # telegram marketing posts carry the marker in their (snippet) title
+        item = {"title": "- תוכן שיווקי - הצטרפו ל-SOC שלנו", "summary": "...", "source": "Cyber News IL"}
         assert utils.is_noise(item) is True
 
     def test_promo_english_marker_dropped(self):
-        assert utils.is_noise({"title": "x", "summary": "This is a sponsored post", "source": "GBHackers"}) is True
+        assert utils.is_noise({"title": "Sponsored: a new SOC platform", "summary": "x", "source": "GBHackers"}) is True
+
+    def test_sponsored_in_body_only_is_kept(self):
+        # real articles whose body contains boilerplate 'sponsored' must NOT be dropped
+        item = {"title": "North Korean NarwhalRAT malware deployed via fake alerts",
+                "summary": "... related: sponsored ...", "source": "TheHackerNews"}
+        assert utils.is_noise(item) is False
 
     def test_general_source_offtopic_dropped(self):
         item = {"title": "חברה גייסה 20 מיליון דולר", "summary": "סבב גיוס A להרחבת פעילות", "source": "People & Computers"}
