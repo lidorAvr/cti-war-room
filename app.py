@@ -55,7 +55,10 @@ def get_feed_card_html(row, date_str):
     badge_bg, badge_color, border_color = "rgba(100, 116, 139, 0.2)", "#cbd5e1", "rgba(100, 116, 139, 0.3)"
     if "critical" in sev or "high" in sev: badge_bg, badge_color, border_color = "rgba(220, 38, 38, 0.2)", "#fca5a5", "#ef4444"
     elif "medium" in sev: badge_bg, badge_color, border_color = "rgba(59, 130, 246, 0.2)", "#93c5fd", "#3b82f6"
-    summary = clean_html(row['summary']).replace('\n', '<br>')
+    _txt = clean_html(row['summary'])
+    if len(_txt) > 350:
+        _txt = _txt[:350].rstrip() + "…"
+    summary = _txt.replace('\n', '<br>')
     is_raw = str(row.get('category', '')).lower() == 'raw'
     raw_badge = ('<div style="background: rgba(148,163,184,0.12); color:#94a3b8; border:1px solid #475569; padding:2px 10px; border-radius:99px; font-size:0.7rem;">RAW · no AI</div>' if is_raw else '')
     # dir="auto" lets each item render in its own language direction:
@@ -78,6 +81,7 @@ def get_feed_card_html(row, date_str):
 
 init_db()
 IL_TZ = pytz.timezone('Asia/Jerusalem')
+PER_SOURCE_CAP = 10  # max items shown per source in the feed (keeps high-volume feeds from dominating)
 
 GROQ_KEY = get_secret("groq_key", "")
 VT_KEY = get_secret("vt_key", "")
@@ -190,10 +194,10 @@ tab_feed, tab_strat, tab_tools, tab_map = st.tabs(["🔴 Live Feed", "🗂️ Th
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
-    df = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'DeepWeb' ORDER BY published_at DESC LIMIT 200", conn)
+    df = pd.read_sql_query("SELECT * FROM intel_reports WHERE source != 'DeepWeb' ORDER BY published_at DESC LIMIT 1000", conn)
     conn.close()
     if not df.empty:
-        df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce')
+        df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce', utc=True)
         df = df.sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
         c1, c2 = st.columns(2)
         with c1:
@@ -203,6 +207,7 @@ with tab_feed:
             f_sev = st.radio("Severity", ["All", "Critical/High", "Medium", "Low/Info"], horizontal=True)
         if f_tag != 'All': df = df[df['tags'] == f_tag]
         if "High" in f_sev: df = df[df['severity'].str.contains('Critical|High', case=False)]
+        df = cap_per_source(df, PER_SOURCE_CAP)
         for _, row in df.iterrows():
             try:
                 dt = row['published_at']

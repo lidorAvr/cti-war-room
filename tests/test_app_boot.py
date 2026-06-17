@@ -93,3 +93,38 @@ def test_app_renders_feed_with_data(monkeypatch, tmp_path):
     at.run()
     assert len(at.exception) == 0, f"feed render raised: {[e.value for e in at.exception]}"
     assert any("TEST FEED ITEM" in m.value for m in at.markdown), "feed card was not rendered"
+
+
+def test_app_renders_feed_with_mixed_timezones(monkeypatch, tmp_path):
+    """Regression: real multi-source feeds carry mixed UTC offsets (Telegram UTC +
+    RSS Israel time). pandas 3.0's to_datetime raises 'Mixed timezones' unless
+    utc=True — caught by the live UI smoke, not the single-row unit test."""
+    import sqlite3
+    import utils
+
+    async def _no_network(*args, **kwargs):
+        return [], []
+
+    monkeypatch.setattr(utils.CTICollector, "get_all_data", _no_network)
+    monkeypatch.chdir(tmp_path)
+    utils.init_db()
+    conn = sqlite3.connect(utils.DB_NAME)
+    rows = [
+        ("t", "2026-06-15T10:00:00+03:00", "TheHackerNews", "https://x.test/1", "Item A", "News", "High", "s", None, "General"),
+        ("t", "2026-06-15T07:00:00+00:00", "BleepingComputer", "https://x.test/2", "Item B", "News", "Medium", "s", None, "General"),
+    ]
+    for r in rows:
+        conn.execute(
+            "INSERT INTO intel_reports (timestamp,published_at,source,url,title,category,severity,summary,actor_tag,tags)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)", r)
+    conn.commit()
+    conn.close()
+
+    from streamlit.testing.v1 import AppTest
+    at = AppTest.from_file(APP, default_timeout=60)
+    for k in SECRET_KEYS:
+        at.secrets[k] = ""
+    at.run()
+    assert len(at.exception) == 0, f"mixed-tz feed render raised: {[e.value for e in at.exception]}"
+    assert any("Item A" in m.value for m in at.markdown)
+    assert any("Item B" in m.value for m in at.markdown)

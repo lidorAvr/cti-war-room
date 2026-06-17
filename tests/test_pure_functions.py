@@ -110,8 +110,9 @@ class TestTagSeverity:
     def test_research_tag(self):
         assert self.p._determine_tag_severity("deep threat research analysis", "X") == ("Research", "Medium")
 
-    def test_incd_source_is_israel(self):
-        assert self.p._determine_tag_severity("routine update", "INCD") == ("Israel", "Medium")
+    def test_incd_source_is_israel_and_high(self):
+        # INCD (national cyber directorate) alerts are always high-priority
+        assert self.p._determine_tag_severity("routine update", "INCD") == ("Israel", "High")
 
     def test_default_is_general_medium(self):
         assert self.p._determine_tag_severity("nothing special here", "X") == ("General", "Medium")
