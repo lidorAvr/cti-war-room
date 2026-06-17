@@ -91,12 +91,23 @@ CYBER_KEYWORDS = (
 )
 
 
+def _title_has_marker(title, markers):
+    """Word-bounded marker match on a title (lowercased). The latin-letter
+    boundaries prevent substring false-positives like 'ebook' in 'Facebook' or
+    'appointed' in 'disappointed'. Hebrew markers match within Hebrew text."""
+    t = (title or "").lower()
+    return any(re.search(r'(?<![a-z0-9])' + re.escape(m) + r'(?![a-z0-9])', t) for m in markers)
+
+
 def is_noise(item):
-    """True if a feed item should be dropped: marketing/promo (any source), or an
-    off-topic story from a general-tech source (no cyber keyword)."""
-    text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
-    if any(m in text for m in MARKETING_MARKERS):
+    """Drop marketing/promo or low-value fluff (matched on the TITLE, so a real
+    story isn't dropped for boilerplate like a 'sponsored' related-links footer in
+    its body), or an off-topic story from a general-tech source (no cyber keyword)."""
+    if _title_has_marker(item.get('title', ''), MARKETING_MARKERS):
         return True
+    if is_low_value(item):
+        return True
+    text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
     if item.get("source") in GENERAL_SOURCES and not any(k in text for k in CYBER_KEYWORDS):
         return True
     return False
@@ -108,6 +119,69 @@ def cap_per_source(df, n, source_col="source"):
     if df is None or df.empty:
         return df
     return df.groupby(source_col, group_keys=False, sort=False).head(n)
+
+
+# --- Low-value / "junk" filter: items that aren't actionable for a SOC/CTI team ---
+LOW_VALUE_MARKERS = (
+    # vendor marketing / events / fluff
+    "webinar", "register now", "register today", "whitepaper", "white paper",
+    "e-book", "ebook", "download the report", "download our", "join us at",
+    "podcast", "webcast", "stormcast", "lock and code", "virtual event", "promo code", "giveaway",
+    "magic quadrant", "forrester wave", "gartner", "named a leader",
+    # surveys / statistics fluff
+    "survey", "respondents", "% of organizations", "% of companies",
+    "% of security", "% of it leaders",
+    # business / HR — not threat intel
+    "raises $", "raises €", "series a funding", "series b funding",
+    "funding round", "secures $", "acquires", "acquisition of", "to acquire",
+    "appoints", "appointed", "names new ceo", "joins as", "we're hiring", "now hiring",
+    # hebrew
+    "וובינר", "הירשמו", "להרשמה", "סקר", "המשיבים", "גייסה", "גיוס הון",
+    "סבב גיוס", "רכשה את", "מונה ל", "מינוי", "דרושים", "פודקאסט", "חסות",
+)
+
+
+def is_low_value(item):
+    """True for clearly low-value items (marketing, surveys, business/HR, podcasts)
+    not actionable for a SOC team. Matched on the TITLE only (word-bounded): a real
+    threat story often cites a statistic or webinar in its body — don't drop it for that."""
+    return _title_has_marker(item.get('title', ''), LOW_VALUE_MARKERS)
+
+
+# --- Cross-source de-duplication (the same story from multiple outlets) ---
+# SequenceMatcher on raw titles misses cross-outlet dups (each outlet phrases it
+# differently). Compare normalized title token sets (Jaccard) and shared CVE ids.
+_DEDUP_STOP = set((
+    "the a an of to in on for and or with from is are was were be been by at as it "
+    "its this that new now over into via after before amid update updates reports report "
+    "says will has have can your you our flaw flaws bug warns warning alert vulnerability"
+).split())
+
+
+def _norm_tokens(text):
+    t = re.sub(r'[^a-z0-9֐-׿ ]', ' ', (text or '').lower())
+    return set(w for w in t.split() if len(w) > 2 and w not in _DEDUP_STOP)
+
+
+def _cve_ids(text):
+    return set(re.findall(r'cve-\d{4}-\d{4,7}', (text or '').lower()))
+
+
+def _signature(item):
+    blob = f"{item.get('title', '')} {item.get('summary', '')}"
+    return (_norm_tokens(item.get('title', '')), _cve_ids(blob))
+
+
+def is_duplicate(sig_a, sig_b, threshold=0.5):
+    """Same story if the items share a CVE id or their title token sets overlap
+    enough (Jaccard >= threshold)."""
+    toks_a, cve_a = sig_a
+    toks_b, cve_b = sig_b
+    if cve_a and cve_b and (cve_a & cve_b):
+        return True
+    if not toks_a or not toks_b:
+        return False
+    return len(toks_a & toks_b) / len(toks_a | toks_b) >= threshold
 
 # --- DATE HELPER ---
 def parse_flexible_date(date_obj):
@@ -269,12 +343,20 @@ class AIBatchProcessor:
         items_to_process = [i for i in items if i['url'] not in existing_urls and not is_noise(i)]
         if not items_to_process: return []
 
-        # Deduplication (Python Side)
-        unique_items = []
+        # Cross-source de-duplication (token-set + shared-CVE). Process richer
+        # items (longer summary) first so the most informative copy of a story is
+        # the one kept; the terse duplicates from other outlets are dropped.
+        items_to_process.sort(key=lambda i: len(i.get('summary') or ''), reverse=True)
+        existing_sigs = [(_norm_tokens(t), _cve_ids(t)) for t in existing_titles]
+        unique_items, kept_sigs = [], []
         for item in items_to_process:
-            if any(self.is_similar(item['title'], t) for t in existing_titles): continue
-            if any(self.is_similar(item['title'], u['title']) for u in unique_items): continue
+            sig = _signature(item)
+            if any(is_duplicate(sig, es) for es in existing_sigs):
+                continue
+            if any(is_duplicate(sig, ks) for ks in kept_sigs):
+                continue
             unique_items.append(item)
+            kept_sigs.append(sig)
 
         if not unique_items: return []
 
