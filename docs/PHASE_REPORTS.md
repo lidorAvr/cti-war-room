@@ -229,3 +229,27 @@ Tested ~25 candidate feeds against the app's real fetch logic and kept only thos
 More sources → more items per sync. With a Groq key this means more AI calls (cost); without a key the no-AI fallback keeps it free.
 
 **Gate: PASS.**
+
+---
+
+## Phase 4e — Feed quality & relevance  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-17 |
+| **Branch** | `feat-feed-quality` → PR to `main` |
+| **Goal** | Owner feedback: balance sources, shorter cards, drop ads/off-topic, surface all INCD, INCD = high. |
+
+### Built
+- **Per-source cap** (`cap_per_source`, `PER_SOURCE_CAP=10`): high-volume feeds (THN, P&C) no longer dominate the displayed feed.
+- **Summary truncation** (350 chars) in feed cards — no more walls of text.
+- **Noise filter** (`is_noise`): drops marketing/promo (`תוכן שיווקי`, sponsored…) from any source, and off-topic stories from general-tech sources (People & Computers) lacking a cyber keyword (funding rounds, robotaxi, appointments).
+- **INCD → severity High** (national-CERT alerts are always high-priority).
+- **Telegram (INCD)**: ingest **all** page messages (not just 7 days) **and give each post a distinct title** — fixes the real cause of "not all the newest INCD appear": every post shared the title "INCD Cyber Alert", so the title-similarity de-dup collapsed them all into one.
+- **Bug fix (found by the live UI smoke)**: pandas 3.0 raised `ValueError: Mixed timezones` in `to_datetime` on real multi-source dates (Telegram UTC + RSS Israel time) → fixed with `utc=True`. The single-row unit test didn't catch it; real data did.
+
+### Tested (gate)
+- `pytest` **54/54** (+ `is_noise`, `cap_per_source`, title-dedup collapse, **mixed-timezone regression**).
+- **Live smoke** (26 sources, no key): 96 cards, **max 10/source**, **INCD 10** (was 1), no marketing, no off-topic, no tz error.
+
+**Gate: PASS.**

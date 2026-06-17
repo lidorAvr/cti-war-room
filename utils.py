@@ -69,6 +69,46 @@ def _entry_summary(entry):
                 raw = None
     return BeautifulSoup(raw or "", "html.parser").get_text()[:2500]
 
+
+# --- Feed quality: drop marketing/promo and off-topic items ---
+# General tech/business outlets (not cyber-only): for these we require a
+# cyber/threat keyword, so funding rounds / appointments / gadgets are dropped
+# while real security stories pass. Dedicated CTI sources are trusted as-is.
+GENERAL_SOURCES = {"People & Computers"}
+
+MARKETING_MARKERS = (
+    "תוכן שיווקי", "תוכן ממומן", "פרסום ממומן", "מעוניינים לפרסם", "לפרסום בערוץ",
+    "לפרסום אצלנו", "sponsored", "advertorial", "promoted post",
+)
+
+CYBER_KEYWORDS = (
+    "cyber", "hack", "attack", "malware", "ransomware", "phish", "vulnerab",
+    "exploit", "breach", "threat", "cve-", "apt", "ddos", "botnet", "backdoor",
+    "trojan", "zero-day", "zero day", "0day", "spyware", "stealer", "incident",
+    "compromise", "data leak", "leaked", "patch", "security",
+    "סייבר", "פריצה", "מתקפ", "תקיפ", "נוזק", "כופר", "פישינג", "פגיעות",
+    "דליפ", "דלף", "האקר", "תוקף", "חדיר", "אבטח", "פוגען", "סחיטה", "הצפנ",
+)
+
+
+def is_noise(item):
+    """True if a feed item should be dropped: marketing/promo (any source), or an
+    off-topic story from a general-tech source (no cyber keyword)."""
+    text = f"{item.get('title', '')} {item.get('summary', '')}".lower()
+    if any(m in text for m in MARKETING_MARKERS):
+        return True
+    if item.get("source") in GENERAL_SOURCES and not any(k in text for k in CYBER_KEYWORDS):
+        return True
+    return False
+
+
+def cap_per_source(df, n, source_col="source"):
+    """Keep at most n rows per source (df assumed already sorted by recency) so
+    high-volume feeds don't crowd out everyone else. Original order is preserved."""
+    if df is None or df.empty:
+        return df
+    return df.groupby(source_col, group_keys=False, sort=False).head(n)
+
 # --- DATE HELPER ---
 def parse_flexible_date(date_obj):
     now = datetime.datetime.now(IL_TZ)
@@ -215,6 +255,8 @@ class AIBatchProcessor:
         elif "phishing" in text or "credential" in text: tag = "Phishing"
         elif "malware" in text or "trojan" in text or "backdoor" in text: tag = "Malware"
         elif "research" in text or "analysis" in text: tag = "Research"
+        if source == "INCD":  # national cyber directorate alerts are always high-priority
+            sev = "High"
         return tag, sev
 
     def is_similar(self, a, b, threshold=0.75):
@@ -224,7 +266,7 @@ class AIBatchProcessor:
         if not items: return []
         existing_urls, existing_titles = get_existing_data()
 
-        items_to_process = [i for i in items if i['url'] not in existing_urls]
+        items_to_process = [i for i in items if i['url'] not in existing_urls and not is_noise(i)]
         if not items_to_process: return []
 
         # Deduplication (Python Side)
@@ -456,11 +498,17 @@ class CTICollector:
                             time_tag = msg.find('time')
                             date_raw = time_tag['datetime'] if time_tag else None
                             pub_date = parse_flexible_date(date_raw)
-
-                            if is_recent(pub_date):
-                                text = msg.find('div', class_='tgme_widget_message_text').get_text(separator=' ')
-                                url = msg.find('a', class_='tgme_widget_message_date')['href']
-                                items.append({"title": "INCD Cyber Alert", "url": url, "date": pub_date, "source": "INCD", "summary": text})
+                            text_div = msg.find('div', class_='tgme_widget_message_text')
+                            link_tag = msg.find('a', class_='tgme_widget_message_date')
+                            if not text_div or not link_tag:
+                                continue
+                            # INCD/Telegram alerts are kept regardless of the 7-day window
+                            # (low volume, national-CERT priority) so the newest all appear.
+                            _t = text_div.get_text(separator=' ').strip()
+                            # A distinct per-post title; a constant title would collapse every
+                            # alert into one under the title-similarity de-duplication.
+                            _title = (_t[:80].rstrip() + '…') if len(_t) > 80 else (_t or "INCD Cyber Alert")
+                            items.append({"title": _title, "url": link_tag['href'], "date": pub_date, "source": "INCD", "summary": _t})
                         except Exception as e:
                             log.debug("telegram message parse skipped: %s", e)
         except Exception as e:
