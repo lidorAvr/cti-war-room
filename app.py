@@ -109,6 +109,9 @@ async def perform_update(status_container=None):
     if status_container: status_container.markdown(":blue[**📡 Connecting to feeds...**]")
     raw, source_status = await col.get_all_data()
     st.session_state['source_status'] = source_status
+    # Real (not format-only) AI reachability — cached here so it runs once per
+    # boot/sync, not on every rerun.
+    st.session_state['ai_status'] = await ConnectionManager.ping_groq(GROQ_KEY)
 
     existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
@@ -134,7 +137,9 @@ if "booted" not in st.session_state:
 with st.sidebar:
     st.image("https://cdn-icons-png.flaticon.com/512/9203/9203726.png", width=60)
     st.markdown("### CTI WAR ROOM")
-    ok, msg = ConnectionManager.check_groq(GROQ_KEY)
+    # Prefer the real ping result (set in perform_update); fall back to the
+    # instant format check before the first ping completes.
+    ok, msg = st.session_state.get('ai_status') or ConnectionManager.check_groq(GROQ_KEY)
     st.caption(f"AI STATUS: {msg}")
 
     col1, col2 = st.columns(2)
