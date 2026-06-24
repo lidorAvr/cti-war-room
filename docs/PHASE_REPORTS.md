@@ -277,3 +277,30 @@ Live fetch had **18 duplicate items / 6 cross-source clusters** — the same CVE
 - **Live verify**: 238 fetched → 29 junk dropped (all genuine) → **195 unique** (14 cross-source dups removed); every duplicate CVE appears **once**; INCD 10. UI renders clean (122 capped cards, no error).
 
 **Gate: PASS.**
+
+---
+
+## Hotfix — Feed-card rendering (AI cards shown as code blocks)  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-24 |
+| **Branch** | `feat-card-render-fix` → PR to `main` |
+| **Goal** | Owner-reported display bug: AI-summarized cards rendered as literal HTML inside a Markdown code block; bold shown as raw `**`; awkward `<br>` gaps. |
+
+### Root cause (two issues, found by reading the owner's pasted feed)
+- `get_feed_card_html` returned an **indented** multi-line f-string. For **AI** cards `raw_badge` is empty (`''`) → its line became **whitespace-only**, which Streamlit's Markdown reads as a blank line: it closes the HTML block, and the following 4-space-indented lines become an **indented code block**. RAW cards carry a non-empty badge line, so they never tripped it — exactly why *only* AI cards broke.
+- Streamlit's Markdown does **not** process markdown inside an HTML block, so `**bold**` from the Groq summary rendered **literally**.
+
+### Built
+- Convert `**x**` → `<strong>x</strong>` (and drop any dangling `**` left by truncation).
+- Collapse newlines + whitespace-only runs to a single `<br>` (kills the `<br>     <br>` gaps the model emits).
+- **Return the card HTML as one un-indented line** (`"".join(strip per line)`) so Markdown can never treat it as a code block.
+- Sanitize the title (no embedded newline that could split the single line).
+
+### Tested (gate)
+- `pytest` **68/68** (+ `tests/test_card_render.py`: AI card is single-line / not a code block, `**`→`<strong>`, no literal `**`, `<br>`-gap collapse, RAW card still renders + keeps its badge).
+- Fixed a **pre-existing latent test** (`test_app_renders_feed_with_mixed_timezones`): its hardcoded `2026-06-15` dates fell outside `init_db()`'s 7-day retention prune once the calendar passed the window → now anchored to `now` (still mixed offsets). *Not caused by this change — surfaced by it.*
+- **Live UI verify** (Claude_Preview, real DOM): seeded a Hebrew AI card (`**` + messy `\n   \n`) into the running app → renders as a `.report-card` with three `<strong>` labels, **0 `<pre>/<code>` blocks across 125 cards**, no `**` leak, no ugly `<br>` gap.
+
+**Gate: PASS.**
