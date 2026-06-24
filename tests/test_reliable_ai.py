@@ -140,3 +140,42 @@ class TestQueryGroqRetry:
 
     def test_missing_key_short_circuits(self):
         assert asyncio.run(utils.query_groq_api("", "p")) == "Error: Missing API Key"
+
+    def test_huge_retry_after_is_capped(self, monkeypatch):
+        """Regression: a 429 with a huge Retry-After (daily-quota exhaustion) must
+        NOT be honored verbatim — that hung the boot for an hour. Every backoff
+        must stay capped and the call must give up quickly."""
+        slept = []
+
+        async def _capture_sleep(d, *a, **k):
+            slept.append(d)
+
+        class _Resp429:
+            status = 429
+            headers = {"retry-after": "3600"}
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def json(self):
+                return {}
+
+        class _Sess:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def post(self, *a, **k):
+                return _Resp429()
+
+        monkeypatch.setattr(utils.aiohttp, "ClientSession", lambda *a, **k: _Sess())
+        monkeypatch.setattr(utils.asyncio, "sleep", _capture_sleep)
+        out = asyncio.run(utils.query_groq_api("gsk_x", "p"))
+        assert out is None
+        assert slept, "expected at least one backoff sleep"
+        assert max(slept) <= 5, f"Retry-After was not capped — slept {slept}"

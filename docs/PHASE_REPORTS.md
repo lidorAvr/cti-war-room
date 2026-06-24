@@ -387,3 +387,25 @@ Groq occasionally returns the JSON item with the bullet scaffolding but **no con
 - On free-tier Groq + an empty DB, a cold-start ingest is bounded (≤40/run) but can still be slow when the quota is exhausted; coverage backfills over subsequent syncs. A paid Groq tier or a persistent DB removes this.
 
 **Gate: PASS** (code + 90 tests; format & cap verified live; full-backlog coverage rate is free-tier-bound).
+
+---
+
+## Hotfix — Groq 429 backoff hung the boot  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-24 |
+| **Branch** | `fix-groq-backoff-hang` → PR to `main` |
+| **Goal** | Both local AND the Cloud got stuck forever on "Analyzing 40 new items…". |
+
+### Root cause
+The Phase-6 retry honored Groq's `Retry-After` header **verbatim**. On daily-quota exhaustion Groq returns `429` with a huge `Retry-After` (thousands of seconds), so `await asyncio.sleep(...)` blocked the synchronous boot for ~an hour per attempt → the app never finished initializing. (Introduced by me in Phase 6; the cloud log confirmed it cloned `main` + new code, fetched feeds, then froze in `analyze_batch`.)
+
+### Built
+- **Cap the 429 backoff hard (≤5s)** regardless of `Retry-After`, so an exhausted quota **fails fast to RAW** instead of hanging. Reduced attempts 3→2 and per-request timeout 45s→30s to bound the worst case.
+
+### Tested (gate)
+- `pytest` **91/91** (+ `test_huge_retry_after_is_capped`: a 429 with `Retry-After: 3600` produces only capped (≤5s) sleeps and gives up fast).
+- **Live verify**: fresh-DB boot now **completes in ~64s** (was: hung indefinitely) → 29 cards, **19 AI (new 4-section format) / 10 RAW**, 0 code blocks. AI confirmed working (quota not exhausted).
+
+**Gate: PASS.**

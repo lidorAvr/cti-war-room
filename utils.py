@@ -355,20 +355,25 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
         # without this the whole chunk silently degrades to RAW (the "half the
         # cards are English" symptom). Backoff is kept short so that when the quota
         # is genuinely exhausted we fail fast to RAW rather than hanging the boot.
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 async with aiohttp.ClientSession() as session:
-                    async with session.post(url, json=payload, headers=headers, timeout=45) as resp:
+                    async with session.post(url, json=payload, headers=headers, timeout=30) as resp:
                         if resp.status == 200:
                             data = await resp.json()
                             return data['choices'][0]['message']['content']
                         if resp.status == 429:
+                            # CAP the wait. On daily-quota exhaustion Groq returns 429
+                            # with a huge Retry-After (thousands of seconds); honoring it
+                            # verbatim HANGS the boot. Cap hard (<=5s) so we fail fast to
+                            # RAW and let the next sync retry once the quota resets.
                             ra = resp.headers.get("retry-after")
                             try:
-                                delay = float(ra) if ra else min(2 ** attempt, 5)
+                                delay = float(ra) if ra else 2 ** attempt
                             except ValueError:
-                                delay = min(2 ** attempt, 5)
-                            log.info("Groq 429 (model=%s, attempt %d) — backing off %.1fs", m, attempt + 1, delay)
+                                delay = 2 ** attempt
+                            delay = min(delay, 5)
+                            log.warning("Groq 429 (model=%s, attempt %d) — backing off %.1fs", m, attempt + 1, delay)
                             await asyncio.sleep(delay)
                             continue
                         log.warning("Groq HTTP %s (model=%s)", resp.status, m)
