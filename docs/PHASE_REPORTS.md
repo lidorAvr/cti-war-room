@@ -328,3 +328,30 @@ Groq occasionally returns the JSON item with the bullet scaffolding but **no con
 - **Live UI verify** (Claude_Preview, real DOM): ran the real pipeline (`analyze_batch` + `save_reports`) against the live DB with Groq stubbed to return the empty template → the card renders as **RAW · no AI with the full source text**, no empty `תמונת מצב` bullets, 0 code blocks.
 
 **Gate: PASS.**
+
+---
+
+## Phase 5 — Reliable AI everywhere (honest status + CWD-independent keys)  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-24 |
+| **Branch** | `feat-reliable-ai` → PR to `main` |
+| **Goal** | Owner: "AI not active — make it reliable everywhere." Find why AI looked off and make AI provisioning + status truthful across environments. |
+
+### Root cause (found by live inspection)
+1. **No key is configured** — every key in `.streamlit/secrets.toml` is **empty** (`groq_key=""`). That is the real reason AI was off; the Hebrew summaries the owner saw earlier came from a past run whose AI rows persist in the DB.
+2. **Claude_Preview** launched the app from `C:\Users\lidor` (launch.json had no `cwd`) → Streamlit looked for secrets/DB in the wrong place.
+3. **Dishonest status** — the old `check_groq` only checked the key *format* (`gsk_` prefix) and reported "Connected" without ever contacting Groq.
+
+### Built
+- **CWD-independent secrets**: `get_secret()` now falls back to an **environment variable** (`groq_key` → `GROQ_KEY`) after `st.secrets`, so AI/enrichment work without a project `secrets.toml` (preview, cron, deploy). `import os` added.
+- **Real connectivity check**: `ConnectionManager.ping_groq()` hits Groq's free `/models` endpoint (no token cost) → honest status **Connected / Invalid Key / Unreachable / Missing Key**, run once per boot/sync and cached in `session_state['ai_status']` (not per rerun). `check_groq` kept as the instant pre-ping format check ("Configured").
+- **Preview fix**: added `cwd` to `launch.json` so Claude_Preview runs from the project dir (uses the same `secrets.toml` + DB as `run.ps1`). *(launch.json is user-level config, not in the repo.)*
+- **Docs**: `secrets.toml.example` documents the env-var alternative and the honest status values.
+
+### Tested (gate)
+- `pytest` **84/84** (+ `tests/test_reliable_ai.py`: `get_secret` env fallback + default; `ping_groq` → Connected/Invalid Key/Invalid Format/Missing Key/Unreachable, all with a mocked session).
+- **Live verify**: `cwd` confirmed working (preview now writes/reads the **project** DB); `get_secret` env fallback confirmed live (`demo_key_x → env-value-xyz`); the real ping ran inside the live app and **correctly reported "Missing Key"** (because the key is empty). A live "Connected" awaits the owner setting a valid `gsk_` key.
+
+**Gate: PASS** (code + tests + honest-status pipeline verified live; full AI activation is owner-action: set a Groq key).

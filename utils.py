@@ -1,4 +1,5 @@
 import sqlite3
+import os
 import asyncio
 import aiohttp
 import json
@@ -31,17 +32,24 @@ log = logging.getLogger("cti_war_room")
 
 
 def get_secret(key, default=""):
-    """Safe access to st.secrets that never raises when no secrets.toml exists.
+    """Safe access to a secret that never raises when no secrets.toml exists.
+
+    Resolution order: st.secrets -> environment variable (KEY upper-cased, e.g.
+    groq_key -> GROQ_KEY) -> default. The env-var fallback makes the app's
+    capabilities (AI, IOC enrichment) work in environments WITHOUT a project
+    secrets.toml — Claude_Preview (which runs from a different CWD), cron jobs and
+    cloud deploys — instead of silently degrading to no-AI.
 
     st.secrets.get(key, default) raises StreamlitSecretNotFoundError when there is
-    no secrets file at all (the supplied default is never reached). This wraps it
-    so a missing key OR a missing secrets file both return `default` — the app
-    boots and simply reports the capability as disabled instead of crashing.
+    no secrets file at all (the supplied default is never reached), so it is wrapped.
     """
     try:
-        return st.secrets.get(key, default)
+        val = st.secrets.get(key, None)
+        if val:
+            return val
     except Exception:
-        return default
+        pass
+    return os.environ.get(key.upper(), default)
 
 
 # --- ROBUST HEADERS ---
@@ -303,9 +311,36 @@ class DeepWebScanner:
 class ConnectionManager:
     @staticmethod
     def check_groq(key):
+        """Instant, offline format check — used as the status shown before the
+        first real ping completes. 'Configured' != reachable; see ping_groq."""
         if not key: return False, "Missing Key"
-        if key.startswith("gsk_"): return True, "Connected"
+        if key.startswith("gsk_"): return True, "Configured"
         return False, "Invalid Format"
+
+    @staticmethod
+    async def ping_groq(key):
+        """Real Groq reachability check via the free models endpoint (no token
+        cost). Returns (ok, status_message). Run once per boot/sync and cached in
+        session_state so it does not fire on every rerun."""
+        if not key:
+            return False, "Missing Key"
+        if not key.startswith("gsk_"):
+            return False, "Invalid Format"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://api.groq.com/openai/v1/models",
+                    headers={"Authorization": f"Bearer {key}"},
+                    timeout=10,
+                ) as resp:
+                    if resp.status == 200:
+                        return True, "Connected"
+                    if resp.status in (401, 403):
+                        return False, "Invalid Key"
+                    return False, f"Unreachable ({resp.status})"
+        except Exception as e:
+            log.debug("Groq ping failed: %s", e)
+            return False, "Unreachable"
 
 async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_mode=True):
     if not api_key: return "Error: Missing API Key"
