@@ -103,3 +103,37 @@ class TestEndToEnd:
         assert len(at.exception) == 0, [e.value for e in at.exception]
         assert any("Globex confirmed a breach" in m.value for m in at.markdown), "source text missing"
         assert all("**תמונת מצב**" not in m.value for m in at.markdown), "empty AI template leaked to the UI"
+
+
+class TestPerRunCap:
+    """A fresh/empty DB must not hang the boot on a huge backlog: perform_update
+    caps the AI workload per run (MAX_AI_ITEMS_PER_RUN = 40); the rest are picked
+    up on the next sync / auto-refresh."""
+
+    def test_boot_caps_workload_at_40(self, monkeypatch, tmp_path):
+        import sqlite3
+        # Unique tokens per title so cross-source de-dup (token Jaccard) keeps
+        # them all distinct — otherwise they'd collapse and mask the cap.
+        items = [{"title": f"alpha{i} bravo{i} charlie{i} delta{i}", "url": f"https://cap/{i}",
+                  "date": RECENT, "source": "BleepingComputer",
+                  "summary": f"alpha{i} bravo{i} incident details and impact."}
+                 for i in range(50)]
+
+        async def _net(*a, **k):
+            return items, [{"source": "BleepingComputer", "ok": True, "count": len(items)}]
+
+        monkeypatch.setattr(utils.CTICollector, "get_all_data", _net)
+        monkeypatch.setattr(utils, "query_groq_api",
+                            _fake_groq("• **תמונת מצב**: סיכום אמיתי של האירוע."))
+        monkeypatch.chdir(tmp_path)
+
+        from streamlit.testing.v1 import AppTest
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        at = AppTest.from_file(os.path.join(repo, "app.py"), default_timeout=120)
+        for k in ("groq_key", "vt_key", "urlscan_key", "abuseipdb_key", "gemini_key"):
+            at.secrets[k] = ""
+        at.secrets["groq_key"] = "test-key"
+        at.run()
+        assert len(at.exception) == 0, [e.value for e in at.exception]
+        n = sqlite3.connect(utils.DB_NAME).execute("SELECT COUNT(*) FROM intel_reports").fetchone()[0]
+        assert n == 40, f"expected exactly the 40-item cap saved per run, got {n}"

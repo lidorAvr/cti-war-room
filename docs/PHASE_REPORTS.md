@@ -355,3 +355,35 @@ Groq occasionally returns the JSON item with the bullet scaffolding but **no con
 - **Live verify**: `cwd` confirmed working (preview now writes/reads the **project** DB); `get_secret` env fallback confirmed live (`demo_key_x → env-value-xyz`); the real ping ran inside the live app and **correctly reported "Missing Key"** (because the key is empty). A live "Connected" awaits the owner setting a valid `gsk_` key.
 
 **Gate: PASS** (code + tests + honest-status pipeline verified live; full AI activation is owner-action: set a Groq key).
+
+---
+
+## Phase 6 — Feed uniformity & AI reliability  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-24 |
+| **Branch** | `feat-ai-prompt-quality` → PR to `main` |
+| **Goal** | Owner (AI now keyed): "items aren't uniform — some Hebrew, some English; structure inconsistent; not enough context per item." |
+
+### Root causes (found live with a real key)
+- The mix is RAW (English, unstructured) vs AI (Hebrew, structured). Most RAW items came from **rate-limit (429) burst failures** during ingest — the old `query_groq_api` only did `time.sleep(1)` and skipped to the next model, so whole chunks degraded to RAW (a fresh-DB ingest produced ~72 AI / ~110 RAW).
+- The AI prompt was thin: 3 sections, keyword-only "ממצאים טכניים", a literal `Impact` placeholder, no recommendations.
+- A fresh/empty DB tried to AI-summarize the **entire backlog (~220+) on boot**, hanging the UI for many minutes on free-tier limits.
+
+### Built
+- **Richer, uniform prompt** (`utils.analyze_batch`): a fixed **4-section** Hebrew brief — `תמונת מצב / ממצאים טכניים / המלצות הגנה / רלוונטיות ל-SOC` — with explicit rules that every section carry a real sentence (no keyword lists, no empty sections, name victim/attacker/vector/CVE).
+- **429 retry with short exponential backoff** + honoring `Retry-After`, before falling back to the smaller model — so rate-limited chunks recover instead of silently going RAW. Backoff is short so an exhausted quota fails fast to RAW rather than hanging.
+- **Inter-chunk throttle** (2s) to avoid tripping free-tier limits in a burst.
+- **Per-run cap** (`MAX_AI_ITEMS_PER_RUN = 40`, newest first) so a large/empty-DB backlog can't hang the boot; the rest fill in on the next sync / 15-min auto-refresh.
+- **Per-category card width**: AI cards get more room (600 chars) for the richer summary; RAW stays tight (300) so it isn't a wall of text. Stray model indentation is normalized before truncation.
+
+### Tested (gate)
+- `pytest` **90/90** (+ `tests/test_reliable_ai.py` query_groq retry matrix: 429→retry→200, all-429→None, missing-key; + `tests/test_card_render.py` AI-vs-RAW truncation caps; + `tests/test_empty_summary.py` per-run cap = 40 of 50).
+- **Live verify (real key):** the 4-section Hebrew format renders in the real DOM (rich, uniform, `המלצות הגנה` + `רלוונטיות ל-SOC`, 0 code blocks); the per-run cap is confirmed live (boot shows **"Analyzing 40"**, not the full ~227). AI/RAW ratio depends on live Groq free-tier headroom; the retry/throttle raise AI coverage when the quota has room.
+
+### Notes / known limits
+- The prompt lives in **code** (`utils.py`), shipped via GitHub — there is nothing to "configure" on Streamlit Cloud for the format; Cloud picks it up on redeploy from `main`.
+- On free-tier Groq + an empty DB, a cold-start ingest is bounded (≤40/run) but can still be slow when the quota is exhausted; coverage backfills over subsequent syncs. A paid Groq tier or a persistent DB removes this.
+
+**Gate: PASS** (code + 90 tests; format & cap verified live; full-backlog coverage rate is free-tier-bound).
