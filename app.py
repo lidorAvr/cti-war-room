@@ -58,12 +58,19 @@ def get_feed_card_html(row, date_str):
     _txt = clean_html(row['summary'])
     if len(_txt) > 350:
         _txt = _txt[:350].rstrip() + "…"
-    summary = _txt.replace('\n', '<br>')
+    # Markdown bold (**x**) -> <strong>: Streamlit's Markdown does NOT process
+    # markdown *inside* an HTML block, so ** would otherwise render literally.
+    _txt = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', _txt)
+    _txt = _txt.replace('**', '')  # drop any dangling marker left by truncation
+    # Collapse newlines (and whitespace-only runs around them) to a single <br>,
+    # which also kills the "<br>     <br>" gaps the model sometimes emits.
+    summary = re.sub(r'\s*\n\s*', '<br>', _txt).strip()
+    title = str(row['title']).replace('\n', ' ').strip()
     is_raw = str(row.get('category', '')).lower() == 'raw'
     raw_badge = ('<div style="background: rgba(148,163,184,0.12); color:#94a3b8; border:1px solid #475569; padding:2px 10px; border-radius:99px; font-size:0.7rem;">RAW · no AI</div>' if is_raw else '')
     # dir="auto" lets each item render in its own language direction:
     # Hebrew AI summaries -> RTL, English raw items -> LTR, automatically.
-    return f"""
+    html = f"""
     <div class="report-card" style="border-left: 4px solid {border_color};">
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
             <div style="font-family: 'Rubik'; font-size: 0.85rem; color: #94a3b8;">{date_str} • <b style="color: #e2e8f0;">{row['source']}</b></div>
@@ -73,11 +80,14 @@ def get_feed_card_html(row, date_str):
                 {raw_badge}
             </div>
         </div>
-        <div dir="auto" style="font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin-bottom: 12px;">{row['title']}</div>
+        <div dir="auto" style="font-size: 1.25rem; font-weight: 700; color: #f1f5f9; margin-bottom: 12px;">{title}</div>
         <div dir="auto" style="font-size: 0.95rem; color: #cbd5e1; margin-bottom: 15px; opacity: 0.9; line-height: 1.6;">{summary}</div>
         <div style="text-align: right;"><a href="{row['url']}" target="_blank" style="color: #38bdf8; text-decoration: none; font-size: 0.85rem; padding: 5px 10px; background: rgba(56, 189, 248, 0.1); border-radius: 6px;">Open source 🔗</a></div>
     </div>
     """
+    # Collapse to a single line: indented lines / a blank line (e.g. when
+    # raw_badge is empty) make Streamlit's Markdown treat the HTML as a code block.
+    return "".join(part.strip() for part in html.splitlines() if part.strip())
 
 init_db()
 IL_TZ = pytz.timezone('Asia/Jerusalem')

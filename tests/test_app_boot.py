@@ -99,6 +99,7 @@ def test_app_renders_feed_with_mixed_timezones(monkeypatch, tmp_path):
     """Regression: real multi-source feeds carry mixed UTC offsets (Telegram UTC +
     RSS Israel time). pandas 3.0's to_datetime raises 'Mixed timezones' unless
     utc=True — caught by the live UI smoke, not the single-row unit test."""
+    import datetime
     import sqlite3
     import utils
 
@@ -109,9 +110,16 @@ def test_app_renders_feed_with_mixed_timezones(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     utils.init_db()
     conn = sqlite3.connect(utils.DB_NAME)
+    # Dates must stay inside init_db()'s HISTORY_DAYS retention window, else the
+    # boot-time prune deletes them. Anchor to now but keep DIFFERENT tz offsets
+    # (+03:00 vs +00:00) so the mixed-timezone to_datetime(utc=True) path is hit.
+    base = datetime.datetime.now(datetime.timezone.utc)
+    a_il = (base - datetime.timedelta(hours=1)).astimezone(
+        datetime.timezone(datetime.timedelta(hours=3))).isoformat()
+    b_utc = (base - datetime.timedelta(hours=2)).isoformat()
     rows = [
-        ("t", "2026-06-15T10:00:00+03:00", "TheHackerNews", "https://x.test/1", "Item A", "News", "High", "s", None, "General"),
-        ("t", "2026-06-15T07:00:00+00:00", "BleepingComputer", "https://x.test/2", "Item B", "News", "Medium", "s", None, "General"),
+        ("t", a_il, "TheHackerNews", "https://x.test/1", "Item A", "News", "High", "s", None, "General"),
+        ("t", b_utc, "BleepingComputer", "https://x.test/2", "Item B", "News", "Medium", "s", None, "General"),
     ]
     for r in rows:
         conn.execute(
