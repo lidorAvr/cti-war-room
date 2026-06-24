@@ -55,18 +55,22 @@ def get_feed_card_html(row, date_str):
     badge_bg, badge_color, border_color = "rgba(100, 116, 139, 0.2)", "#cbd5e1", "rgba(100, 116, 139, 0.3)"
     if "critical" in sev or "high" in sev: badge_bg, badge_color, border_color = "rgba(220, 38, 38, 0.2)", "#fca5a5", "#ef4444"
     elif "medium" in sev: badge_bg, badge_color, border_color = "rgba(59, 130, 246, 0.2)", "#93c5fd", "#3b82f6"
+    is_raw = str(row.get('category', '')).lower() == 'raw'
     _txt = clean_html(row['summary'])
-    if len(_txt) > 350:
-        _txt = _txt[:350].rstrip() + "…"
+    # Normalize the model's stray indentation / blank lines to single newlines so
+    # truncation counts real content (not whitespace) and gaps don't show.
+    _txt = re.sub(r'\s*\n\s*', '\n', _txt).strip()
+    # AI summaries are structured (multi-section) and benefit from more room;
+    # RAW source text is kept tighter so it doesn't become a wall of text.
+    limit = 300 if is_raw else 600
+    if len(_txt) > limit:
+        _txt = _txt[:limit].rstrip() + "…"
     # Markdown bold (**x**) -> <strong>: Streamlit's Markdown does NOT process
     # markdown *inside* an HTML block, so ** would otherwise render literally.
     _txt = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', _txt)
     _txt = _txt.replace('**', '')  # drop any dangling marker left by truncation
-    # Collapse newlines (and whitespace-only runs around them) to a single <br>,
-    # which also kills the "<br>     <br>" gaps the model sometimes emits.
-    summary = re.sub(r'\s*\n\s*', '<br>', _txt).strip()
+    summary = _txt.replace('\n', '<br>').strip()
     title = str(row['title']).replace('\n', ' ').strip()
-    is_raw = str(row.get('category', '')).lower() == 'raw'
     raw_badge = ('<div style="background: rgba(148,163,184,0.12); color:#94a3b8; border:1px solid #475569; padding:2px 10px; border-radius:99px; font-size:0.7rem;">RAW · no AI</div>' if is_raw else '')
     # dir="auto" lets each item render in its own language direction:
     # Hebrew AI summaries -> RTL, English raw items -> LTR, automatically.
@@ -92,6 +96,7 @@ def get_feed_card_html(row, date_str):
 init_db()
 IL_TZ = pytz.timezone('Asia/Jerusalem')
 PER_SOURCE_CAP = 10  # max items shown per source in the feed (keeps high-volume feeds from dominating)
+MAX_AI_ITEMS_PER_RUN = 40  # cap AI work per boot/sync so a large backlog doesn't hang the boot; the rest fill in on the next sync / 15-min auto-refresh
 
 GROQ_KEY = get_secret("groq_key", "")
 VT_KEY = get_secret("vt_key", "")
@@ -115,6 +120,12 @@ async def perform_update(status_container=None):
 
     existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
+    # Bound the per-run AI workload: a large backlog (e.g. a fresh/empty DB on a
+    # cloud cold-start) would otherwise hang the boot for minutes on free-tier
+    # rate limits. Newest first; the rest are summarized on the next sync /
+    # 15-min auto-refresh.
+    raw_to_process.sort(key=lambda r: r.get('date') or '', reverse=True)
+    raw_to_process = raw_to_process[:MAX_AI_ITEMS_PER_RUN]
 
     if raw_to_process:
         if status_container: status_container.markdown(f":orange[**🤖 Analyzing {len(raw_to_process)} new items...**]")

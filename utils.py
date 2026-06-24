@@ -350,18 +350,32 @@ async def query_groq_api(api_key, prompt, model="llama-3.3-70b-versatile", json_
     for m in models:
         payload = {"model": m, "messages": [{"role": "user", "content": prompt}], "temperature": 0.1}
         if json_mode: payload["response_format"] = {"type": "json_object"}
-        async with aiohttp.ClientSession() as session:
+        # Retry the SAME model on rate-limit (429) with a short exponential backoff
+        # before falling back to the next model. Free-tier bursts hit 429 a lot;
+        # without this the whole chunk silently degrades to RAW (the "half the
+        # cards are English" symptom). Backoff is kept short so that when the quota
+        # is genuinely exhausted we fail fast to RAW rather than hanging the boot.
+        for attempt in range(3):
             try:
-                async with session.post(url, json=payload, headers=headers, timeout=45) as resp:
-                    if resp.status == 429:
-                        time.sleep(1)
-                        continue
-                    if resp.status == 200:
-                        data = await resp.json()
-                        return data['choices'][0]['message']['content']
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, json=payload, headers=headers, timeout=45) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            return data['choices'][0]['message']['content']
+                        if resp.status == 429:
+                            ra = resp.headers.get("retry-after")
+                            try:
+                                delay = float(ra) if ra else min(2 ** attempt, 5)
+                            except ValueError:
+                                delay = min(2 ** attempt, 5)
+                            log.info("Groq 429 (model=%s, attempt %d) — backing off %.1fs", m, attempt + 1, delay)
+                            await asyncio.sleep(delay)
+                            continue
+                        log.warning("Groq HTTP %s (model=%s)", resp.status, m)
+                        break  # non-retryable -> try the next model
             except Exception as e:
-                log.warning("Groq request failed (model=%s): %s", m, e)
-                continue
+                log.warning("Groq request failed (model=%s, attempt %d): %s", m, attempt + 1, e)
+                await asyncio.sleep(min(2 ** attempt, 5))
     return None
 
 class AIBatchProcessor:
@@ -427,21 +441,27 @@ class AIBatchProcessor:
         results = []
 
         system_instruction = """
-        You are a Cyber Intelligence Analyst.
+        You are a senior SOC / Cyber Threat Intelligence analyst writing for an Israeli security team.
 
         **MISSION:**
-        1. Analyze the news items.
-        2. MERGE only if they describe the EXACT same event (Same Victim + Same Attack).
-        3. DO NOT discard unique items. If in doubt, keep it separate.
+        1. Analyze each news item and write a short operational brief.
+        2. MERGE two items ONLY if they describe the EXACT same event (same victim + same attack). When unsure, keep them separate.
+        3. NEVER discard a unique item.
 
-        **OUTPUT LANGUAGE**: Hebrew ONLY (Technical terms in English).
+        **OUTPUT LANGUAGE:** Hebrew ONLY. Keep technical terms, product names, CVE ids and malware/actor names in English.
 
-        **REPORT STRUCTURE (JSON):**
+        **WRITING RULES (this fixes thin, inconsistent cards):**
+        - EVERY item uses the EXACT same 4 sections below, in the same order, with the same labels.
+        - Every section MUST contain a real, informative sentence — never leave one empty and never output just a list of keywords. If a detail is genuinely missing from the source, write a short analyst note (e.g. "לא פורסמו פרטים טכניים נוספים") instead of leaving it blank.
+        - Be concrete: name the victim/target, the attacker/campaign, the attack vector, affected products/versions, and CVE ids when present.
+        - Keep each section to 1-2 tight sentences so the whole summary reads well on a feed card.
+
+        **REPORT STRUCTURE (return JSON only):**
         {"items": [
             {
-                "id": (int) ID matching input,
-                "title": "Professional Hebrew Title",
-                "summary": "• **תמונת מצב**: What happened.\n• **ממצאים טכניים**: CVEs, Malware.\n• **משמעויות**: Impact."
+                "id": (int) ID matching the input,
+                "title": "כותרת מקצועית, ברורה וספציפית בעברית",
+                "summary": "• **תמונת מצב**: מה קרה — מי הותקף/מי התוקף ומתי.\n• **ממצאים טכניים**: CVE, נוזקות, וקטור תקיפה ומערכות מושפעות.\n• **המלצות הגנה**: פעולה קונקרטית (עדכון/חסימה/ציד איומים).\n• **רלוונטיות ל-SOC**: רמת הסיכון ולמה זה חשוב לצוות."
             }
         ]}
         """
@@ -504,6 +524,10 @@ class AIBatchProcessor:
                     chunk_results.append(self._raw_result(original))
 
             results.extend(chunk_results)
+            # Space out AI calls so a burst of chunks doesn't trip free-tier rate
+            # limits (which would degrade later chunks to RAW).
+            if self.key and i + chunk_size < len(unique_items):
+                await asyncio.sleep(2)
 
         return results
 

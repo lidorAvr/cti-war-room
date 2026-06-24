@@ -105,3 +105,27 @@ def test_raw_card_still_renders(monkeypatch, tmp_path):
     card = _card(at, "RAW STYLE CARD")
     assert "\n" not in card
     assert "RAW · no AI" in card, "raw badge missing"
+
+
+# A ~480-char single-line summary: under the AI cap (600) but over the RAW cap (300).
+_LONG = "תוכן מפורט על מתקפת הסייבר וההשלכות התפעוליות שלה. " * 10
+
+
+def test_ai_card_keeps_long_summary(monkeypatch, tmp_path):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    at = _run_with_rows(monkeypatch, tmp_path, [
+        ("t", now, "TheHackerNews", "https://x.test/long-ai", "LONG AI CARD",
+         "News", "High", _LONG, None, "Research"),
+    ])
+    card = _card(at, "LONG AI CARD")
+    assert "…" not in card, "AI summary under the 600-char cap should not be truncated"
+
+
+def test_raw_card_truncates_long_summary(monkeypatch, tmp_path):
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    at = _run_with_rows(monkeypatch, tmp_path, [
+        ("t", now, "BleepingComputer", "https://x.test/long-raw", "LONG RAW CARD",
+         "raw", "Medium", _LONG, None, "Malware"),
+    ])
+    card = _card(at, "LONG RAW CARD")
+    assert "…" in card, "RAW summary over the 300-char cap should be truncated"

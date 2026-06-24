@@ -83,3 +83,60 @@ class TestPingGroq:
             raise OSError("network down")
         monkeypatch.setattr(utils.aiohttp, "ClientSession", boom)
         assert asyncio.run(utils.ConnectionManager.ping_groq("gsk_x")) == (False, "Unreachable")
+
+
+class _PostResp:
+    def __init__(self, status, payload=None, headers=None):
+        self.status = status
+        self._payload = payload or {}
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def json(self):
+        return self._payload
+
+
+def _seq_session_factory(statuses):
+    """Returns a ClientSession factory whose successive .post() calls yield the
+    given HTTP statuses (a 200 carries a valid chat-completion payload)."""
+    state = {"i": 0}
+
+    class _S:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        def post(self, *a, **k):
+            i = state["i"]
+            state["i"] += 1
+            st = statuses[min(i, len(statuses) - 1)]
+            payload = {"choices": [{"message": {"content": "OK"}}]} if st == 200 else {}
+            return _PostResp(st, payload)
+
+    return lambda *a, **k: _S()
+
+
+async def _noop_sleep(*a, **k):
+    return None
+
+
+class TestQueryGroqRetry:
+    def test_retries_then_succeeds_on_429(self, monkeypatch):
+        monkeypatch.setattr(utils.aiohttp, "ClientSession", _seq_session_factory([429, 429, 200]))
+        monkeypatch.setattr(utils.asyncio, "sleep", _noop_sleep)  # don't actually wait
+        assert asyncio.run(utils.query_groq_api("gsk_x", "p")) == "OK"
+
+    def test_returns_none_when_rate_limited_throughout(self, monkeypatch):
+        monkeypatch.setattr(utils.aiohttp, "ClientSession", _seq_session_factory([429] * 12))
+        monkeypatch.setattr(utils.asyncio, "sleep", _noop_sleep)
+        assert asyncio.run(utils.query_groq_api("gsk_x", "p")) is None
+
+    def test_missing_key_short_circuits(self):
+        assert asyncio.run(utils.query_groq_api("", "p")) == "Error: Missing API Key"
