@@ -304,3 +304,27 @@ Live fetch had **18 duplicate items / 6 cross-source clusters** — the same CVE
 - **Live UI verify** (Claude_Preview, real DOM): seeded a Hebrew AI card (`**` + messy `\n   \n`) into the running app → renders as a `.report-card` with three `<strong>` labels, **0 `<pre>/<code>` blocks across 125 cards**, no `**` leak, no ugly `<br>` gap.
 
 **Gate: PASS.**
+
+---
+
+## Hotfix — Empty AI summaries → raw fallback  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-06-24 |
+| **Branch** | `feat-empty-summary-fallback` → PR to `main` |
+| **Goal** | Owner-reported: some cards showed the AI bullet template with **every section empty** (e.g. FortiBleed, Xsolis) — no usable intel. |
+
+### Root cause
+Groq occasionally returns the JSON item with the bullet scaffolding but **no content** (`• **תמונת מצב**: <br>• **ממצאים טכניים**: <br>• **משמעויות**:`). `analyze_batch` accepted any non-null `summary` as a finished AI ("News") item, so empty bullets reached the feed.
+
+### Built
+- `_is_empty_ai_summary()` — detects scaffolding-only output (strips `<br>`, the `**bold**` section labels, and non-alphanumerics; < 8 real chars ⇒ empty).
+- **Per-item fallback** in `analyze_batch`: an empty AI summary now degrades *that item* to a **RAW card showing the original source text** (rule-based tag/severity), exactly like the no-key path — instead of empty bullets.
+- Refactored the chunk-level raw fallback into a shared `_raw_result()` (no behaviour change).
+
+### Tested (gate)
+- `pytest` **75/75** (+ `tests/test_empty_summary.py`: helper unit cases; `analyze_batch` empty-template → Raw with the source text preserved; real-AI → News; **end-to-end through app.py**: boot → perform_update → analyze_batch(empty) → save → feed shows the source text and the template never reaches the UI).
+- **Live UI verify** (Claude_Preview, real DOM): ran the real pipeline (`analyze_batch` + `save_reports`) against the live DB with Groq stubbed to return the empty template → the card renders as **RAW · no AI with the full source text**, no empty `תמונת מצב` bullets, 0 code blocks.
+
+**Gate: PASS.**

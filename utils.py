@@ -183,6 +183,19 @@ def is_duplicate(sig_a, sig_b, threshold=0.5):
         return False
     return len(toks_a & toks_b) / len(toks_a | toks_b) >= threshold
 
+
+def _is_empty_ai_summary(summary):
+    """True when a Groq summary is just the bullet template with no real content,
+    e.g. '• **תמונת מצב**: <br>• **ממצאים טכניים**: <br>• **משמעויות**:'. The model
+    occasionally returns the scaffolding with every section blank; those items are
+    better shown as their raw source text than as empty bullets."""
+    if not summary or not summary.strip():
+        return True
+    t = summary.replace('<br>', ' ')
+    t = re.sub(r'\*\*[^*]*\*\*', ' ', t)             # drop the **bold** section labels
+    t = re.sub(r'[^0-9A-Za-z֐-׿]', '', t)  # keep only Hebrew/Latin letters + digits
+    return len(t) < 8
+
 # --- DATE HELPER ---
 def parse_flexible_date(date_obj):
     now = datetime.datetime.now(IL_TZ)
@@ -336,6 +349,21 @@ class AIBatchProcessor:
     def is_similar(self, a, b, threshold=0.75):
         return SequenceMatcher(None, a, b).ratio() > threshold
 
+    def _raw_result(self, original):
+        """Build a RAW (no-AI) feed item from a fetched source item — used both
+        when the whole chunk has no AI output and when a single AI summary comes
+        back empty."""
+        raw_title = original.get('title') or ""
+        raw_summary = original.get('summary') or ""
+        tag, sev = self._determine_tag_severity(f"{raw_title} {raw_summary}", original['source'])
+        return {
+            "category": "Raw", "severity": sev,
+            "title": raw_title, "summary": raw_summary,
+            "published_at": original['date'],
+            "source": original['source'], "url": original['url'],
+            "actor_tag": original.get('actor_tag', None), "tags": tag,
+        }
+
     async def analyze_batch(self, items):
         if not items: return []
         existing_urls, existing_titles = get_existing_data()
@@ -407,6 +435,14 @@ class AIBatchProcessor:
                                 final_title = p_item.get('title') or ""
                                 final_summary = p_item.get('summary') or ""
 
+                                # The model sometimes returns the bullet template with
+                                # every section empty -> show the raw source text instead
+                                # of empty bullets.
+                                if _is_empty_ai_summary(final_summary):
+                                    log.info("empty AI summary -> raw fallback: %s", original['url'])
+                                    chunk_results.append(self._raw_result(original))
+                                    continue
+
                                 full_text = final_title + final_summary
                                 final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
 
@@ -430,16 +466,7 @@ class AIBatchProcessor:
                 else:
                     log.warning("Groq returned no usable output: falling back to %d raw item(s)", len(chunk))
                 for original in chunk:
-                    raw_title = original.get('title') or ""
-                    raw_summary = original.get('summary') or ""
-                    final_tag, final_sev = self._determine_tag_severity(f"{raw_title} {raw_summary}", original['source'])
-                    chunk_results.append({
-                        "category": "Raw", "severity": final_sev,
-                        "title": raw_title, "summary": raw_summary,
-                        "published_at": original['date'],
-                        "source": original['source'], "url": original['url'],
-                        "actor_tag": original.get('actor_tag', None), "tags": final_tag
-                    })
+                    chunk_results.append(self._raw_result(original))
 
             results.extend(chunk_results)
 
