@@ -463,6 +463,179 @@ def backfill_iocs():
         log.warning("IOC backfill failed: %s", e)
         return 0
 
+# --- DEDICATED IOC FEEDS (verified indicators, not news text) ---
+# These feeds publish curated, already-verified indicators, so extraction is a
+# straight parse — no LLM anywhere. The news-text TLD allowlist is deliberately
+# NOT applied here (real C2s sit on exotic TLDs); the legit-domain denylist IS
+# still enforced so a compromised-but-critical domain (github.com, a CDN…)
+# can never reach the blocking feed. Endpoints verified live 2026-07-13:
+# ThreatFox API needs an Auth-Key (401) but the public recent-export works.
+MAX_FEED_IOCS = 40          # newest N per feed per fetch — keeps the tab focused
+IOC_FEED_INTERVAL_MIN = 60  # fetch each feed at most hourly (they're multi-MB)
+
+IOC_FEEDS = (
+    {"name": "ThreatFox", "url": "https://threatfox.abuse.ch/export/json/recent/", "kind": "threatfox"},
+    {"name": "URLhaus", "url": "https://urlhaus.abuse.ch/downloads/json_recent/", "kind": "urlhaus"},
+    {"name": "OpenPhish", "url": "https://openphish.com/feed.txt", "kind": "openphish"},
+)
+
+
+def _feed_value_ok(value, ioc_type):
+    """Safety gate for feed IOCs: denylist for domains/URL hosts, public-IP for
+    ips, hex shape for hashes. No TLD allowlist (feeds are pre-verified)."""
+    v = str(value or "").strip()
+    if not v or len(v) > 500:
+        return False
+    if ioc_type == "ip":
+        return _valid_public_ip(v)
+    if ioc_type == "domain":
+        return not _domain_denied(v)
+    if ioc_type == "url":
+        host = re.sub(r'^https?://', '', v, flags=re.I).split('/')[0].split(':')[0]
+        if _valid_public_ip(host):
+            return True
+        return '.' in host and not _domain_denied(host)
+    if ioc_type in ("md5", "sha1", "sha256"):
+        return bool(re.fullmatch(r'[a-fA-F0-9]+', v))
+    return True
+
+
+def _parse_threatfox(data):
+    """ThreatFox recent export: {ioc_id: [{ioc_value, ioc_type, threat_type,
+    malware_printable, confidence_level, first_seen_utc, ...}]}."""
+    out = []
+    for ioc_id, entries in (data or {}).items():
+        for e in entries or []:
+            value = (e.get("ioc_value") or "").strip()
+            t = e.get("ioc_type") or ""
+            if t == "ip:port":
+                value, ioc_type = value.split(":")[0], "ip"
+            elif t in ("md5_hash", "sha256_hash", "sha1_hash"):
+                ioc_type = t.split("_")[0]
+            elif t in ("domain", "url"):
+                ioc_type = t
+            else:
+                continue
+            if not _feed_value_ok(value, ioc_type):
+                continue
+            conf = e.get("confidence_level") or 0
+            malware = e.get("malware_printable") or e.get("malware") or "unknown"
+            out.append({
+                "value": value, "ioc_type": ioc_type,
+                "severity": "High" if conf >= 75 else "Medium",
+                "tags": "Malware",
+                "israel": is_israel_related("", "", [value]),
+                "source": "ThreatFox",
+                "report_url": f"https://threatfox.abuse.ch/ioc/{ioc_id}/",
+                "report_title": f"ThreatFox: {malware} ({e.get('threat_type', 'ioc')})",
+                "first_seen": parse_flexible_date(e.get("first_seen_utc")),
+                "_sort": e.get("first_seen_utc") or "",
+            })
+    out.sort(key=lambda x: x["_sort"], reverse=True)
+    return out[:MAX_FEED_IOCS]
+
+
+def _parse_urlhaus(data):
+    """URLhaus json_recent: {id: [{url, url_status, threat, tags, urlhaus_link,
+    dateadded, ...}]}."""
+    out = []
+    for _id, entries in (data or {}).items():
+        for e in entries or []:
+            url = (e.get("url") or "").strip()
+            if not _feed_value_ok(url, "url"):
+                continue
+            tags = ",".join(e.get("tags") or []) or e.get("threat") or "malware"
+            out.append({
+                "value": url, "ioc_type": "url",
+                "severity": "High" if e.get("url_status") == "online" else "Medium",
+                "tags": "Malware",
+                "israel": is_israel_related("", "", [url]),
+                "source": "URLhaus",
+                "report_url": e.get("urlhaus_link") or "https://urlhaus.abuse.ch/",
+                "report_title": f"URLhaus: {e.get('threat', 'malware_download')} [{tags}]",
+                "first_seen": parse_flexible_date(e.get("dateadded")),
+                "_sort": e.get("dateadded") or "",
+            })
+    out.sort(key=lambda x: x["_sort"], reverse=True)
+    return out[:MAX_FEED_IOCS]
+
+
+def _parse_openphish(text):
+    """OpenPhish free feed: newline-separated live phishing URLs (no metadata)."""
+    out, now = [], datetime.datetime.now(IL_TZ).isoformat()
+    for line in (text or "").splitlines():
+        url = line.strip()
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        if not _feed_value_ok(url, "url"):
+            continue
+        out.append({
+            "value": url, "ioc_type": "url", "severity": "High", "tags": "Phishing",
+            "israel": is_israel_related("", "", [url]), "source": "OpenPhish",
+            "report_url": "https://openphish.com/", "report_title": "OpenPhish: active phishing URL",
+            "first_seen": now,
+        })
+        if len(out) >= MAX_FEED_IOCS:
+            break
+    return out
+
+
+def _ioc_feed_due(source):
+    """Hourly gate per feed (they are multi-MB downloads)."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        row = conn.execute("SELECT last_fetch FROM ioc_feed_meta WHERE source = ?", (source,)).fetchone()
+        conn.close()
+        if not row or not row[0]:
+            return True
+        last = date_parser.parse(row[0])
+        return (datetime.datetime.now(IL_TZ) - last).total_seconds() > IOC_FEED_INTERVAL_MIN * 60
+    except Exception:
+        return True
+
+
+def _mark_ioc_feed_fetched(source):
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        conn.execute("INSERT OR REPLACE INTO ioc_feed_meta (source, last_fetch) VALUES (?, ?)",
+                     (source, datetime.datetime.now(IL_TZ).isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log.debug("ioc feed meta update failed: %s", e)
+
+
+async def fetch_ioc_feeds():
+    """Fetch the dedicated IOC feeds (hourly-gated), parse, validate and persist.
+    Returns per-feed status dicts for the sidebar; a feed failure never raises."""
+    statuses = []
+    for feed in IOC_FEEDS:
+        name = feed["name"]
+        if not _ioc_feed_due(name):
+            continue  # fetched recently — nothing to report
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(feed["url"], headers=get_headers(), timeout=45) as resp:
+                    if resp.status != 200:
+                        statuses.append({"source": name, "ok": False, "count": 0,
+                                         "error": f"HTTP {resp.status}"})
+                        continue
+                    if feed["kind"] == "openphish":
+                        entries = _parse_openphish(await resp.text())
+                    else:
+                        data = await resp.json(content_type=None)
+                        entries = _parse_threatfox(data) if feed["kind"] == "threatfox" else _parse_urlhaus(data)
+            for e in entries:
+                e.pop("_sort", None)
+            added = save_iocs(entries)
+            _mark_ioc_feed_fetched(name)
+            statuses.append({"source": name, "ok": True, "count": added})
+            log.info("IOC feed %s: %d parsed, %d new", name, len(entries), added)
+        except Exception as ex:
+            log.warning("IOC feed %s failed: %s", name, ex)
+            statuses.append({"source": name, "ok": False, "count": 0, "error": str(ex)[:80]})
+    return statuses
+
 # --- DATE HELPER ---
 def parse_flexible_date(date_obj):
     now = datetime.datetime.now(IL_TZ)
@@ -540,6 +713,11 @@ def init_db():
     )''')
     c.execute("CREATE INDEX IF NOT EXISTS idx_ioc_value ON iocs(value)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_ioc_seen ON iocs(first_seen)")
+    # hourly-gate bookkeeping for the dedicated IOC feeds (multi-MB downloads)
+    c.execute('''CREATE TABLE IF NOT EXISTS ioc_feed_meta (
+        source TEXT PRIMARY KEY,
+        last_fetch TEXT
+    )''')
 
     # Strict cleanup of old data (INCD Alerts kept like INCD — national CERT)
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=HISTORY_DAYS)).isoformat()

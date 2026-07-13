@@ -9,6 +9,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils  # noqa: E402
 
@@ -54,6 +56,7 @@ class _FakeSession:
         return _FakeResp(self._status)
 
 
+@pytest.mark.real_groq  # exercises the real ping_groq against a mocked aiohttp
 class TestPingGroq:
     def test_missing_key(self):
         assert asyncio.run(utils.ConnectionManager.ping_groq("")) == (False, "Missing Key")
@@ -127,6 +130,7 @@ async def _noop_sleep(*a, **k):
     return None
 
 
+@pytest.mark.real_groq  # exercises the real query_groq_api against a mocked aiohttp
 class TestQueryGroqRetry:
     def test_retries_then_succeeds_on_429(self, monkeypatch):
         monkeypatch.setattr(utils.aiohttp, "ClientSession", _seq_session_factory([429, 429, 200]))
