@@ -92,8 +92,10 @@ class TestTagSeverity:
     def setup_method(self):
         self.p = utils.AIBatchProcessor("")
 
-    def test_ransomware_is_high_but_general_tag(self):
-        assert self.p._determine_tag_severity("ransomware hits hospital", "BleepingComputer") == ("General", "High")
+    def test_ransomware_is_malware_and_high(self):
+        # was ("General", "High") before the bilingual/broader keyword fix —
+        # 'ransomware' is a malware-family word and must tag as Malware
+        assert self.p._determine_tag_severity("ransomware hits hospital", "BleepingComputer") == ("Malware", "High")
 
     def test_cve_is_vuln_and_high(self):
         assert self.p._determine_tag_severity("New CVE-2024-1234 vulnerability", "X") == ("Vulnerabilities", "High")

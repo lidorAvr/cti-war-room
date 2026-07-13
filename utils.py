@@ -393,6 +393,29 @@ def extract_and_save_iocs(raw_items, analyzed):
     return save_iocs(entries)
 
 
+def retag_reports():
+    """Idempotent self-heal: recompute tag+severity for stored reports with the
+    CURRENT bilingual keyword rules. Deterministic — rerunning yields the same
+    result; DeepWeb rows (actor-scan hits) are left untouched."""
+    try:
+        proc = AIBatchProcessor("")
+        conn = sqlite3.connect(DB_NAME)
+        rows = conn.execute("SELECT id, source, title, summary, tags, severity FROM intel_reports "
+                            "WHERE source != 'DeepWeb'").fetchall()
+        updates = []
+        for rid, source, title, summary, tags, severity in rows:
+            tag, sev = proc._determine_tag_severity(f"{title} {summary}", source)
+            if tag != tags or sev != severity:
+                updates.append((tag, sev, rid))
+        if updates:
+            conn.executemany("UPDATE intel_reports SET tags = ?, severity = ? WHERE id = ?", updates)
+            conn.commit()
+            log.info("retagged %d report(s) with current rules", len(updates))
+        conn.close()
+    except Exception as e:
+        log.debug("retag failed: %s", e)
+
+
 def _purge_denied_iocs():
     """Remove stored domain/url IOCs whose host is (now) denylisted — keeps the
     blocking feed clean when the denylist is extended after ingestion."""
@@ -518,13 +541,17 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_ioc_value ON iocs(value)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_ioc_seen ON iocs(first_seen)")
 
-    # Strict cleanup of old data
+    # Strict cleanup of old data (INCD Alerts kept like INCD — national CERT)
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=HISTORY_DAYS)).isoformat()
-    c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
+    c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'INCD Alerts', 'DeepWeb') AND published_at < ?", (limit_regular,))
     # IOCs age out with the same window, except Israel-priority ones (kept like INCD reports)
     c.execute("DELETE FROM iocs WHERE israel = 0 AND first_seen < ?", (limit_regular,))
     conn.commit()
     conn.close()
+    # Self-heal: re-classify stored reports with the current bilingual rules —
+    # rows saved by older keyword sets were stuck on General/Medium, which
+    # emptied the tag filters (owner-reported: "Israel shows nothing").
+    retag_reports()
     # Self-heal: when the denylist grows, retroactively purge stored IOCs that
     # are no longer considered blockable (e.g. a URL shortener that slipped in).
     _purge_denied_iocs()
@@ -648,16 +675,32 @@ class AIBatchProcessor:
     def __init__(self, key):
         self.key = key
 
+    # Bilingual keyword sets — roughly half the feed is Hebrew (INCD, Cyber News
+    # IL, People & Computers), and English-only keywords left every Hebrew item
+    # tagged "General"/Medium (which emptied the Israel/Malware/... filters).
+    _KW_HIGH = ('exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt',
+                'state-sponsored', 'כופרה', 'קריטי', 'מנוצל', 'חירום', 'התרעה')
+    _KW_ISRAEL = ('israel', 'iran', 'ישראל', 'ישראלי', 'איראן', 'מערך הסייבר', 'פיקוד העורף', 'צה"ל')
+    _KW_VULN = ('cve-', 'patch', 'vulnerability', 'vulnerabilit', 'flaw', 'security bug',
+                'zero-day', 'exploit', 'פגיעות', 'חולשה', 'חולשות', 'עדכון אבטחה')
+    _KW_PHISH = ('phishing', 'credential', 'scam', 'fraud', 'smishing', 'impersonat',
+                 'פישינג', 'דיוג', 'התחזות', 'הונאה', 'הונאות')
+    _KW_MAL = ('malware', 'ransomware', 'trojan', 'backdoor', 'stealer', 'botnet',
+               'spyware', 'rootkit', ' rat ', 'loader', 'נוזקה', 'נוזקות', 'כופרה',
+               'סוס טרויאני', 'בוטנט')
+    _KW_RESEARCH = ('research', 'analysis', 'מחקר', 'ניתוח')
+    INCD_SOURCES = ("INCD", "INCD Alerts")
+
     def _determine_tag_severity(self, text, source):
-        text = text.lower()
+        text = f" {str(text).lower()} "
         sev, tag = "Medium", "General"
-        if any(x in text for x in ['exploited', 'zero-day', 'ransomware', 'critical', 'cve-202', 'apt', 'state-sponsored']): sev = "High"
-        if source == "INCD" or "israel" in text or "iran" in text: tag = "Israel"
-        elif "cve-" in text or "patch" in text or "vulnerability" in text: tag = "Vulnerabilities"
-        elif "phishing" in text or "credential" in text: tag = "Phishing"
-        elif "malware" in text or "trojan" in text or "backdoor" in text: tag = "Malware"
-        elif "research" in text or "analysis" in text: tag = "Research"
-        if source == "INCD":  # national cyber directorate alerts are always high-priority
+        if any(x in text for x in self._KW_HIGH): sev = "High"
+        if source in self.INCD_SOURCES or any(x in text for x in self._KW_ISRAEL): tag = "Israel"
+        elif any(x in text for x in self._KW_VULN): tag = "Vulnerabilities"
+        elif any(x in text for x in self._KW_PHISH): tag = "Phishing"
+        elif any(x in text for x in self._KW_MAL): tag = "Malware"
+        elif any(x in text for x in self._KW_RESEARCH): tag = "Research"
+        if source in self.INCD_SOURCES:  # national cyber directorate alerts are always high-priority
             sev = "High"
         return tag, sev
 
@@ -764,8 +807,11 @@ class AIBatchProcessor:
                                     chunk_results.append(self._raw_result(original))
                                     continue
 
-                                full_text = final_title + final_summary
-                                final_tag, final_sev = self._determine_tag_severity(full_text, original['source'])
+                                # Tag/severity from the RAW source text — the AI output is
+                                # Hebrew, so classifying it hid the English keywords and
+                                # left every AI item as General/Medium.
+                                raw_text = f"{original.get('title', '')} {original.get('summary', '')}"
+                                final_tag, final_sev = self._determine_tag_severity(raw_text, original['source'])
 
                                 chunk_results.append({
                                     "category": "News", "severity": final_sev,
