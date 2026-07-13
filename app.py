@@ -119,6 +119,9 @@ async def perform_update(status_container=None):
     # Real (not format-only) AI reachability — cached here so it runs once per
     # boot/sync, not on every rerun.
     st.session_state['ai_status'] = await ConnectionManager.ping_groq(GROQ_KEY)
+    # Dedicated IOC feeds (ThreatFox / URLhaus / OpenPhish) — hourly-gated inside
+    if status_container: status_container.markdown(":violet[**🎯 Pulling IOC feeds...**]")
+    st.session_state['ioc_feed_status'] = await fetch_ioc_feeds()
 
     existing_urls, _ = get_existing_data()
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
@@ -194,6 +197,16 @@ with st.sidebar:
                     st.caption(f"✅ {s['source']} — {s['count']} items")
                 else:
                     st.caption(f"❌ {s['source']} — {s.get('error', 'error')}")
+
+    # --- Dedicated IOC feeds (ThreatFox / URLhaus / OpenPhish) ---
+    _ioc_statuses = st.session_state.get('ioc_feed_status')
+    if _ioc_statuses:
+        st.markdown("**🎯 IOC feeds**")
+        for s in _ioc_statuses:
+            if s['ok']:
+                st.caption(f"✅ {s['source']} — {s['count']} new IOCs")
+            else:
+                st.caption(f"❌ {s['source']} — {s.get('error', 'error')}")
 
 st.title("Operations Dashboard")
 conn = sqlite3.connect(DB_NAME)
@@ -327,7 +340,8 @@ with tab_ioc:
                     f'<span style="color:{sev_color}; font-weight:bold; font-size:0.7rem;">{str(ir["severity"]).upper()}</span> '
                     f'<span style="background:rgba(30,41,59,0.5); border:1px solid #334155; color:#94a3b8; padding:1px 8px; border-radius:99px; font-size:0.7rem;">{ir["tags"]}</span> '
                     f'{il_chip}'
-                    f'<br><span style="color:#64748b;">{seen} • {ir["source"]}</span> '
+                    f'<br><span style="color:#64748b;">{seen} • {ir["source"]}'
+                    f'{(" — " + str(ir["report_title"])[:60]) if ir["report_title"] else ""}</span> '
                     f'<a href="{ir["report_url"]}" target="_blank" style="color:#38bdf8; text-decoration:none; font-size:0.75rem;">source report 🔗</a></div>',
                     unsafe_allow_html=True)
     else:

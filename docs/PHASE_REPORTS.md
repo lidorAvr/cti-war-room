@@ -470,3 +470,31 @@ The first live ingest surfaced `t.co` (Twitter's shortener, leaked from an artic
 - **Live verify (real DOM, real DB)**: retag transformed the live DB from `{General: 53}` to **Israel 19 / Vulnerabilities 9 / Malware 7 / Phishing 3 / General 46**, INCD rows 0→**19**; clicking the **Israel** filter now shows **10 cards, all Israel/HIGH** (fresh INCD alerts) — previously zero.
 
 **Gate: PASS.**
+
+---
+
+## Phase 8 — Dedicated IOC feeds (ThreatFox / URLhaus / OpenPhish)  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-07-13 |
+| **Branch** | `feat-ioc-sources` → PR to `main` |
+| **Goal** | Owner ("אני דורש את זה"): a rich, live IOC feed — news text yields few explicit indicators (~1 per 31 reports), so wire in curated IOC-only sources. |
+
+### Verified live first (per methodology)
+- ThreatFox **API = 401** (abuse.ch Auth-Key rollout) but the **public recent export works** (HTTP 200, 4,227 IOCs/48h with type, malware family, confidence, first_seen).
+- URLhaus `json_recent` works (200; url, status, threat, tags, per-IOC reference link).
+- OpenPhish `feed.txt` works (200; live phishing URLs).
+
+### Built
+- **`fetch_ioc_feeds()`** in the sync pipeline (`perform_update`): fetch → parse → validate → `save_iocs`, **hourly-gated per feed** (`ioc_feed_meta` table — the exports are multi-MB), newest **40 per feed** per fetch, failures never break the app.
+- **Deterministic parsers** (no LLM anywhere): `_parse_threatfox` (ip:port→ip split, hash typing, confidence≥75→High, report link built from IOC id, malware family in the title), `_parse_urlhaus` (online→High/offline→Medium, per-IOC urlhaus reference), `_parse_openphish` (Phishing/High).
+- **Safety policy for feed values** (`_feed_value_ok`): the **legit-domain denylist stays enforced** (a compromised-but-critical domain like github.com can never reach the blocking feed) but the news-text **TLD allowlist deliberately does NOT apply** — real C2s sit on exotic TLDs (seen live: `.garden`).
+- **Sidebar "🎯 IOC feeds" health block** (✅/❌ + new-IOC count per feed); Live IOC rows now also show the feed's context (malware family / threat type).
+- **Test-hermeticity hardening (root-caused a real flake):** `TestIncdPriorityInCap` failed ~2/5 full runs — captured logs showed **tests hitting the live Groq API**: AppTest sometimes merges the project's real `secrets.toml` over test-injected empty secrets (secrets file-watcher race), so an unstubbed test reached live Groq (burning quota; the model's MERGE behavior nondeterministically ate the INCD item). Fix: `tests/conftest.py` **autouse hermetic stubs** for `query_groq_api` / `ping_groq` / `fetch_ioc_feeds` (opt-out markers for tests that mock aiohttp themselves). Suite went **~105s → ~46s** (proof it was really sleeping on live 429s) and is now deterministic (3×134 green).
+
+### Tested (gate)
+- `pytest` **134/134** (+12 in `tests/test_ioc_feeds.py`: exotic-TLD kept & denylist enforced, ip:port split & private dropped, confidence→severity, hash typing & report links, urlhaus online/offline severity, openphish parse/cap, hourly gate, end-to-end fetch→save→gate with mocked aiohttp).
+- **Live verify (real network + DOM)**: boot pulled all three feeds → **ThreatFox 40 / URLhaus 40 / OpenPhish 40** stored; sidebar shows ✅ per feed; Live IOC tab: **120 unique IOCs, 122 copyable blocks** (real live infrastructure: roblox typosquats, pages.dev phishing kits, botnet C2 IPs).
+
+**Gate: PASS.**
