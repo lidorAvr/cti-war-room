@@ -145,6 +145,37 @@ class TestQueryGroqRetry:
     def test_missing_key_short_circuits(self):
         assert asyncio.run(utils.query_groq_api("", "p")) == "Error: Missing API Key"
 
+    def test_batch_prompt_fits_the_small_fallback_model(self, monkeypatch, tmp_path):
+        """Regression for Groq HTTP 413 (payload too large): when the 70b model is
+        rate-limited, the batch prompt must still fit llama-3.1-8b-instant — so
+        chunks stay <=6 items and per-item content is truncated."""
+        import datetime
+        import json
+        import re as _re
+        captured = []
+
+        async def _fake(key, prompt, **kw):
+            captured.append(prompt)
+            ids = [int(m) for m in _re.findall(r"ID:(\d+)", prompt)]
+            return json.dumps({"items": [
+                {"id": i, "title": "כותרת", "summary": "• **תמונת מצב**: אירוע אבטחה ממשי."}
+                for i in ids]})
+
+        monkeypatch.setattr(utils, "query_groq_api", _fake)
+        monkeypatch.setattr(utils.asyncio, "sleep", _noop_sleep)  # skip inter-chunk throttle
+        monkeypatch.chdir(tmp_path)
+        utils.init_db()
+        now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        items = [{"title": f"unique{i} tokens{i} story{i}", "url": f"https://b/{i}", "date": now,
+                  "source": "BleepingComputer", "summary": "long content " * 300}  # ~3900 chars each
+                 for i in range(12)]
+        out = asyncio.run(utils.AIBatchProcessor("k").analyze_batch(items))
+        assert len(out) == 12
+        assert captured, "AI path was not exercised"
+        for p in captured:
+            assert len(_re.findall(r"ID:\d+", p)) <= 6, "chunk larger than 6 items"
+            assert len(p) < 9000, f"batch prompt too large for the 8b fallback: {len(p)} chars"
+
     def test_huge_retry_after_is_capped(self, monkeypatch):
         """Regression: a 429 with a huge Retry-After (daily-quota exhaustion) must
         NOT be honored verbatim — that hung the boot for an hour. Every backoff

@@ -498,3 +498,22 @@ The first live ingest surfaced `t.co` (Twitter's shortener, leaked from an artic
 - **Live verify (real network + DOM)**: boot pulled all three feeds → **ThreatFox 40 / URLhaus 40 / OpenPhish 40** stored; sidebar shows ✅ per feed; Live IOC tab: **120 unique IOCs, 122 copyable blocks** (real live infrastructure: roblox typosquats, pages.dev phishing kits, botnet C2 IPs).
 
 **Gate: PASS.**
+
+---
+
+## Hotfix — Groq 413: batch prompt now fits the fallback model  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-07-13 |
+| **Branch** | `fix-groq-413` → PR to `main` |
+| **Goal** | Cloud log showed `Groq HTTP 413` on llama-3.1-8b-instant — the fallback died exactly when needed (70b rate-limited), degrading chunks to RAW. |
+
+### Built
+- Chunk size 10→**6**, per-item content 1500→**700** chars — the batch prompt now fits the smaller fallback model's request limit as well.
+
+### Tested (gate)
+- `pytest` **135/135** (+ `test_batch_prompt_fits_the_small_fallback_model`: captures real prompts — ≤6 items/chunk, <9000 chars).
+- Cloud-log context: the "Oh no" crash itself was a **Streamlit Cloud hot-update segfault** (process died mid code-pull at 08:48; the app ran fine before it) — resolved by a Reboot, not a code defect. The 429 storms are daily free-tier quota exhaustion; fail-fast-to-RAW behaved as designed (boot completed, no hang).
+
+**Gate: PASS.**

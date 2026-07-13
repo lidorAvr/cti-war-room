@@ -924,7 +924,11 @@ class AIBatchProcessor:
 
         if not unique_items: return []
 
-        chunk_size = 10
+        # Chunk size + per-item content are bounded so the batch prompt fits the
+        # SMALLER fallback model too: with 10×1500 chars the llama-3.1-8b-instant
+        # fallback died with HTTP 413 (payload too large) exactly when it was
+        # needed (70b rate-limited), silently degrading chunks to RAW.
+        chunk_size = 6
         results = []
 
         system_instruction = """
@@ -959,7 +963,7 @@ class AIBatchProcessor:
 
             # --- AI path (only if a key is configured) ---
             if self.key:
-                batch_text = "\n".join([f"ID:{idx} | Title: {x['title']} | Content: {x['summary'][:1500]}" for idx, x in enumerate(chunk)])
+                batch_text = "\n".join([f"ID:{idx} | Title: {x['title']} | Content: {x['summary'][:700]}" for idx, x in enumerate(chunk)])
                 prompt = f"{system_instruction}\n\nDATA:\n{batch_text}"
 
                 res = await query_groq_api(self.key, prompt, model="llama-3.3-70b-versatile", json_mode=True)
