@@ -50,7 +50,7 @@ def clean_html(raw_html):
     cleanr = re.compile('<.*?>')
     return re.sub(cleanr, '', str(raw_html)).replace('"', '&quot;').strip()
 
-def get_feed_card_html(row, date_str):
+def get_feed_card_html(row, date_str, ioc_count=0):
     sev = row['severity'].lower()
     badge_bg, badge_color, border_color = "rgba(100, 116, 139, 0.2)", "#cbd5e1", "rgba(100, 116, 139, 0.3)"
     if "critical" in sev or "high" in sev: badge_bg, badge_color, border_color = "rgba(220, 38, 38, 0.2)", "#fca5a5", "#ef4444"
@@ -72,6 +72,7 @@ def get_feed_card_html(row, date_str):
     summary = _txt.replace('\n', '<br>').strip()
     title = str(row['title']).replace('\n', ' ').strip()
     raw_badge = ('<div style="background: rgba(148,163,184,0.12); color:#94a3b8; border:1px solid #475569; padding:2px 10px; border-radius:99px; font-size:0.7rem;">RAW · no AI</div>' if is_raw else '')
+    ioc_badge = (f'<div style="background: rgba(245,158,11,0.15); color:#fcd34d; border:1px solid #b45309; padding:2px 10px; border-radius:99px; font-size:0.7rem; font-weight:bold;">🎯 {ioc_count} IOC</div>' if ioc_count else '')
     # dir="auto" lets each item render in its own language direction:
     # Hebrew AI summaries -> RTL, English raw items -> LTR, automatically.
     html = f"""
@@ -81,6 +82,7 @@ def get_feed_card_html(row, date_str):
             <div style="display: flex; gap: 10px;">
                 <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold;">{row['severity'].upper()}</div>
                 <div style="background: rgba(30, 41, 59, 0.5); color: #94a3b8; border: 1px solid #334155; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem;">{row.get('tags', 'General')}</div>
+                {ioc_badge}
                 {raw_badge}
             </div>
         </div>
@@ -216,7 +218,23 @@ else:
 
 st.markdown("---")
 
-tab_feed, tab_strat, tab_tools, tab_map = st.tabs(["🔴 Live Feed", "🗂️ Threat Actors", "🛠️ Investigation Lab", "🌍 Attack Map"])
+tab_feed, tab_ioc, tab_strat, tab_tools, tab_map = st.tabs(["🔴 Live Feed", "🎯 Live IOC", "🗂️ Threat Actors", "🛠️ Investigation Lab", "🌍 Attack Map"])
+
+# IOCs per report (for feed badges/expanders) — one cheap query, grouped in memory
+def load_ioc_map():
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        rows = conn.execute("SELECT report_url, value, ioc_type FROM iocs").fetchall()
+        conn.close()
+        m = {}
+        for url, value, ioc_type in rows:
+            m.setdefault(url, []).append((value, ioc_type))
+        return m
+    except Exception as e:
+        log.debug("ioc map load failed: %s", e)
+        return {}
+
+ioc_map = load_ioc_map()
 
 with tab_feed:
     conn = sqlite3.connect(DB_NAME)
@@ -245,8 +263,66 @@ with tab_feed:
             except Exception as e:
                 log.debug("feed row date render failed: %s", e)
                 date_display = "--/--"
-            st.markdown(get_feed_card_html(row, date_display), unsafe_allow_html=True)
+            row_iocs = ioc_map.get(row['url'], [])
+            st.markdown(get_feed_card_html(row, date_display, ioc_count=len(row_iocs)), unsafe_allow_html=True)
+            if row_iocs:
+                # In-card note: open to view/copy the exact indicators from this report
+                with st.expander(f"🎯 {len(row_iocs)} IOCs extracted from this report — click to view & copy"):
+                    for v, tpe in row_iocs:
+                        st.caption(tpe.upper())
+                        st.code(v, language=None)
     else: st.info("No data yet. The system is collecting intel...")
+
+with tab_ioc:
+    st.markdown("##### 🎯 Real-Time IOC Feed")
+    st.caption("Indicators are extracted **deterministically** (regex + validation) from trusted source text only — never AI-generated — and each links to its source report. Verify context before blocking.")
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        df_ioc = pd.read_sql_query(
+            "SELECT value, ioc_type, severity, tags, israel, source, report_url, report_title, MAX(first_seen) AS first_seen "
+            "FROM iocs GROUP BY value ORDER BY israel DESC, first_seen DESC LIMIT 300", conn)
+        conn.close()
+    except Exception as e:
+        log.warning("ioc feed query failed: %s", e)
+        df_ioc = pd.DataFrame()
+    if not df_ioc.empty:
+        i1, i2, i3 = st.columns(3)
+        i1.metric("Unique IOCs", len(df_ioc))
+        i2.metric("🇮🇱 Israel-priority", int(df_ioc['israel'].sum()))
+        i3.metric("Types", df_ioc['ioc_type'].nunique())
+        f1, f2 = st.columns([3, 1])
+        with f1:
+            f_type = st.radio("IOC type", ["All", "ip", "domain", "url", "sha256", "sha1", "md5", "cve"],
+                              horizontal=True, key="ioc_type_filter")
+        with f2:
+            f_il = st.checkbox("🇮🇱 Israel-related only", key="ioc_il_filter")
+        view = df_ioc
+        if f_type != "All": view = view[view['ioc_type'] == f_type]
+        if f_il: view = view[view['israel'] == 1]
+        st.markdown("---")
+        for _, ir in view.iterrows():
+            c_val, c_meta = st.columns([3, 2])
+            with c_val:
+                st.code(ir['value'], language=None)  # built-in copy button
+            with c_meta:
+                sev = str(ir['severity']).lower()
+                sev_color = "#fca5a5" if ("high" in sev or "critical" in sev) else ("#93c5fd" if "medium" in sev else "#cbd5e1")
+                il_chip = '<span style="background:rgba(59,130,246,0.15); border:1px solid #1d4ed8; color:#93c5fd; padding:1px 8px; border-radius:99px; font-size:0.7rem;">🇮🇱 ISRAEL</span> ' if ir['israel'] else ''
+                try:
+                    seen = pd.to_datetime(ir['first_seen'], utc=True).tz_convert(IL_TZ).strftime('%d/%m %H:%M')
+                except Exception:
+                    seen = "—"
+                st.markdown(
+                    f'<div style="font-size:0.8rem; line-height:1.9;">'
+                    f'<span style="background:rgba(30,41,59,0.6); border:1px solid #334155; color:#94a3b8; padding:1px 8px; border-radius:99px; font-size:0.7rem;">{str(ir["ioc_type"]).upper()}</span> '
+                    f'<span style="color:{sev_color}; font-weight:bold; font-size:0.7rem;">{str(ir["severity"]).upper()}</span> '
+                    f'<span style="background:rgba(30,41,59,0.5); border:1px solid #334155; color:#94a3b8; padding:1px 8px; border-radius:99px; font-size:0.7rem;">{ir["tags"]}</span> '
+                    f'{il_chip}'
+                    f'<br><span style="color:#64748b;">{seen} • {ir["source"]}</span> '
+                    f'<a href="{ir["report_url"]}" target="_blank" style="color:#38bdf8; text-decoration:none; font-size:0.75rem;">source report 🔗</a></div>',
+                    unsafe_allow_html=True)
+    else:
+        st.info("No IOCs extracted yet. They appear automatically as reports with indicators are ingested.")
 
 with tab_strat:
     threats = APTSheetCollector().fetch_threats()

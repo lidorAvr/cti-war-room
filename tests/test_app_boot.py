@@ -42,11 +42,11 @@ def test_app_boots_without_exception(monkeypatch, tmp_path):
     assert len(at.exception) == 0, f"app.py raised on boot: {[e.value for e in at.exception]}"
 
 
-def test_app_renders_four_tabs(monkeypatch, tmp_path):
+def test_app_renders_five_tabs(monkeypatch, tmp_path):
     at = _make_app(monkeypatch, tmp_path)
     at.run()
     assert len(at.exception) == 0, f"app.py raised on boot: {[e.value for e in at.exception]}"
-    assert len(at.tabs) == 4
+    assert len(at.tabs) == 5  # Live Feed, Live IOC, Threat Actors, Investigation Lab, Attack Map
 
 
 def test_app_shows_operations_title(monkeypatch, tmp_path):

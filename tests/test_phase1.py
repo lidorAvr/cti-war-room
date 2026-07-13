@@ -40,7 +40,7 @@ def test_app_boots_without_secrets(monkeypatch, tmp_path):
     at = AppTest.from_file(APP, default_timeout=60)
     at.run()  # deliberately NOT injecting at.secrets
     assert len(at.exception) == 0, f"app crashed without secrets: {[e.value for e in at.exception]}"
-    assert len(at.tabs) == 4
+    assert len(at.tabs) == 5
 
 
 # ------------------------------------------------------------- F2: Gemini gone

@@ -7,6 +7,7 @@ should fall back to their raw source text (like a RAW card) instead of being
 shown as empty bullets.
 """
 import asyncio
+import datetime
 import json
 import os
 import re
@@ -15,7 +16,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import utils  # noqa: E402
 
-RECENT = "2026-06-24T10:00:00+00:00"
+# Dynamic: a hardcoded date silently falls out of init_db()'s 7-day retention
+# window once the calendar passes it (the prune deletes the seeded rows).
+RECENT = datetime.datetime.now(datetime.timezone.utc).isoformat()
 EMPTY_TEMPLATE = "• **תמונת מצב**: <br>• **ממצאים טכניים**: <br>• **משמעויות**:"
 
 

@@ -409,3 +409,32 @@ The Phase-6 retry honored Groq's `Retry-After` header **verbatim**. On daily-quo
 - **Live verify**: fresh-DB boot now **completes in ~64s** (was: hung indefinitely) → 29 cards, **19 AI (new 4-section format) / 10 RAW**, 0 code blocks. AI confirmed working (quota not exhausted).
 
 **Gate: PASS.**
+
+---
+
+## Phase 7 — Real-Time IOC feed  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-07-13 |
+| **Branch** | `feat-ioc-feed` → PR to `main` |
+| **Goal** | Owner: a live IOC tab — newest-first, tagged + severity, Israel-priority, one-click copy, **verified values only (blocking will be based on them)**, and IOC notes on the intel cards themselves. |
+
+### Design principle (the hard requirement)
+IOC values may feed **blocking rules**, so extraction is **fully deterministic** — regex + validation over the **RAW source text only**. AI output (title/summary) is *never* a source of IOC values (an LLM can hallucinate an indicator). Every IOC row links back to its source report for analyst verification.
+
+### Built
+- **`utils.extract_iocs()`** — defang-aware (`hxxp`, `[.]`, `[:]`, `[at]`) extraction of ip / domain / url / md5 / sha1 / sha256 / cve with precision-first validation: public-IP check (`ipaddress.is_global`, trailing `.0/.255` rejected — product versions masquerade as IPs), conservative TLD allowlist (kills `malware.exe` / `utils.py`), and a **domain denylist** (feed publishers, ubiquitous vendors like `github.com`/`google.com`, URL shorteners, Israeli press).
+- **`iocs` table** (+ indexes, UNIQUE(value, report_url)) with severity/tags carried from the report, an **Israel-priority flag** (`is_israel_related`: INCD sources, Hebrew/English Israel+Iran markers, `.il` IOC values), and the same 7-day retention (Israel-priority rows kept).
+- **Pipeline hooks**: `save_reports` → `extract_and_save_iocs` (raw text of each saved report); `backfill_iocs()` on `init_db` covers pre-existing RAW rows (AI rows deliberately skipped); **`_purge_denied_iocs()`** self-heals the table when the denylist grows.
+- **UI — new "🎯 Live IOC" tab** (5 tabs now): metrics (unique / 🇮🇱 / types), type filter + Israel-only filter, rows sorted `israel DESC, first_seen DESC`, each value in `st.code` (**built-in copy button**), type/severity/tags/🇮🇱 chips, timestamp + source + link to the source report.
+- **Feed cards**: a **🎯 N IOC badge** on cards whose report yielded IOCs + an in-card expander ("click to view & copy") with the exact indicators.
+
+### Quality loop proven live
+The first live ingest surfaced `t.co` (Twitter's shortener, leaked from an article link) — precisely the class of false positive the owner warned about. Fix: denylist extended (shorteners + Israeli press) + retroactive purge; verified live that `t.co` was purged while the real `CVE-2026-48939` stayed.
+
+### Tested (gate)
+- `pytest` **112/112** (+ `tests/test_ioc.py` ×21: refang, public-IP/private-IP/version-IP, publisher & shortener & giant denylist, hashes, CVE case, **benign text ⇒ zero IOCs (no invention)**, file-names-not-domains, Israel flag ×4, pipeline save/backfill (**AI rows skipped**), retroactive purge, 5-tab boot, IOC rendered in copyable `st.code`, feed badge). Also fixed 2 stale-date tests (hardcoded dates fell out of the 7-day retention window — recurring lesson: seed test dates dynamically).
+- **Live verify (real ingest + DOM)**: 31 reports → IOC extracted only where genuinely present; Live IOC tab renders with safety caption, metrics, filters; `CVE-2026-48939` shown in **2 copyable `st.code` blocks** (tab + feed expander), **copy button present in each**; 🎯 badge on the source card; `t.co` purged live. (Screenshot tooling still hangs on this app — DOM-based proof, as established.)
+
+**Gate: PASS.**

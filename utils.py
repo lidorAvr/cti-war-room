@@ -204,6 +204,242 @@ def _is_empty_ai_summary(summary):
     t = re.sub(r'[^0-9A-Za-z֐-׿]', '', t)  # keep only Hebrew/Latin letters + digits
     return len(t) < 8
 
+# --- IOC EXTRACTION (deterministic, precision-first) ---
+# IOC values are extracted ONLY from raw source text using regexes + validation —
+# NEVER from AI output. An LLM can hallucinate an indicator, and these values may
+# feed blocking rules, so the extraction path must be fully deterministic. Each
+# IOC is stored with a link to its source report so an analyst can verify it.
+
+# Publisher / ubiquitous-legit domains that must never appear in a blocking feed.
+IOC_DOMAIN_DENYLIST = {
+    # feed publishers (their own links appear inside article text)
+    "bleepingcomputer.com", "thehackernews.com", "malwarebytes.com",
+    "securityweek.com", "securityaffairs.com", "gbhackers.com", "darkreading.com",
+    "paloaltonetworks.com", "unit42.paloaltonetworks.com", "isc.sans.edu",
+    "securelist.com", "talosintelligence.com", "blog.talosintelligence.com",
+    "checkpoint.com", "research.checkpoint.com", "welivesecurity.com",
+    "mandiant.com", "krebsonsecurity.com", "schneier.com", "thedfirreport.com",
+    "pc.co.il", "cybersafe.co.il", "techz.co.il", "geektime.co.il",
+    "t.me", "telegram.org", "rss.app", "feedburner.com", "blogspot.com",
+    "nvd.nist.gov", "cisa.gov", "gov.il",
+    # giants / vendors routinely mentioned in articles
+    "google.com", "microsoft.com", "apple.com", "github.com", "gitlab.com",
+    "twitter.com", "x.com", "facebook.com", "meta.com", "youtube.com",
+    "linkedin.com", "amazon.com", "aws.amazon.com", "cloudflare.com",
+    "wikipedia.org", "fortinet.com", "cisco.com", "samsung.com", "oracle.com",
+    "adobe.com", "vmware.com", "ibm.com", "intel.com", "whatsapp.com",
+    "salesforce.com", "openai.com", "anthropic.com", "groq.com", "streamlit.io",
+    "notion.so", "slack.com", "zoom.us", "dropbox.com", "npmjs.com", "pypi.org",
+    # URL shorteners / social redirectors (article links leak these — never blockable)
+    "t.co", "bit.ly", "goo.gl", "tinyurl.com", "ow.ly", "is.gd", "buff.ly",
+    "lnkd.in", "youtu.be", "wa.me", "fb.me", "amzn.to", "redd.it", "rb.gy",
+    "shorturl.at", "medium.com", "substack.com",
+    # Israeli press (quoted inside Hebrew items)
+    "ynet.co.il", "calcalist.co.il", "haaretz.co.il", "globes.co.il",
+    "n12.co.il", "mako.co.il", "walla.co.il", "jpost.com", "timesofisrael.com",
+}
+
+# Conservative TLD allowlist — a "domain" match with an unlisted TLD is dropped
+# (kills file names like report.pdf and code fragments like utils.py).
+_IOC_TLDS = {
+    "com", "net", "org", "info", "biz", "io", "co", "me", "cc", "ws", "su", "ru",
+    "cn", "ir", "il", "in", "uk", "de", "fr", "nl", "br", "tr", "ua", "kr", "jp",
+    "xyz", "top", "online", "site", "club", "vip", "shop", "app", "dev", "link",
+    "click", "live", "pro", "store", "tech", "cloud", "one", "icu", "buzz",
+    "cyou", "rest", "quest", "sbs", "lol", "zip", "today", "world", "life",
+    "tk", "ml", "ga", "cf", "gq", "pw",
+}
+
+_ISRAEL_MARKERS = ("israel", "israeli", "ישראל", "ישראלי", "מערך הסייבר", "פיקוד העורף",
+                   "idf", 'צה"ל', "iran", "iranian", "איראן")
+
+
+def _refang(text):
+    """Undo common defanging so regexes can match: hxxp->http, [.]/(.)/{.} -> '.',
+    [:]->':', [at]->@. Applied to a COPY used for matching only."""
+    t = text or ""
+    t = re.sub(r'h[xX]{2}ps?', lambda m: m.group(0).lower().replace('xx', 'tt'), t)
+    t = re.sub(r'[\[\({]\s*\.\s*[\]\)}]', '.', t)
+    t = re.sub(r'\[\s*:\s*\]', ':', t)
+    t = re.sub(r'\[\s*at\s*\]', '@', t, flags=re.I)
+    return t
+
+
+def _valid_public_ip(ip_str):
+    # Trailing .0/.255 are rejected: product versions masquerade as IPs
+    # (e.g. "Chrome 120.0.0.0") and network/broadcast addresses aren't C2s.
+    if ip_str.endswith(('.0', '.255')):
+        return False
+    try:
+        ip = ipaddress.ip_address(ip_str)
+        return ip.is_global and not ip.is_multicast
+    except ValueError:
+        return False
+
+
+def _domain_denied(domain):
+    d = domain.lower()
+    return any(d == deny or d.endswith("." + deny) for deny in IOC_DOMAIN_DENYLIST)
+
+
+def extract_iocs(text):
+    """Extract validated IOCs from RAW source text. Returns a list of
+    {'value','type'} dicts, de-duplicated, in order of first appearance.
+    Types: ip / domain / url / md5 / sha1 / sha256 / cve."""
+    if not text:
+        return []
+    t = _refang(str(text))
+    found, seen = [], set()
+
+    def _add(value, ioc_type):
+        key = (value.lower(), ioc_type)
+        if key not in seen:
+            seen.add(key)
+            found.append({"value": value, "type": ioc_type})
+
+    # CVEs (always safe to surface)
+    for cve in re.findall(r'\bCVE-\d{4}-\d{4,7}\b', t, flags=re.I):
+        _add(cve.upper(), "cve")
+
+    # Hashes — strict hex with non-hex boundaries
+    for h, typ in ((r'\b[a-fA-F0-9]{64}\b', "sha256"),
+                   (r'\b[a-fA-F0-9]{40}\b', "sha1"),
+                   (r'\b[a-fA-F0-9]{32}\b', "md5")):
+        for m in re.findall(h, t):
+            _add(m.lower(), typ)
+
+    # URLs — keep only when the host itself is a valid indicator
+    for m in re.findall(r'\bhttps?://[^\s<>"\'\)\]]+', t, flags=re.I):
+        url = m.rstrip('.,;:!?')
+        host = re.sub(r'^https?://', '', url, flags=re.I).split('/')[0].split(':')[0]
+        if _valid_public_ip(host):
+            _add(url, "url"); _add(host, "ip")
+        elif '.' in host and host.rsplit('.', 1)[-1].lower() in _IOC_TLDS and not _domain_denied(host):
+            _add(url, "url"); _add(host.lower(), "domain")
+
+    # Bare IPv4s (regex already bounds octets to 0-255 via validation below)
+    for m in re.findall(r'(?<![\d.])((?:\d{1,3}\.){3}\d{1,3})(?![\d.])', t):
+        if _valid_public_ip(m):
+            _add(m, "ip")
+
+    # Bare domains — valid shape + allowlisted TLD + not denylisted
+    for m in re.findall(
+            r'\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,12})\b', t, flags=re.I):
+        d = m.lower()
+        if d.rsplit('.', 1)[-1] in _IOC_TLDS and not _domain_denied(d) and not _valid_public_ip(d):
+            _add(d, "domain")
+
+    return found
+
+
+def is_israel_related(text, source, ioc_values=()):
+    """Priority flag: item is (or may be) directly relevant to Israel."""
+    if source in ("INCD", "INCD Alerts"):
+        return True
+    low = (text or "").lower()
+    if any(mk in low for mk in _ISRAEL_MARKERS):
+        return True
+    return any(str(v).lower().rstrip('/').endswith('.il') or '.il/' in str(v).lower()
+               for v in ioc_values)
+
+
+def save_iocs(entries):
+    """Persist extracted IOCs. entries: iterable of dicts with keys
+    value/ioc_type/severity/tags/israel/source/report_url/report_title/first_seen."""
+    if not entries:
+        return 0
+    conn = sqlite3.connect(DB_NAME)
+    c, n = conn.cursor(), 0
+    for e in entries:
+        try:
+            c.execute("""INSERT OR IGNORE INTO iocs
+                (value, ioc_type, severity, tags, israel, source, report_url, report_title, first_seen)
+                VALUES (?,?,?,?,?,?,?,?,?)""",
+                (e["value"], e["ioc_type"], e.get("severity", "Medium"), e.get("tags", "General"),
+                 1 if e.get("israel") else 0, e.get("source", ""), e.get("report_url", ""),
+                 e.get("report_title", ""), e.get("first_seen", "")))
+            if c.rowcount > 0:
+                n += 1
+        except Exception as ex:
+            log.warning("failed to save IOC %s: %s", e.get("value"), ex)
+    conn.commit()
+    conn.close()
+    return n
+
+
+def extract_and_save_iocs(raw_items, analyzed):
+    """Bridge the ingest pipeline into the IOC feed: extract from the RAW source
+    text of each saved report (never from the AI summary) and persist, carrying
+    the report's severity/tags plus an Israel-priority flag."""
+    by_url = {r.get("url"): r for r in raw_items if r.get("url")}
+    entries = []
+    for a in analyzed:
+        raw = by_url.get(a.get("url"))
+        if not raw:
+            continue
+        src_text = f"{raw.get('title', '')}\n{raw.get('summary', '')}"
+        iocs = extract_iocs(src_text)
+        if not iocs:
+            continue
+        israel = is_israel_related(src_text, a.get("source", ""), [i["value"] for i in iocs])
+        for i in iocs:
+            entries.append({
+                "value": i["value"], "ioc_type": i["type"],
+                "severity": a.get("severity", "Medium"), "tags": a.get("tags", "General"),
+                "israel": israel, "source": a.get("source", ""),
+                "report_url": a.get("url", ""), "report_title": raw.get("title", ""),
+                "first_seen": a.get("published_at", ""),
+            })
+    return save_iocs(entries)
+
+
+def _purge_denied_iocs():
+    """Remove stored domain/url IOCs whose host is (now) denylisted — keeps the
+    blocking feed clean when the denylist is extended after ingestion."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        rows = conn.execute("SELECT id, value, ioc_type FROM iocs WHERE ioc_type IN ('domain','url')").fetchall()
+        bad = []
+        for rid, value, ioc_type in rows:
+            host = re.sub(r'^https?://', '', str(value), flags=re.I).split('/')[0].split(':')[0]
+            if _domain_denied(host):
+                bad.append((rid,))
+        if bad:
+            conn.executemany("DELETE FROM iocs WHERE id = ?", bad)
+            conn.commit()
+            log.info("purged %d denylisted IOC(s)", len(bad))
+        conn.close()
+    except Exception as e:
+        log.debug("ioc purge failed: %s", e)
+
+
+def backfill_iocs():
+    """One-off/idempotent: extract IOCs from already-stored RAW reports (their
+    summary is the original source text). AI ('News') rows are skipped — their
+    stored text is model output and must not feed the IOC list."""
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        rows = conn.execute(
+            "SELECT source, url, title, summary, severity, tags, published_at "
+            "FROM intel_reports WHERE category = 'Raw'").fetchall()
+        conn.close()
+        entries = []
+        for source, url, title, summary, severity, tags, published_at in rows:
+            src_text = f"{title}\n{summary}"
+            iocs = extract_iocs(src_text)
+            if not iocs:
+                continue
+            israel = is_israel_related(src_text, source, [i["value"] for i in iocs])
+            for i in iocs:
+                entries.append({"value": i["value"], "ioc_type": i["type"],
+                                "severity": severity, "tags": tags, "israel": israel,
+                                "source": source, "report_url": url, "report_title": title,
+                                "first_seen": published_at})
+        return save_iocs(entries)
+    except Exception as e:
+        log.warning("IOC backfill failed: %s", e)
+        return 0
+
 # --- DATE HELPER ---
 def parse_flexible_date(date_obj):
     now = datetime.datetime.now(IL_TZ)
@@ -265,11 +501,36 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_url ON intel_reports(url)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_title ON intel_reports(title)")
 
+    # Live IOC feed — one row per (value, source report); the UI groups by value.
+    c.execute('''CREATE TABLE IF NOT EXISTS iocs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        value TEXT,
+        ioc_type TEXT,
+        severity TEXT,
+        tags TEXT,
+        israel INTEGER DEFAULT 0,
+        source TEXT,
+        report_url TEXT,
+        report_title TEXT,
+        first_seen TEXT,
+        UNIQUE(value, report_url)
+    )''')
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ioc_value ON iocs(value)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_ioc_seen ON iocs(first_seen)")
+
     # Strict cleanup of old data
     limit_regular = (datetime.datetime.now(IL_TZ) - datetime.timedelta(days=HISTORY_DAYS)).isoformat()
     c.execute("DELETE FROM intel_reports WHERE source NOT IN ('INCD', 'DeepWeb') AND published_at < ?", (limit_regular,))
+    # IOCs age out with the same window, except Israel-priority ones (kept like INCD reports)
+    c.execute("DELETE FROM iocs WHERE israel = 0 AND first_seen < ?", (limit_regular,))
     conn.commit()
     conn.close()
+    # Self-heal: when the denylist grows, retroactively purge stored IOCs that
+    # are no longer considered blockable (e.g. a URL shortener that slipped in).
+    _purge_denied_iocs()
+    # Idempotent: make sure IOCs exist for already-stored RAW reports (e.g. after
+    # this upgrade, or a cloud cold-start restoring from feeds without AI).
+    backfill_iocs()
 
 def get_existing_data():
     try:
@@ -711,4 +972,10 @@ def save_reports(raw, analyzed):
             log.warning("failed to save report %s: %s", item.get('url'), e)
     conn.commit()
     conn.close()
+    # Feed the Live IOC tab — extraction runs on the RAW source text (never the
+    # AI summary) and is fully deterministic; safe to base blocking rules on.
+    try:
+        extract_and_save_iocs(raw, analyzed)
+    except Exception as e:
+        log.warning("IOC extraction during save failed: %s", e)
     return cnt
