@@ -438,3 +438,35 @@ The first live ingest surfaced `t.co` (Twitter's shortener, leaked from an artic
 - **Live verify (real ingest + DOM)**: 31 reports → IOC extracted only where genuinely present; Live IOC tab renders with safety caption, metrics, filters; `CVE-2026-48939` shown in **2 copyable `st.code` blocks** (tab + feed expander), **copy button present in each**; 🎯 badge on the source card; `t.co` purged live. (Screenshot tooling still hangs on this app — DOM-based proof, as established.)
 
 **Gate: PASS.**
+
+---
+
+## Hotfix — Bilingual tagging & the empty Israel filter  ✅ PASS
+
+| | |
+|---|---|
+| **Date** | 2026-07-13 |
+| **Branch** | `fix-tagging-bilingual` → PR to `main` |
+| **Goal** | Owner: "selecting ISRAEL shows no items; items lack proper tags." |
+
+### Reproduced first — live DB proof
+`SELECT tags, COUNT(*)` on the live DB: **53/53 rows tagged 'General'**, 52 Medium, **0 INCD rows** → every tag filter except All/General returned nothing. Owner exactly right.
+
+### Root causes (four, compounding)
+1. **English-only keywords** — roughly half the feed is Hebrew (INCD, Cyber News IL, People & Computers); Hebrew items could never match, so they all fell to General/Medium.
+2. **AI items classified from their own Hebrew output** — `analyze_batch` ran `_determine_tag_severity` on the Groq summary (Hebrew), hiding the English keywords of the source; every AI item became General/Medium.
+3. **Too-narrow keyword lists** — "flaw", "stealer", "botnet", "scam" etc. matched nothing.
+4. **The newest-first per-run cap deferred INCD** — telegram alert dates are old, so a fresh boot ingested 40 newer items and no INCD → nothing tagged Israel at all.
+
+### Built
+- **Bilingual + broader keyword sets** in `_determine_tag_severity` (Hebrew: כופרה/פישינג/דיוג/התחזות/חולשה/נוזקה/ישראל/איראן…; English additions: flaw, stealer, botnet, scam, spyware…). `INCD Alerts` now gets the INCD treatment (Israel + High), and is exempt from retention like INCD.
+- **AI items are classified from the RAW source text**, not the model's Hebrew output.
+- **`retag_reports()` self-heal** on `init_db`: idempotently recomputes tag+severity for stored rows with the current rules (fixes existing DBs, incl. the cloud).
+- **INCD-priority inside the per-run cap** (`perform_update` sorts INCD sources first, then newest) — national-CERT alerts are never deferred.
+- **Robust filter**: tags normalized on read (blank→General, legacy Hebrew values→English), case-insensitive compare; feed radios got stable keys; card chips guard against null tags/severity.
+
+### Tested (gate)
+- `pytest` **122/122** (+ `tests/test_tagging.py` ×10: Hebrew ransomware→Malware/High, Hebrew phishing, Hebrew Israel, חולשה→Vulnerabilities, flaw/stealer now match, INCD Alerts→Israel/High, **AI item tagged from raw text**, retag self-heal, INCD survives the cap, **UI end-to-end: select Israel radio → Israel cards render, General card excluded**). Updated one stale characterization test that had pinned the old broken behavior (ransomware→General).
+- **Live verify (real DOM, real DB)**: retag transformed the live DB from `{General: 53}` to **Israel 19 / Vulnerabilities 9 / Malware 7 / Phishing 3 / General 46**, INCD rows 0→**19**; clicking the **Israel** filter now shows **10 cards, all Israel/HIGH** (fresh INCD alerts) — previously zero.
+
+**Gate: PASS.**

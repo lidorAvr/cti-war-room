@@ -51,7 +51,7 @@ def clean_html(raw_html):
     return re.sub(cleanr, '', str(raw_html)).replace('"', '&quot;').strip()
 
 def get_feed_card_html(row, date_str, ioc_count=0):
-    sev = row['severity'].lower()
+    sev = str(row['severity'] or 'Medium').lower()
     badge_bg, badge_color, border_color = "rgba(100, 116, 139, 0.2)", "#cbd5e1", "rgba(100, 116, 139, 0.3)"
     if "critical" in sev or "high" in sev: badge_bg, badge_color, border_color = "rgba(220, 38, 38, 0.2)", "#fca5a5", "#ef4444"
     elif "medium" in sev: badge_bg, badge_color, border_color = "rgba(59, 130, 246, 0.2)", "#93c5fd", "#3b82f6"
@@ -80,8 +80,8 @@ def get_feed_card_html(row, date_str, ioc_count=0):
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
             <div style="font-family: 'Rubik'; font-size: 0.85rem; color: #94a3b8;">{date_str} • <b style="color: #e2e8f0;">{row['source']}</b></div>
             <div style="display: flex; gap: 10px;">
-                <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold;">{row['severity'].upper()}</div>
-                <div style="background: rgba(30, 41, 59, 0.5); color: #94a3b8; border: 1px solid #334155; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem;">{row.get('tags', 'General')}</div>
+                <div style="background: {badge_bg}; color: {badge_color}; border: 1px solid {border_color}; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem; font-weight: bold;">{sev.upper()}</div>
+                <div style="background: rgba(30, 41, 59, 0.5); color: #94a3b8; border: 1px solid #334155; padding: 2px 10px; border-radius: 99px; font-size: 0.75rem;">{row.get('tags') or 'General'}</div>
                 {ioc_badge}
                 {raw_badge}
             </div>
@@ -124,9 +124,13 @@ async def perform_update(status_container=None):
     raw_to_process = [r for r in raw if r['url'] not in existing_urls]
     # Bound the per-run AI workload: a large backlog (e.g. a fresh/empty DB on a
     # cloud cold-start) would otherwise hang the boot for minutes on free-tier
-    # rate limits. Newest first; the rest are summarized on the next sync /
-    # 15-min auto-refresh.
-    raw_to_process.sort(key=lambda r: r.get('date') or '', reverse=True)
+    # rate limits. INCD (national CERT) items are ingested FIRST even though
+    # their telegram dates are older — otherwise the newest-first cap deferred
+    # them and the Israel filter came up empty; then newest first. The rest are
+    # summarized on the next sync / 15-min auto-refresh.
+    raw_to_process.sort(
+        key=lambda r: (r.get('source') in AIBatchProcessor.INCD_SOURCES, r.get('date') or ''),
+        reverse=True)
     raw_to_process = raw_to_process[:MAX_AI_ITEMS_PER_RUN]
 
     if raw_to_process:
@@ -243,13 +247,18 @@ with tab_feed:
     if not df.empty:
         df['published_at'] = pd.to_datetime(df['published_at'], errors='coerce', utc=True)
         df = df.sort_values(by='published_at', ascending=False).drop_duplicates(subset=['url'])
+        # Normalize tags so filtering is robust: legacy Hebrew values (pre-English
+        # UI) map to their English tag, blanks become General.
+        _LEGACY_TAGS = {'ישראל': 'Israel', 'חולשות': 'Vulnerabilities', 'פישינג': 'Phishing',
+                        'נוזקות': 'Malware', 'מחקר': 'Research', 'כללי': 'General'}
+        df['tags'] = df['tags'].fillna('General').replace('', 'General').replace(_LEGACY_TAGS).str.strip()
         c1, c2 = st.columns(2)
         with c1:
             all_tags = ['All', 'Phishing', 'Malware', 'Vulnerabilities', 'Israel', 'Research', 'General']
-            f_tag = st.radio("Filter by tag", all_tags, horizontal=True)
+            f_tag = st.radio("Filter by tag", all_tags, horizontal=True, key="feed_tag_filter")
         with c2:
-            f_sev = st.radio("Severity", ["All", "Critical/High", "Medium", "Low/Info"], horizontal=True)
-        if f_tag != 'All': df = df[df['tags'] == f_tag]
+            f_sev = st.radio("Severity", ["All", "Critical/High", "Medium", "Low/Info"], horizontal=True, key="feed_sev_filter")
+        if f_tag != 'All': df = df[df['tags'].str.casefold() == f_tag.casefold()]
         if "High" in f_sev: df = df[df['severity'].str.contains('Critical|High', case=False)]
         df = cap_per_source(df, PER_SOURCE_CAP)
         for _, row in df.iterrows():
